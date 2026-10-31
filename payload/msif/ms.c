@@ -134,7 +134,13 @@ static int sceMsifPrepareDmaTable(void *buf, uint32_t size, int is_write) {
   return seg;
 }
 
-int ms_read_sector(void *buf, int sector, int count) {
+/* The MS Pro READ/WRITE_DATA command is issued with a single count byte
+ * (see msif_read_sector / msif_write_sector), so a transfer must never
+ * exceed 255 sectors or the card and the DMA engine disagree on the length.
+ * Split every request into chunks well below that limit. */
+#define MS_MAX_SECTORS_PER_CMD 128
+
+static int ms_read_chunk(void *buf, int sector, int count) {
   int res;
 
   res = sceMsifPrepareDmaTable(buf, count * MS_SECTOR_SIZE, 0);
@@ -153,16 +159,52 @@ int ms_read_sector(void *buf, int sector, int count) {
   return res;
 }
 
-int ms_write_sector(const void *buf, int sector, int count) {
+static int ms_write_chunk(const void *buf, int sector, int count) {
   int res;
 
   res = sceMsifPrepareDmaTable((void *)buf, count * MS_SECTOR_SIZE, 1);
   if (res < 0)
     return res;
 
-  res = msif_write_sector(sector, count, g_adma_descs);
-  if (res < 0)
-    return res;
+  return msif_write_sector(sector, count, g_adma_descs);
+}
 
-  return res;
+int ms_read_sector(void *buf, int sector, int count) {
+  char *p = buf;
+  int res;
+
+  if (sector < 0 || count < 0)
+    return -1;
+
+  while (count > 0) {
+    int n = MIN(count, MS_MAX_SECTORS_PER_CMD);
+    res = ms_read_chunk(p, sector, n);
+    if (res != 0)
+      return res < 0 ? res : -1;
+    p += n * MS_SECTOR_SIZE;
+    sector += n;
+    count -= n;
+  }
+
+  return 0;
+}
+
+int ms_write_sector(const void *buf, int sector, int count) {
+  const char *p = buf;
+  int res;
+
+  if (sector < 0 || count < 0)
+    return -1;
+
+  while (count > 0) {
+    int n = MIN(count, MS_MAX_SECTORS_PER_CMD);
+    res = ms_write_chunk(p, sector, n);
+    if (res != 0)
+      return res < 0 ? res : -1;
+    p += n * MS_SECTOR_SIZE;
+    sector += n;
+    count -= n;
+  }
+
+  return 0;
 }

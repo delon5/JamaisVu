@@ -12,6 +12,14 @@ unsigned int strlen(const char *s)
 	return len;
 }
 
+size_t strnlen(const char *s, size_t maxlen)
+{
+	size_t len = 0;
+	while (len < maxlen && s[len])
+		len++;
+	return len;
+}
+
 char *strcat(char *s, const char *append)
 {
 	char *pRet = s;

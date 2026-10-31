@@ -9,7 +9,11 @@
 #ifndef __STATE_H__
 #define __STATE_H__
 
-int save_state(const char *path);
-int load_state(const char *path);
+#include "ff.h"
+
+/* Both return JV_OK or a negative JV_ERR_* code. load_state() sets
+ * pargs->applied once it has started modifying the card or memory. */
+int save_state(FATFS *fs, const char *path);
+int load_state(FATFS *fs, const char *path);
 
 #endif

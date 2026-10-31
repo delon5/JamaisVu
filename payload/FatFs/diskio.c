@@ -3,6 +3,7 @@
 #include "ff.h"
 #include "diskio.h"
 #include "ms.h"
+#include "../guard.h"
 
 /* Definitions of physical drive number for each drive */
 #define DEV_MEMORY_CARD		0	/* Memory Card */
@@ -58,14 +59,14 @@ DRESULT disk_read (
 			static BYTE __attribute__((aligned(64))) temp[MS_SECTOR_SIZE];
 			for (LBA_t i = 0; i < count; i++) {
 				if (ms_read_sector(temp, sector + i, 1) != 0)
-					return RES_PARERR;
+					return RES_ERROR;
 				memcpy(buff, temp, MS_SECTOR_SIZE);
 				buff += MS_SECTOR_SIZE;
 			}
 			return RES_OK;
 		} else {
 			if (ms_read_sector(buff, sector, count) != 0)
-				return RES_PARERR;
+				return RES_ERROR;
 			return RES_OK;
 		}
 	}
@@ -90,18 +91,19 @@ DRESULT disk_write (
 {
 	switch (pdrv) {
 	case DEV_MEMORY_CARD:
+		/* All writes go through the sector guard (see guard.h). */
 		if ((uintptr_t)buff & 0x3) {
 			static BYTE __attribute__((aligned(64))) temp[MS_SECTOR_SIZE];
 			for (LBA_t i = 0; i < count; i++) {
 				memcpy(temp, buff, MS_SECTOR_SIZE);
-				if (ms_write_sector(temp, sector + i, 1) != 0)
-					return RES_PARERR;
+				if (guarded_write_sectors(temp, sector + i, 1) != 0)
+					return RES_ERROR;
 				buff += MS_SECTOR_SIZE;
 			}
 			return RES_OK;
 		} else {
-			if (ms_write_sector(buff, sector, count) != 0)
-				return RES_PARERR;
+			if (guarded_write_sectors(buff, sector, count) != 0)
+				return RES_ERROR;
 			return RES_OK;
 		}
 	}

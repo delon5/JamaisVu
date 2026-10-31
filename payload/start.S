@@ -73,6 +73,20 @@ _start:
 
   cmp r0, #0
   bne 1f
+
+  @ Core 0: clear .bss. The resume code only copies .text/.data, so
+  @ without this every zero-initialised global would hold stale memory.
+  ldr r1, =__bss_start
+  ldr r2, =__bss_end
+  mov r3, #0
+3:
+  cmp r1, r2
+  bhs 4f
+  str r3, [r1], #4
+  b 3b
+4:
+  dsb
+
   bl main
 
 1:

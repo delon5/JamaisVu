@@ -37,6 +37,6 @@ extern PayloadArguments *pargs;
 void kscePervasiveMsifSetClock(int clock);
 uint64_t ksceKernelGetSystemTimeWide(void);
 
-int get_mediaid_sector(void);
+int get_mediaid_sector(uint32_t *mbr_crc);
 
 #endif
