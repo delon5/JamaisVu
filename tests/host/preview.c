@@ -76,6 +76,8 @@ int main(int argc, char **argv) {
     strcpy(m.slots[i].titleid, ids[i]);
     strcpy(m.slots[i].date, dates[i]);
     m.slots[i].thumb = m.slots[i].used ? thumbs[i] : NULL;
+    strcpy(m.slots[i].app_ver, "01.02");
+    strcpy(m.slots[i].installed_ver, "01.02");
   }
 
   m.mode = MV_BROWSE;
@@ -116,6 +118,13 @@ int main(int argc, char **argv) {
   frame(argv[3], "10_locked_slot", &m);
   m.slots[2].locked = 0;
   m.slots[4].locked = 0;
+
+  /* game updated since the snapshot: cannot be loaded */
+  strcpy(m.slots[3].installed_ver, "01.03");
+  m.slots[3].outdated = 1;
+  m.selected = 3;
+  frame(argv[3], "11_outdated_slot", &m);
+  m.slots[3].outdated = 0;
 
   /* toast after resuming */
   Canvas t = { toast_px, TOAST_W, TOAST_H };

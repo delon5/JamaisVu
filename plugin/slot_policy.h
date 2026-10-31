@@ -38,4 +38,12 @@
  */
 int slot_policy(int64_t free_bytes, const int *exists, int *locked, int n);
 
+/*
+ * A snapshot may only be loaded into exactly the game version it was taken
+ * from (param.sfo APP_VER, e.g. "01.02"). Both versions must be known and
+ * identical; anything else (an update, a downgrade, an unreadable
+ * param.sfo) refuses the load.
+ */
+int app_versions_match(const char *saved, const char *installed);
+
 #endif

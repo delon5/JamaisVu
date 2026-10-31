@@ -21,49 +21,29 @@
 
 #define SLOT_SUBDIR "data/JamaisVu"
 
-static const char *slot_root(void) {
-  return storage_slot_root() ? storage_slot_root() : "ux0:";
-}
-
+/* Everything JamaisVu writes lives on the official Memory Card. Callers
+ * must check storage_mc_root() != NULL before writing. */
 static const char *mc_root(void) {
-  return storage_mc_root() ? storage_mc_root() : "ux0:";
+  return storage_mc_root() ? storage_mc_root() : "";
 }
 
 void slots_sync(void) {
-  const char *r = slot_root(), *m = mc_root();
-  ksceIoSync(r, 0);
-  if (strcmp(m, r) != 0)
-    ksceIoSync(m, 0);
-  if (strcmp(r, "ux0:") != 0 && strcmp(m, "ux0:") != 0)
-    ksceIoSync("ux0:", 0);
+  if (storage_mc_root())
+    ksceIoSync(storage_mc_root(), 0);
 }
 
 void slot_path(char *out, int len, int slot, const char *ext) {
-  snprintf(out, len, "%s" SLOT_SUBDIR "/slot%d.%s", slot_root(), slot + 1,
+  snprintf(out, len, "%s" SLOT_SUBDIR "/slot%d.%s", mc_root(), slot + 1,
            ext);
 }
 
-void work_os_path(char *out, int len) {
-  snprintf(out, len, "%s" SLOT_SUBDIR "/work.bin", mc_root());
-}
-
-void work_payload_path(char *out, int len) {
-  snprintf(out, len, "ux0:" SLOT_SUBDIR "/work.bin");
-}
-
-/* the file the payload writes: slotN.bin (DIRECT) or work.bin (ARCHIVE) */
-static void target_os_path(char *out, int len, int slot) {
-  if (storage_mode() == STORAGE_ARCHIVE)
-    work_os_path(out, len);
-  else
-    slot_path(out, len, slot, "bin");
+void jv_file_path(char *out, int len, const char *name) {
+  snprintf(out, len, "%s" SLOT_SUBDIR "/%s", mc_root(), name);
 }
 
 void slot_payload_path(char *out, int len, int slot) {
-  if (storage_mode() == STORAGE_ARCHIVE)
-    work_payload_path(out, len);
-  else
-    snprintf(out, len, "ux0:" SLOT_SUBDIR "/slot%d.bin", slot + 1);
+  /* "ux0:" is just the payload FatFs' name for the Memory Card */
+  snprintf(out, len, "ux0:" SLOT_SUBDIR "/slot%d.bin", slot + 1);
 }
 
 #define path_for slot_path
@@ -73,23 +53,14 @@ static int mkdir_ok(const char *path) {
   return (res >= 0 || res == (int)0x80010011 /* EEXIST */) ? 0 : res;
 }
 
-int jv_mkdirs(void) {
-  mkdir_ok("ux0:data");
-  return mkdir_ok(JV_DIR);
-}
-
 int slots_mkdirs(void) {
   static char path[32];
-  const char *roots[2] = { slot_root(), mc_root() };
-  int res = 0;
-  for (int i = 0; i < 2; i++) {
-    snprintf(path, sizeof(path), "%sdata", roots[i]);
-    mkdir_ok(path);
-    snprintf(path, sizeof(path), "%s" SLOT_SUBDIR, roots[i]);
-    if (mkdir_ok(path) < 0)
-      res = -1;
-  }
-  return res;
+  if (!storage_mc_root())
+    return -1;
+  snprintf(path, sizeof(path), "%sdata", mc_root());
+  mkdir_ok(path);
+  snprintf(path, sizeof(path), "%s" SLOT_SUBDIR, mc_root());
+  return mkdir_ok(path);
 }
 
 int64_t slot_file_size(const char *path) {
@@ -107,30 +78,14 @@ typedef struct {
   uint32_t unk;
 } DevInfo;
 
-static int64_t free_space(const char *root) {
+int64_t slot_free_space(void) {
   DevInfo info;
+  if (!storage_mc_root())
+    return -1;
   memset(&info, 0, sizeof(info));
-  if (ksceIoDevctl(root, 0x3001, NULL, 0, &info, sizeof(info)) < 0)
+  if (ksceIoDevctl(mc_root(), 0x3001, NULL, 0, &info, sizeof(info)) < 0)
     return -1;
   return (int64_t)info.free_size;
-}
-
-int64_t slot_free_space(void) {
-  return free_space(slot_root());
-}
-
-int64_t mc_free_space(void) {
-  return free_space(mc_root());
-}
-
-int work_available(void) {
-  static char path[80];
-  work_os_path(path, sizeof(path));
-  if (slot_file_size(path) == JV_SLOT_SIZE)
-    return 1;
-  int64_t avail = mc_free_space();
-  return avail < 0 ||
-         (uint64_t)avail >= (uint64_t)JV_SLOT_SIZE + JV_FREE_SPACE_MARGIN;
 }
 
 int slot_prepare(int slot, void (*progress)(int pct)) {
@@ -139,7 +94,10 @@ int slot_prepare(int slot, void (*progress)(int pct)) {
   void *zero;
   int res = 0;
 
-  target_os_path(path, sizeof(path), slot);
+  if (!storage_mc_root())
+    return JV_ERR_SLOT_IO;
+
+  slot_path(path, sizeof(path), slot, "bin");
 
   if (slot_file_size(path) == JV_SLOT_SIZE)
     return 0;
@@ -147,7 +105,7 @@ int slot_prepare(int slot, void (*progress)(int pct)) {
   /* wrong size (or old format): recreate */
   ksceIoRemove(path);
 
-  int64_t avail = mc_free_space();
+  int64_t avail = slot_free_space();
   if (avail >= 0 &&
       (uint64_t)avail < (uint64_t)JV_SLOT_SIZE + JV_FREE_SPACE_MARGIN)
     return JV_ERR_SLOT_NO_SPACE;
@@ -211,7 +169,10 @@ int slot_stamp(int slot, uint8_t nonce[16]) {
   memset(sector, 0, sizeof(sector));
   memcpy(sector, nonce, 16);
 
-  target_os_path(path, sizeof(path), slot);
+  if (!storage_mc_root())
+    return JV_ERR_SLOT_IO;
+
+  slot_path(path, sizeof(path), slot, "bin");
   SceUID fd = ksceIoOpen(path, SCE_O_WRONLY, 0);
   if (fd < 0)
     return JV_ERR_SLOT_IO;
@@ -239,6 +200,9 @@ int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
 
   path_for(path, sizeof(path), slot, "jvi");
   path_for(tmp, sizeof(tmp), slot, "jvt");
+
+  if (!storage_mc_root())
+    return JV_ERR_SLOT_IO;
 
   info->magic = SLOT_INFO_MAGIC;
   info->version = SLOT_INFO_VERSION;
@@ -303,6 +267,8 @@ int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb) {
 
 int slot_info_remove(int slot) {
   static char path[80];
+  if (!storage_mc_root())
+    return JV_ERR_SLOT_IO;
   path_for(path, sizeof(path), slot, "jvi");
   int res = ksceIoRemove(path);
   slots_sync();
@@ -311,27 +277,16 @@ int slot_info_remove(int slot) {
 
 int slot_file_exists(int slot) {
   static char path[80];
+  if (!storage_mc_root())
+    return 0;
   path_for(path, sizeof(path), slot, "bin");
-  int64_t size = slot_file_size(path);
-  if (storage_mode() == STORAGE_ARCHIVE)
-    return size > 0;
-  return size == JV_SLOT_SIZE;
+  return slot_file_size(path) == JV_SLOT_SIZE;
 }
 
 int slot_is_loadable(int slot) {
-  static char path[80];
   static SlotInfo info;
   static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
-
-  if (storage_mode() == STORAGE_NONE)
-    return 0;
-  if (slot_info_read(slot, &info, thumb) < 0)
-    return 0;
-  path_for(path, sizeof(path), slot, "bin");
-  int64_t size = slot_file_size(path);
-  if (storage_mode() == STORAGE_ARCHIVE)
-    return info.state_len >= 1024 && size == (int64_t)info.state_len;
-  return size == JV_SLOT_SIZE;
+  return slot_file_exists(slot) && slot_info_read(slot, &info, thumb) == 0;
 }
 
 /* --- param.sfo ---------------------------------------------------------- */
@@ -352,69 +307,89 @@ typedef struct {
   uint32_t data_off;
 } SfoEntry;
 
-static int sfo_get_title(const char *path, char *out, int len) {
-  static uint8_t buf[0x4000];
-  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
-  if (fd < 0)
-    return -1;
-  int n = ksceIoRead(fd, buf, sizeof(buf));
-  ksceIoClose(fd);
+/* Finds key in a param.sfo; returns a pointer into buf and its length */
+static const uint8_t *sfo_find(const uint8_t *buf, int n, const char *key,
+                               uint32_t *len) {
+  uint32_t klen = strlen(key) + 1;
 
   if (n < (int)sizeof(SfoHeader))
-    return -1;
-  SfoHeader *h = (SfoHeader *)buf;
+    return NULL;
+  const SfoHeader *h = (const SfoHeader *)buf;
   if (h->magic != 0x46535000 || h->key_table >= (uint32_t)n ||
       h->data_table >= (uint32_t)n || h->count > 256 ||
       sizeof(SfoHeader) + h->count * sizeof(SfoEntry) > (uint32_t)n)
-    return -1;
+    return NULL;
 
-  SfoEntry *e = (SfoEntry *)(buf + sizeof(SfoHeader));
+  const SfoEntry *e = (const SfoEntry *)(buf + sizeof(SfoHeader));
   for (uint32_t i = 0; i < h->count; i++) {
     uint32_t k = h->key_table + e[i].key_off;
     uint32_t d = h->data_table + e[i].data_off;
-    if (k + 6 > (uint32_t)n || d + e[i].len > (uint32_t)n)
+    if (k + klen > (uint32_t)n || d + e[i].len > (uint32_t)n)
       continue;
-    if (memcmp(buf + k, "TITLE", 6) != 0)
+    if (memcmp(buf + k, key, klen) != 0)
       continue;
-
-    /* UTF-8 -> printable ASCII. A few common symbols are spelled out,
-     * anything else non-ASCII is skipped. */
-    const uint8_t *p = buf + d, *end = buf + d + e[i].len;
-    int o = 0, letters = 0;
-    while (p < end && *p && o < len - 5) {
-      if (*p < 0x80) {
-        char ch = (*p == '\n' || *p == '\r' || *p == '\t') ? ' ' : *p;
-        if (ch >= 0x20 && !(ch == ' ' && (o == 0 || out[o - 1] == ' ')))
-          out[o++] = ch;
-        if ((ch | 0x20) >= 'a' && (ch | 0x20) <= 'z')
-          letters++;
-        p++;
-      } else if (p + 2 < end && p[0] == 0xe2 && p[1] == 0x84 && p[2] == 0xa2) {
-        memcpy(out + o, "(TM)", 4); o += 4; p += 3;
-      } else if (p + 1 < end && p[0] == 0xc2 && p[1] == 0xae) {
-        memcpy(out + o, "(R)", 3); o += 3; p += 2;
-      } else {
-        /* skip one UTF-8 sequence */
-        p++;
-        while (p < end && (*p & 0xc0) == 0x80)
-          p++;
-      }
-    }
-    while (o > 0 && out[o - 1] == ' ')
-      o--;
-    out[o] = '\0';
-    return letters >= 2 ? 0 : -1;
+    *len = e[i].len;
+    return buf + d;
   }
-  return -1;
+  return NULL;
 }
 
+static int sfo_read(const char *path, uint8_t *buf, int size) {
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  if (fd < 0)
+    return -1;
+  int n = ksceIoRead(fd, buf, size);
+  ksceIoClose(fd);
+  return n;
+}
+
+static int sfo_get_title(const char *path, char *out, int len) {
+  static uint8_t buf[0x4000];
+  uint32_t vlen;
+  int n = sfo_read(path, buf, sizeof(buf));
+  const uint8_t *p = sfo_find(buf, n, "TITLE", &vlen);
+  if (!p)
+    return -1;
+
+  /* UTF-8 -> printable ASCII. A few common symbols are spelled out,
+   * anything else non-ASCII is skipped. */
+  const uint8_t *end = p + vlen;
+  int o = 0, letters = 0;
+  while (p < end && *p && o < len - 5) {
+    if (*p < 0x80) {
+      char ch = (*p == '\n' || *p == '\r' || *p == '\t') ? ' ' : *p;
+      if (ch >= 0x20 && !(ch == ' ' && (o == 0 || out[o - 1] == ' ')))
+        out[o++] = ch;
+      if ((ch | 0x20) >= 'a' && (ch | 0x20) <= 'z')
+        letters++;
+      p++;
+    } else if (p + 2 < end && p[0] == 0xe2 && p[1] == 0x84 && p[2] == 0xa2) {
+      memcpy(out + o, "(TM)", 4); o += 4; p += 3;
+    } else if (p + 1 < end && p[0] == 0xc2 && p[1] == 0xae) {
+      memcpy(out + o, "(R)", 3); o += 3; p += 2;
+    } else {
+      /* skip one UTF-8 sequence */
+      p++;
+      while (p < end && (*p & 0xc0) == 0x80)
+        p++;
+    }
+  }
+  while (o > 0 && out[o - 1] == ' ')
+    o--;
+  out[o] = '\0';
+  return letters >= 2 ? 0 : -1;
+}
+
+/* An installed update (ux0:patch) is what actually runs, so it is checked
+ * first. These are reads only. */
+static const char *const k_sfo_roots[] = { "ux0:patch", "ux0:app", "gro0:app",
+                                           "ur0:app" };
+
 void lookup_title(const char *titleid, char *out, int len) {
-  static const char *const roots[] = { "ux0:patch", "ux0:app", "gro0:app",
-                                       "ur0:app" };
   static char path[96];
 
-  for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
-    snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", roots[i],
+  for (size_t i = 0; i < sizeof(k_sfo_roots) / sizeof(k_sfo_roots[0]); i++) {
+    snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", k_sfo_roots[i],
              titleid);
     if (sfo_get_title(path, out, len) == 0)
       return;
@@ -423,4 +398,30 @@ void lookup_title(const char *titleid, char *out, int len) {
   /* No readable name (or a non-Latin one): show the title ID */
   strncpy(out, titleid, len - 1);
   out[len - 1] = '\0';
+}
+
+int lookup_app_ver(const char *titleid, char *out, int len) {
+  static uint8_t buf[0x4000];
+  static char path[96];
+
+  for (size_t i = 0; i < sizeof(k_sfo_roots) / sizeof(k_sfo_roots[0]); i++) {
+    uint32_t vlen;
+    snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", k_sfo_roots[i],
+             titleid);
+    int n = sfo_read(path, buf, sizeof(buf));
+    const uint8_t *v = n > 0 ? sfo_find(buf, n, "APP_VER", &vlen) : NULL;
+    if (!v)
+      continue;
+
+    /* "01.02": digits and dots only, NUL-terminated within the entry */
+    int o = 0;
+    for (uint32_t k = 0; k < vlen && v[k]; k++) {
+      if (!((v[k] >= '0' && v[k] <= '9') || v[k] == '.') || o >= len - 1)
+        return -1;
+      out[o++] = (char)v[k];
+    }
+    out[o] = '\0';
+    return o > 0 ? 0 : -1;
+  }
+  return -1;
 }

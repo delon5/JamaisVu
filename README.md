@@ -18,17 +18,10 @@ On any firmware without a verified offset table, the plugin installs no filesyst
 
 ## Requirements
 
-- The official Sony Memory Card, inserted and mounted (as ux0, uma0 or xmc0). The payload only talks to the Memory Card hardware, so a Memory Card is needed even if you use other storage. The plugin finds out which mount is the Memory Card by writing a probe file through each mount and reading it back from the card's raw device.
-- **Where slots go, uma0 first:**
-
-  | Your setup | Slots are kept on | How |
-  | --- | --- | --- |
-  | Memory Card = ux0, no uma0 | Memory Card | written directly |
-  | Memory Card = uma0 (ux0 = SD2Vita/PSVSD/USB) | uma0 (the Memory Card) | written directly; the games' savedata on ux0 is **not** rolled back by a load |
-  | Memory Card = ux0, uma0 = SD2Vita/PSVSD/USB stick (e.g. Vita TV) | **uma0** | the payload saves into one working file on the Memory Card, then the plugin copies it to uma0 (and back, verified, before a load). Adds about a minute; the Memory Card needs 768 MB free for the working file |
-
-- **704 MB of free space per slot** (on the Memory Card, or for uma0 copies on uma0). Each slot on the Memory Card is a fixed-size file that is created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free.
-- **Slots unlock with free space** on the storage that holds them. Slots you have already used stay available. Each new slot needs 704 MB: about 1 GB free unlocks one slot, 1.5 GB two, and so on. Locked slots show a padlock.
+- **An official Sony Memory Card.** JamaisVu writes **only** to the official Memory Card: slot files, slot info, thumbnails and `status.txt`. It never writes to an SD2Vita, PSVSD, USB stick or the internal storage. Ideally use a card dedicated to savestates, so the worst a failure can cost is savestates. The card may be mounted as ux0, or as uma0/xmc0 when a storage plugin (StorageMgr, YAMT, gamesd) put an SD2Vita/PSVSD/USB stick on ux0. JamaisVu reads the system's mount table to find which mount is the card (device `sdstor0:xmc-…`); finding it writes nothing.
+  - Savedata is only rolled back by a load when it lives on the Memory Card, i.e. when the card is ux0. With an SD2Vita/PSVSD as ux0, a load restores the game but **not** its savedata (the load prompt says so).
+- **704 MB of free space on the Memory Card per slot.** Each slot is a fixed-size file that is created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free.
+- **Slots unlock with free space** on the Memory Card. Slots you have already used stay available. Each new slot needs 704 MB: about 1 GB free unlocks one slot, 1.5 GB two, and so on. Locked slots show a padlock.
 
 ## Installation
 
@@ -53,9 +46,11 @@ Press **SELECT + UP** to open the slot menu. The game keeps running underneath b
 | □ | Load the selected slot (asks first) |
 | ○ | Close |
 
-Each slot shows a thumbnail of the game screen at the moment you saved, the game's name, its title ID and the date.
+Each slot shows a thumbnail of the game screen at the moment you saved, the game's name, its title ID, its version and the date.
 
-- **Saving** blacks out the screen for about a minute while memory is written to the Memory Card (`data/JamaisVu/slotN.bin`, or the working file `work.bin` when slots live on a non-Memory-Card uma0, followed by the copy to uma0). Afterwards the game continues, and a message confirms the save or explains why it failed.
+**A snapshot only loads into the exact game version it was taken with.** The version (`APP_VER` from the game's `param.sfo`, or from its installed update) is stored with the slot. If the game has been updated (e.g. 01.01 → 01.02) or downgraded since, the slot is marked and cannot be loaded.
+
+- **Saving** blacks out the screen for about a minute while memory is written to `data/JamaisVu/slotN.bin` on the Memory Card. Afterwards the game continues, and a message confirms the save or explains why it failed.
 - **Loading** works from inside a game and from the **LiveArea**. Saving does not: Save only appears when a running game is on screen, and this is checked again right before the save starts. A game suspended in the background doesn't count, so the LiveArea/shell can never be snapshotted.
 - During save and load **the game card LED is on**. If it **blinks rapidly**, see [If a load fails](#if-a-load-fails).
 

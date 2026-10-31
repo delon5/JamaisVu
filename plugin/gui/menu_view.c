@@ -330,7 +330,8 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
       if (m->can_save && !m->slots[m->selected].locked) {
         labels[n] = "Save"; icons[n] = ICON_CROSS; n++;
       }
-      if (m->can_load && m->slots[m->selected].used) {
+      if (m->can_load && m->slots[m->selected].used &&
+          !m->slots[m->selected].outdated) {
         labels[n] = "Load"; icons[n] = ICON_SQUARE; n++;
       }
       labels[n] = "Close";  icons[n] = ICON_CIRCLE; n++;
@@ -363,18 +364,31 @@ static void draw_details(Canvas *c, const MenuModel *m) {
   switch (m->mode) {
     case MV_BROWSE:
       if (s->used) {
-        char info[64];
+        char info[96];
         info[0] = '\0';
-        sappend(info, sizeof(info), s->titleid);
-        if (s->date[0]) {
-          sappend(info, sizeof(info), "   ");
-          sappend(info, sizeof(info), s->date);
+        if (s->outdated) {
+          sappend(info, sizeof(info), "Game updated: v");
+          sappend(info, sizeof(info), s->app_ver);
+          sappend(info, sizeof(info), " -> v");
+          sappend(info, sizeof(info),
+                  s->installed_ver[0] ? s->installed_ver : "?");
+          sappend(info, sizeof(info), " - this snapshot can't be loaded");
+        } else {
+          sappend(info, sizeof(info), s->titleid);
+          if (s->app_ver[0]) {
+            sappend(info, sizeof(info), "   v");
+            sappend(info, sizeof(info), s->app_ver);
+          }
+          if (s->date[0]) {
+            sappend(info, sizeof(info), "   ");
+            sappend(info, sizeof(info), s->date);
+          }
         }
         cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y,
                          s->title[0] ? s->title : s->titleid, C_TEXT,
                          MENU_W - 48);
         cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y, info,
-                         C_TEXT_DIM, MENU_W - 48);
+                         s->outdated ? C_ERROR : C_TEXT_DIM, MENU_W - 48);
       } else if (s->locked) {
         cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y,
                          "Not enough free space", C_TEXT_DIM, MENU_W - 48);

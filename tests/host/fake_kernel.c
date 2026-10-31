@@ -23,6 +23,7 @@
 #include "diskio.h"
 #include "fake_kernel.h"
 #include "fake_ctl.h"
+#include "storage.h"
 
 /* os_* = the renamed read-write FatFs */
 FRESULT os_f_mount(FATFS *fs, const TCHAR *path, BYTE opt);
@@ -344,6 +345,49 @@ int ksceIoDevctl(const char *dev, unsigned int cmd, void *indata, int inlen,
   return 0;
 }
 
+/* --- mount table (sceIoFindMountPoint) ------------------------------------ */
+
+static int host_has_root(const char *root) {
+  for (int i = 0; i < g_nhosts; i++)
+    if (!strcmp(g_hosts[i].root, root)) return 1;
+  return 0;
+}
+
+JvIoMountPoint *fk_find_mount_point(int id) {
+  static JvIoDevice devs[3];
+  static JvIoMountPoint mps[3];
+  static const char *const MC = "sdstor0:xmc-lp-ign-userext";
+  int k;
+  const char *root, *blk;
+
+  switch (id) {
+    case 0x800: /* ux0 */
+      k = 0; root = "ux0:";
+      blk = !strcmp(fk_mc_mount, root) ? MC
+          : host_has_root(root) ? "sdstor0:gcd-lp-ign-entire" : MC;
+      break;
+    case 0xF00: /* uma0 */
+      k = 1; root = "uma0:";
+      blk = !strcmp(fk_mc_mount, root) ? MC : "sdstor0:uma-pp-act-a";
+      break;
+    case 0xE00: /* xmc0: always the Memory Card in the system table */
+      k = 2; root = "xmc0:";
+      blk = MC;
+      break;
+    default:
+      return NULL;
+  }
+  memset(&devs[k], 0, sizeof(devs[k]));
+  memset(&mps[k], 0, sizeof(mps[k]));
+  devs[k].dev = root;
+  devs[k].blkdev = blk;
+  devs[k].id = id;
+  mps[k].id = id;
+  mps[k].dev = &devs[k];
+  mps[k].dev2 = &devs[k];
+  return &mps[k];
+}
+
 /* --- memory / time ------------------------------------------------------- */
 
 static void *g_blocks[64];
@@ -379,6 +423,11 @@ int fk_blocks_in_use(void) {
   int n = 0;
   for (int i = 1; i < 64; i++) n += g_blocks[i] != NULL;
   return n;
+}
+
+int fk_card_has(const char *fatfs_path) {
+  FILINFO fno;
+  return os_ready() && os_f_stat(fatfs_path, &fno) == FR_OK;
 }
 
 int fk_fds_in_use(void) {

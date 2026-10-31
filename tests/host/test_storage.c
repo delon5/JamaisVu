@@ -1,9 +1,14 @@
-/* Host tests for plugin/storage.c + plugin/slots.c: Memory Card detection,
- * where slots go (uma0 first), and the ARCHIVE copy to/from uma0.
+/* Host tests for plugin/storage.c + plugin/slots.c:
+ *  - the Memory Card is found from the mount table, in every layout
+ *  - detection never writes anything
+ *  - every file JamaisVu writes lands on the official Memory Card and
+ *    nowhere else (SD2Vita / PSVSD / USB storage stays untouched)
+ *  - game version (param.sfo APP_VER) lookup and matching
  *
  * usage: test_storage card.img workdir
  */
 
+#include <dirent.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,19 +16,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "ff.h"
 #include "fake_kernel.h"
 #include "fake_ctl.h"
-#include "../../JamaisVu.h"
-#include "../../payload/crc32.h"
 #include "storage.h"
 #include "slots.h"
 
-/* the os_* (read-write) FatFs, for inspecting the card like the OS would */
-FRESULT os_f_open(FIL *fp, const TCHAR *path, BYTE mode);
-FRESULT os_f_close(FIL *fp);
-FRESULT os_f_lseek(FIL *fp, FSIZE_t ofs);
-FRESULT os_f_stat(const TCHAR *path, FILINFO *fno);
+JvIoMountPoint *fk_find_mount_point(int id);
 
 static int failures, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { failures++; \
@@ -31,92 +29,186 @@ static int failures, checks;
   printf("\n"); } } while (0)
 
 static uint8_t *pristine;
-static char workdir[256], d_ux0[300], d_uma0[300];
+static char d_ux0[300], d_uma0[300];
 
 static void rm_rf(const char *dir) {
-  char cmd[600];
-  snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-  if (system(cmd)) {}
+  DIR *d = opendir(dir);
+  struct dirent *e;
+  char p[700];
+  if (!d) return;
+  while ((e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+    struct stat st;
+    if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) rm_rf(p);
+    else unlink(p);
+  }
+  closedir(d);
+  rmdir(dir);
 }
 
-static void scenario(const char *name, const char *mc_mount, int mc_present,
-                     int sd_ux0, int usb_uma0) {
+static int count_entries(const char *dir) {
+  DIR *d = opendir(dir);
+  struct dirent *e;
+  char p[700];
+  int n = 0;
+  if (!d) return 0;
+  while ((e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    n++;
+    snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+    struct stat st;
+    if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode)) n += count_entries(p);
+  }
+  closedir(d);
+  return n;
+}
+
+static void scenario(const char *name, const char *mc_mount, int sd_ux0,
+                     int usb_uma0) {
   printf("%s\n", name);
   fk_reset();
   memcpy(fk_mc_image, pristine, (size_t)fk_mc_sectors * 512);
   strcpy(fk_mc_mount, mc_mount);
-  fk_mc_present = mc_present;
+  fk_mc_present = mc_mount[0] != 0;
   rm_rf(d_ux0);
   rm_rf(d_uma0);
   mkdir(d_ux0, 0777);
   mkdir(d_uma0, 0777);
   if (sd_ux0) fk_add_host_mount("ux0:", d_ux0);
   if (usb_uma0) fk_add_host_mount("uma0:", d_uma0);
-  fk_host_free = 4ll << 30;
-}
-
-static int host_file_exists(const char *dir, const char *rel) {
-  char p[600];
-  snprintf(p, sizeof(p), "%s/%s", dir, rel);
-  return access(p, F_OK) == 0;
-}
-
-static int64_t host_file_size(const char *dir, const char *rel) {
-  char p[600];
-  struct stat s;
-  snprintf(p, sizeof(p), "%s/%s", dir, rel);
-  return stat(p, &s) == 0 ? s.st_size : -1;
 }
 
 static int card_has(const char *path) {
-  FILINFO fno;
-  return os_f_stat(path, &fno) == FR_OK;
+  return fk_card_has(path);
 }
 
-static void no_probes_left(void) {
-  CHECK(!card_has("ux0:data/JamaisVu/probe.bin"), "probe left on card");
-  CHECK(!host_file_exists(d_ux0, "data/JamaisVu/probe.bin"), "probe left on ux0 dir");
-  CHECK(!host_file_exists(d_uma0, "data/JamaisVu/probe.bin"), "probe left on uma0 dir");
+/* detection must not write anything anywhere */
+static const char *detect_readonly(void) {
+  uint8_t *before = malloc((size_t)fk_mc_sectors * 512);
+  memcpy(before, fk_mc_image, (size_t)fk_mc_sectors * 512);
+  int a = count_entries(d_ux0), b = count_entries(d_uma0);
+  const char *root = storage_detect();
+  CHECK(!memcmp(before, fk_mc_image, (size_t)fk_mc_sectors * 512),
+        "detection wrote to the Memory Card");
+  CHECK(count_entries(d_ux0) == a && count_entries(d_uma0) == b,
+        "detection wrote to other storage");
+  free(before);
+  return root;
 }
 
-/* What the payload does: write the state straight into the work file's
- * clusters on the card, bypassing the OS. */
-static void raw_write_work(const uint8_t *data, uint32_t len) {
-  static DWORD tbl[256];
-  FIL f;
-  CHECK(os_f_open(&f, "ux0:data/JamaisVu/work.bin", FA_READ) == FR_OK,
-        "open work.bin");
-  tbl[0] = 256;
-  f.cltbl = tbl;
-  CHECK(os_f_lseek(&f, CREATE_LINKMAP) == FR_OK, "linkmap");
-  FATFS *fs = f.obj.fs;
-  uint32_t off = 0;
-  for (DWORD *t = &tbl[1]; *t && off < len; t += 2) {
-    uint64_t sec = fs->database + (uint64_t)(t[1] - 2) * fs->csize;
-    uint64_t bytes = (uint64_t)t[0] * fs->csize * 512;
-    uint32_t n = (uint32_t)(len - off < bytes ? len - off : bytes);
-    memcpy(fk_mc_image + sec * 512, data + off, n);
-    off += n;
+/* Every write path JamaisVu has: folders, slot file, token, slot info.
+ * Afterwards the other storage must still be completely empty. */
+static void exercise_writes(int slot) {
+  static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
+  static char want[64];
+  SlotInfo info;
+  uint8_t nonce[16];
+
+  CHECK(slots_mkdirs() == 0, "mkdirs");
+  CHECK(slot_prepare(slot, NULL) == 0, "prepare");
+  CHECK(slot_stamp(slot, nonce) == 0, "stamp");
+  memset(&info, 0, sizeof(info));
+  strcpy(info.titleid, "PCSE00123");
+  strcpy(info.title, "Test Game");
+  strcpy(info.app_ver, "01.02");
+  CHECK(slot_info_write(slot, &info, thumb) == 0, "info write");
+  CHECK(slot_is_loadable(slot), "loadable");
+  CHECK(slot_file_exists(slot), "exists");
+  {
+    SlotInfo back;
+    CHECK(slot_info_read(slot, &back, thumb) == 0 &&
+          !strcmp(back.app_ver, "01.02"), "version stored with the slot");
   }
-  f.cltbl = NULL;
-  os_f_close(&f);
-  CHECK(off == len, "work.bin too small for test state");
+  slots_sync(); /* must not recurse */
+
+  snprintf(want, sizeof(want), "ux0:data/JamaisVu/slot%d.bin", slot + 1);
+  CHECK(card_has(want), "slot file is on the Memory Card");
+  snprintf(want, sizeof(want), "ux0:data/JamaisVu/slot%d.jvi", slot + 1);
+  CHECK(card_has(want), "slot info is on the Memory Card");
+  CHECK(count_entries(d_ux0) == 0, "something was written to ux0 storage (SD card)");
+  CHECK(count_entries(d_uma0) == 0, "something was written to uma0 storage (USB)");
+
+  CHECK(slot_info_remove(slot) == 0, "info remove");
+  CHECK(!slot_is_loadable(slot), "removed info -> not loadable");
 }
 
-static uint8_t *make_state(uint32_t data_size, uint32_t seed, uint32_t *len) {
-  uint32_t used = (1024 + data_size + 511) & ~511u;
-  uint8_t *buf = calloc(1, used);
-  SaveStateHeader *h = (SaveStateHeader *)buf;
-  for (uint32_t i = 512; i < used; i++)
-    buf[i] = (uint8_t)((i * 2654435761u) >> 24 ^ seed);
-  h->magic = SAVESTATE_MAGIC;
-  h->version = SAVESTATE_VERSION;
-  h->header_size = sizeof(SaveStateHeader);
-  h->data_offset = 1024;
-  h->data_size = data_size;
-  h->header_crc = crc32_update(0, h, offsetof(SaveStateHeader, header_crc));
-  *len = used;
-  return buf;
+/* --- param.sfo ----------------------------------------------------------- */
+
+static void mkdirs_os(const char *path) {
+  char p[256];
+  for (size_t i = 0; path[i]; i++) {
+    if (path[i] == '/') {
+      memcpy(p, path, i);
+      p[i] = 0;
+      ksceIoMkdir(p, 0777);
+    }
+  }
+}
+
+/* writes a minimal param.sfo with TITLE and APP_VER through the "OS" */
+static void write_sfo(const char *path, const char *title, const char *ver) {
+  uint8_t buf[512];
+  memset(buf, 0, sizeof(buf));
+  const char *keys[2] = { "APP_VER", "TITLE" };
+  const char *vals[2] = { ver, title };
+  uint32_t key_table = 20 + 2 * 16, data_table, koff = 0, doff = 0;
+  data_table = key_table + 16;
+  memcpy(buf, "\0PSF", 4);
+  buf[4] = 1; buf[5] = 1;
+  memcpy(buf + 8, &key_table, 4);
+  memcpy(buf + 12, &data_table, 4);
+  uint32_t count = 2;
+  memcpy(buf + 16, &count, 4);
+  for (int i = 0; i < 2; i++) {
+    uint8_t *e = buf + 20 + i * 16;
+    uint16_t ko = koff, fmt = 0x0204;
+    uint32_t len = strlen(vals[i]) + 1, max = 64;
+    memcpy(e, &ko, 2);
+    memcpy(e + 2, &fmt, 2);
+    memcpy(e + 4, &len, 4);
+    memcpy(e + 8, &max, 4);
+    memcpy(e + 12, &doff, 4);
+    strcpy((char *)buf + key_table + koff, keys[i]);
+    koff += strlen(keys[i]) + 1;
+    strcpy((char *)buf + data_table + doff, vals[i]);
+    doff += max;
+  }
+  mkdirs_os(path);
+  SceUID fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  CHECK(fd >= 0, "write sfo %s", path);
+  ksceIoWrite(fd, buf, data_table + doff);
+  ksceIoClose(fd);
+}
+
+static void test_versions(void) {
+  char ver[8], title[64];
+
+  scenario("game version checks (param.sfo APP_VER)", "ux0:", 0, 0);
+  CHECK(lookup_app_ver("PCSE00123", ver, sizeof(ver)) < 0,
+        "no game installed -> no version");
+
+  write_sfo("ux0:app/PCSE00123/sce_sys/param.sfo", "Test Game", "01.01");
+  CHECK(lookup_app_ver("PCSE00123", ver, sizeof(ver)) == 0 &&
+        !strcmp(ver, "01.01"), "base game version: %s", ver);
+  lookup_title("PCSE00123", title, sizeof(title));
+  CHECK(!strcmp(title, "Test Game"), "title %s", title);
+
+  write_sfo("ux0:patch/PCSE00123/sce_sys/param.sfo", "Test Game", "01.02");
+  CHECK(lookup_app_ver("PCSE00123", ver, sizeof(ver)) == 0 &&
+        !strcmp(ver, "01.02"), "installed update wins: %s", ver);
+
+  write_sfo("ux0:app/PCSE00999/sce_sys/param.sfo", "Odd", "1.0a");
+  CHECK(lookup_app_ver("PCSE00999", ver, sizeof(ver)) < 0,
+        "malformed version rejected");
+
+  CHECK(app_versions_match("01.02", "01.02"), "same version loads");
+  CHECK(!app_versions_match("01.01", "01.02"), "update blocks load");
+  CHECK(!app_versions_match("01.02", "01.01"), "downgrade blocks load");
+  CHECK(!app_versions_match("01.02", "01.020"), "prefix is not a match");
+  CHECK(!app_versions_match("01.02", ""), "unknown installed version blocks load");
+  CHECK(!app_versions_match("", ""), "unknown saved version blocks load");
+  CHECK(!app_versions_match(NULL, "01.02"), "missing version blocks load");
 }
 
 int main(int argc, char **argv) {
@@ -133,178 +225,67 @@ int main(int argc, char **argv) {
   if (fread(pristine, 1, size, f) != (size_t)size) return 2;
   fclose(f);
 
-  snprintf(workdir, sizeof(workdir), "%s", argv[2]);
-  snprintf(d_ux0, sizeof(d_ux0), "%s/sd_ux0", workdir);
-  snprintf(d_uma0, sizeof(d_uma0), "%s/usb_uma0", workdir);
+  snprintf(d_ux0, sizeof(d_ux0), "%s/sd_ux0", argv[2]);
+  snprintf(d_uma0, sizeof(d_uma0), "%s/usb_uma0", argv[2]);
 
-  static char path[640];
-  StorageMode m;
+  static char path[128];
+  const char *root;
 
-  /* ------------------------------------------------------------------ */
-  scenario("Memory Card as ux0, no uma0", "ux0:", 1, 0, 0);
-  m = storage_detect();
-  CHECK(m == STORAGE_DIRECT, "mode %d", m);
-  CHECK(storage_mc_root() && !strcmp(storage_mc_root(), "ux0:"), "mc root");
-  CHECK(storage_slot_root() && !strcmp(storage_slot_root(), "ux0:"), "slot root");
+  storage_set_mount_lookup(fk_find_mount_point);
+
+  scenario("Memory Card as ux0, no uma0", "ux0:", 0, 0);
+  root = detect_readonly();
+  CHECK(root && !strcmp(root, "ux0:"), "root %s", root ? root : "(null)");
   slot_payload_path(path, sizeof(path), 2);
   CHECK(!strcmp(path, "ux0:data/JamaisVu/slot3.bin"), "payload path %s", path);
-  CHECK(slots_mkdirs() == 0, "mkdirs");
-  CHECK(slot_prepare(2, NULL) == 0, "prepare");
-  CHECK(card_has("ux0:data/JamaisVu/slot3.bin"), "slot file on card");
-  slots_sync(); /* must not recurse */
-  no_probes_left();
+  exercise_writes(2);
 
-  /* ------------------------------------------------------------------ */
-  scenario("Memory Card as uma0, SD2Vita as ux0", "uma0:", 1, 1, 0);
-  m = storage_detect();
-  CHECK(m == STORAGE_DIRECT, "mode %d", m);
-  CHECK(storage_mc_root() && !strcmp(storage_mc_root(), "uma0:"), "mc root %s", storage_mc_root());
-  CHECK(storage_slot_root() && !strcmp(storage_slot_root(), "uma0:"), "slot root");
-  CHECK(slots_mkdirs() == 0, "mkdirs");
-  CHECK(slot_prepare(0, NULL) == 0, "prepare");
-  CHECK(card_has("ux0:data/JamaisVu/slot1.bin"), "slot file on the card (uma0)");
-  CHECK(!host_file_exists(d_ux0, "data/JamaisVu/slot1.bin"), "slot file on the SD card");
-  slots_sync();
-  no_probes_left();
+  scenario("Memory Card as ux0, USB stick/SD2Vita as uma0", "ux0:", 0, 1);
+  root = detect_readonly();
+  CHECK(root && !strcmp(root, "ux0:"), "root %s", root ? root : "(null)");
+  exercise_writes(0);
 
-  /* ------------------------------------------------------------------ */
-  scenario("Memory Card as ux0, USB/SD2Vita as uma0 (archive)", "ux0:", 1, 0, 1);
-  m = storage_detect();
-  CHECK(m == STORAGE_ARCHIVE, "mode %d", m);
-  CHECK(storage_mc_root() && !strcmp(storage_mc_root(), "ux0:"), "mc root");
-  CHECK(storage_slot_root() && !strcmp(storage_slot_root(), "uma0:"), "slot root");
-  no_probes_left();
-  slot_payload_path(path, sizeof(path), 1);
-  CHECK(!strcmp(path, "ux0:data/JamaisVu/work.bin"), "payload path %s", path);
-  CHECK(slots_mkdirs() == 0, "mkdirs");
-  CHECK(work_available(), "work available");
-  CHECK(slot_prepare(1, NULL) == 0, "prepare work");
-  CHECK(card_has("ux0:data/JamaisVu/work.bin"), "work.bin on card");
-  CHECK(!host_file_exists(d_uma0, "data/JamaisVu/slot2.bin"), "no slot yet");
+  scenario("Memory Card as uma0, SD2Vita/PSVSD as ux0", "uma0:", 1, 0);
+  root = detect_readonly();
+  CHECK(root && !strcmp(root, "uma0:"), "root %s", root ? root : "(null)");
+  slot_payload_path(path, sizeof(path), 0);
+  CHECK(!strcmp(path, "ux0:data/JamaisVu/slot1.bin"), "payload path %s", path);
+  exercise_writes(1);
+
+  scenario("Memory Card as xmc0, SD2Vita as ux0, USB as uma0", "xmc0:", 1, 1);
+  root = detect_readonly();
+  CHECK(root && !strcmp(root, "xmc0:"), "root %s", root ? root : "(null)");
+  exercise_writes(4);
+
+  scenario("no Memory Card (SD2Vita as ux0, USB as uma0)", "", 1, 1);
+  root = detect_readonly();
+  printf("  -> \"%s\"\n", storage_reason());
+  CHECK(root == NULL, "must not find a Memory Card");
   {
+    static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
+    SlotInfo info;
     uint8_t nonce[16];
-    CHECK(slot_stamp(1, nonce) == 0, "stamp work");
+    memset(&info, 0, sizeof(info));
+    CHECK(slots_mkdirs() < 0, "mkdirs must refuse");
+    CHECK(slot_prepare(0, NULL) < 0, "prepare must refuse");
+    CHECK(slot_stamp(0, nonce) < 0, "stamp must refuse");
+    CHECK(slot_info_write(0, &info, thumb) < 0, "info write must refuse");
+    CHECK(!slot_is_loadable(0) && !slot_file_exists(0), "nothing to load");
+    slots_sync();
+    CHECK(count_entries(d_ux0) == 0 && count_entries(d_uma0) == 0,
+          "nothing may be written without a Memory Card");
   }
 
-  uint32_t len1, len2, alen = 0, acrc = 0;
-  uint8_t *st1 = make_state(3 * 1024 * 1024 + 77, 0x11, &len1);
-  raw_write_work(st1, len1);
-  int r = storage_archive_from_work(1, &alen, &acrc, NULL);
-  CHECK(r == 0, "archive: %d", r);
-  CHECK(alen == len1, "archived length %u vs %u", alen, len1);
-  CHECK(acrc == crc32_update(0, st1, len1), "archived crc");
-  CHECK(host_file_size(d_uma0, "data/JamaisVu/slot2.bin") == len1, "slot2.bin size");
-  CHECK(!host_file_exists(d_uma0, "data/JamaisVu/slot2.tmp"), "tmp left");
-  {
-    FILE *g;
-    snprintf(path, sizeof(path), "%s/data/JamaisVu/slot2.bin", d_uma0);
-    g = fopen(path, "rb");
-    uint8_t *got = malloc(len1);
-    CHECK(g && fread(got, 1, len1, g) == len1 && !memcmp(got, st1, len1),
-          "slot2.bin content");
-    if (g) fclose(g);
-    free(got);
-  }
-  SlotInfo info;
-  static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
-  memset(&info, 0, sizeof(info));
-  strcpy(info.titleid, "PCSE00123");
-  info.state_len = alen;
-  info.state_crc = acrc;
-  CHECK(slot_info_write(1, &info, thumb) == 0, "info write");
-  CHECK(slot_is_loadable(1), "slot loadable");
-  CHECK(slot_file_exists(1), "slot exists");
+  scenario("mount table unavailable", "ux0:", 0, 0);
+  storage_set_mount_lookup(NULL);
+  root = detect_readonly();
+  CHECK(root == NULL, "no lookup -> no card");
+  storage_set_mount_lookup(fk_find_mount_point);
 
-  /* a later save overwrote the work file */
-  uint8_t *st2 = make_state(1024 * 1024, 0x22, &len2);
-  raw_write_work(st2, len2);
+  test_versions();
 
-  /* load: slot 2 back into the work file, verified raw */
-  r = storage_restore_to_work(1, info.state_len, info.state_crc, NULL);
-  CHECK(r == 0, "restore: %d", r);
-  {
-    /* read the card the way the payload does */
-    FIL wf;
-    UINT br;
-    uint8_t *got = malloc(len1);
-    CHECK(os_f_open(&wf, "ux0:data/JamaisVu/work.bin", FA_READ) == FR_OK, "open");
-    os_f_read(&wf, got, len1, &br);
-    os_f_close(&wf);
-    CHECK(br == len1 && !memcmp(got, st1, len1), "work.bin holds slot 2 again");
-    free(got);
-  }
-
-  /* damaged slot copy on uma0: refused */
-  {
-    snprintf(path, sizeof(path), "%s/data/JamaisVu/slot2.bin", d_uma0);
-    FILE *g = fopen(path, "r+b");
-    fseek(g, 5000, SEEK_SET);
-    fputc(0x5a ^ st1[5000], g);
-    fclose(g);
-    r = storage_restore_to_work(1, info.state_len, info.state_crc, NULL);
-    printf("  %-44s -> %d\n", "restore from damaged slot", r);
-    CHECK(r == JV_ERR_ARCHIVE_BAD, "damaged slot: %d", r);
-    g = fopen(path, "r+b");
-    fseek(g, 5000, SEEK_SET);
-    fputc(st1[5000], g);
-    fclose(g);
-  }
-
-  /* failed new save (no valid header): old slot untouched */
-  {
-    uint8_t junk[2048];
-    memset(junk, 0xee, sizeof(junk));
-    raw_write_work(junk, sizeof(junk));
-    uint32_t l, c;
-    r = storage_archive_from_work(1, &l, &c, NULL);
-    printf("  %-44s -> %d\n", "archive of an invalid work file", r);
-    CHECK(r == JV_ERR_ARCHIVE_BAD, "invalid work: %d", r);
-    CHECK(host_file_size(d_uma0, "data/JamaisVu/slot2.bin") == len1 &&
-          slot_is_loadable(1), "old slot must survive a failed save");
-  }
-
-  /* not enough space on uma0: old slot untouched */
-  {
-    raw_write_work(st2, len2);
-    fk_host_free = len2; /* less than len + margin */
-    uint32_t l, c;
-    r = storage_archive_from_work(1, &l, &c, NULL);
-    printf("  %-44s -> %d\n", "archive without space on uma0", r);
-    CHECK(r == JV_ERR_SLOT_NO_SPACE, "no space: %d", r);
-    CHECK(slot_is_loadable(1), "old slot must survive");
-    fk_host_free = 4ll << 30;
-  }
-
-  /* overwrite slot 2 with the second state */
-  r = storage_archive_from_work(1, &alen, &acrc, NULL);
-  CHECK(r == 0 && alen == len2, "re-archive: %d", r);
-  CHECK(host_file_size(d_uma0, "data/JamaisVu/slot2.bin") == len2, "slot replaced");
-  slots_sync();
   CHECK(fk_blocks_in_use() == 0, "memory blocks leaked: %d", fk_blocks_in_use());
   CHECK(fk_fds_in_use() == 0, "file descriptors leaked: %d", fk_fds_in_use());
-  free(st1);
-  free(st2);
-
-  /* ------------------------------------------------------------------ */
-  scenario("no Memory Card inserted", "", 0, 1, 1);
-  m = storage_detect();
-  printf("  -> mode %d, \"%s\"\n", m, storage_reason());
-  CHECK(m == STORAGE_NONE && strstr(storage_reason(), "no Memory Card"), "no card");
-  CHECK(!slot_is_loadable(0), "nothing loadable");
-  no_probes_left();
-
-  scenario("Memory Card inserted but not mounted", "", 1, 1, 1);
-  m = storage_detect();
-  printf("  -> mode %d, \"%s\"\n", m, storage_reason());
-  CHECK(m == STORAGE_NONE && strstr(storage_reason(), "not mounted"), "unmounted card");
-  no_probes_left();
-
-  scenario("Memory Card as xmc0, SD2Vita as ux0, no uma0", "xmc0:", 1, 1, 0);
-  m = storage_detect();
-  CHECK(m == STORAGE_DIRECT && !strcmp(storage_mc_root(), "xmc0:"), "xmc0");
-
-  CHECK(fk_blocks_in_use() == 0, "memory blocks leaked");
-  CHECK(fk_fds_in_use() == 0, "file descriptors leaked");
 
   printf("\n%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;

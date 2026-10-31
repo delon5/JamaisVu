@@ -37,6 +37,9 @@ typedef struct {
   char titleid[16];
   char title[128];
   char date[32];          /* preformatted, e.g. "2026-10-31  21:40" */
+  char app_ver[8];        /* game version of the snapshot, e.g. "01.02" */
+  char installed_ver[8];  /* game version installed now ("" = unknown) */
+  int outdated;           /* versions differ: the slot cannot be loaded */
   const uint32_t *thumb;  /* JV_THUMB_W * JV_THUMB_H pixels, or NULL */
 } MenuSlot;
 

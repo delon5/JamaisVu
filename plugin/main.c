@@ -260,9 +260,11 @@ int jv_request(int mode, int slot, const uint8_t *nonce) {
 
   pargs.slot = slot;
   slot_payload_path(pargs.path, sizeof(pargs.path), slot);
-  /* savedata lives on ux0: only back it up if ux0 is the Memory Card */
-  pargs.backup_savedata = storage_mc_root() &&
-                          strcmp(storage_mc_root(), "ux0:") == 0;
+  /* savedata lives on ux0: only back it up if ux0 is the Memory Card
+   * (JamaisVu never writes to any other storage) */
+  if (!storage_mc_root())
+    return -1;
+  pargs.backup_savedata = strcmp(storage_mc_root(), "ux0:") == 0;
   pargs.slot_size = JV_SLOT_SIZE;
   if (nonce)
     memcpy(pargs.slot_nonce, nonce, sizeof(pargs.slot_nonce));
@@ -360,6 +362,22 @@ static int arm(void) {
   if (fs_init(g_fw) < 0) {
     g_disabled_reason = "could not hook the exFAT driver";
     return -1;
+  }
+
+  /* the system's mount table tells which mount is the Memory Card */
+  {
+    tai_module_info_t info;
+    uintptr_t fn = 0;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    if (taiGetModuleInfoForKernel(KERNEL_PID, "SceIofilemgr", &info) < 0 ||
+        module_get_offset(KERNEL_PID, info.modid, 0,
+                          g_fw->iofilemgr_find_mount_point, &fn) < 0 ||
+        !fn) {
+      g_disabled_reason = "mount table lookup not found";
+      return -1;
+    }
+    storage_set_mount_lookup((MountLookupFn)fn);
   }
 
   if (patch_syscon() < 0) {

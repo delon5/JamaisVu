@@ -27,3 +27,13 @@ int slot_policy(int64_t free_bytes, const int *exists, int *locked, int n) {
 
   return usable;
 }
+
+int app_versions_match(const char *saved, const char *installed) {
+  int i;
+  if (!saved || !installed || !saved[0] || !installed[0])
+    return 0;
+  for (i = 0; saved[i] && installed[i]; i++)
+    if (saved[i] != installed[i])
+      return 0;
+  return saved[i] == installed[i];
+}

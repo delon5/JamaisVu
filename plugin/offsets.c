@@ -56,6 +56,9 @@ static const FwOffsets g_table[] = {
     .verified = VERIFIED_DUMP,
     .iofilemgr_clear_ncache = 0x5a39,
     .iofilemgr_invalidate_buff_cache = 0x126f9,
+    .iofilemgr_find_mount_point = 0x138c1, /* dump: loops over 32 mount
+                                              entries of 0x38 bytes at
+                                              data+0x1a90 comparing id */
     IOFILEMGR_DATA_365,
     EXFAT_365,
   },
@@ -65,6 +68,7 @@ static const FwOffsets g_table[] = {
     .verified = VERIFIED_HARDWARE, /* tested by the original author */
     .iofilemgr_clear_ncache = 0x3a11,
     .iofilemgr_invalidate_buff_cache = 0x106d1,
+    .iofilemgr_find_mount_point = 0x182f5, /* as used by StorageMgr/usbmc */
     IOFILEMGR_DATA_365,
     EXFAT_365,
   },
@@ -74,6 +78,7 @@ static const FwOffsets g_table[] = {
     .verified = VERIFIED_NONE,
     .iofilemgr_clear_ncache = 0x3a11,
     .iofilemgr_invalidate_buff_cache = 0x106d1,
+    .iofilemgr_find_mount_point = 0x182f5, /* as used by StorageMgr/usbmc */
     IOFILEMGR_DATA_365,
     EXFAT_365,
   },
@@ -84,6 +89,7 @@ static const FwOffsets g_table[] = {
     .verified = VERIFIED_NONE,
     .iofilemgr_clear_ncache = 0x3e69,
     .iofilemgr_invalidate_buff_cache = 0x10b29,
+    .iofilemgr_find_mount_point = 0x18735, /* as used by StorageMgr */
     IOFILEMGR_DATA_365,
     EXFAT_365,
   },
@@ -112,6 +118,7 @@ int offsets_usable(const FwOffsets *o, uint32_t exfat_nid, const char **why) {
 
   /* rtc_ctx may legitimately be 0 (start of the data segment). */
   if (!o->iofilemgr_clear_ncache || !o->iofilemgr_invalidate_buff_cache ||
+      !o->iofilemgr_find_mount_point ||
       !o->iofilemgr_num_vnodes || !o->iofilemgr_vnodes ||
       !o->iofilemgr_vnode_size ||
       !o->exfat_mount ||

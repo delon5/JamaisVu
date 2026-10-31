@@ -34,6 +34,7 @@ typedef struct {
   uint32_t iofilemgr_vnodes;
   uint32_t iofilemgr_vnode_size;
   uint32_t iofilemgr_mnt_head;           /* informational, unused */
+  uint32_t iofilemgr_find_mount_point;   /* text: sceIoFindMountPoint(id) */
 
   /* SceExfatfs, text segment */
   uint32_t exfat_mount;                 /* UVFAT_Mount */

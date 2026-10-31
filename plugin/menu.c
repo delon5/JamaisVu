@@ -122,9 +122,7 @@ static const char *result_text(int32_t res) {
     case JV_ERR_MEDIAID:    return "Memory Card layout not recognised";
     case JV_ERR_SAVEDATA:   return "could not back up the savedata";
     case JV_ERR_NOT_MC:     return "slot file is not on the official Memory Card";
-    case JV_ERR_NO_MC:      return "no usable Memory Card";
-    case JV_ERR_ARCHIVE_BAD: return "the slot copy is damaged";
-    case JV_ERR_ARCHIVE_VERIFY: return "Memory Card read-back did not match";
+
     case JV_ERR_SLOT_NO_SPACE: return "not enough free space (704 MB needed)";
     case JV_ERR_SLOT_IO:    return "could not create the slot file";
     default:                return "internal error";
@@ -373,6 +371,7 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   int sel = g_model.selected;
   int used = g_model.slots[sel].used;
   int locked = g_model.slots[sel].locked;
+  int outdated = g_model.slots[sel].outdated;
   ksceKernelUnlockMutex(g_mtx, 1);
 
   if (combo && mode != MV_BUSY) {
@@ -404,6 +403,9 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         else
           set_message(MV_MESSAGE, "Start a game first - the LiveArea "
                       "cannot be saved", -1, 1);
+      } else if ((pressed & SCE_CTRL_SQUARE) && used && outdated) {
+        set_message(MV_MESSAGE, "The game was updated since this snapshot "
+                    "- it can't be loaded", -1, 1);
       } else if ((pressed & SCE_CTRL_SQUARE) && used) {
         set_message(MV_CONFIRM_LOAD, "", -1, 0);
       } else if (pressed & SCE_CTRL_CIRCLE) {
@@ -475,28 +477,24 @@ static void refresh_slots(void) {
   static SlotInfo info;
   int exists[JV_NUM_SLOTS], locked[JV_NUM_SLOTS];
 
-  StorageMode mode = storage_detect();
-  const char *mc = storage_mc_root();
+  const char *mc = storage_detect(); /* read-only */
 
   model_begin();
   g_model.savedata_rolls_back = mc && strcmp(mc, "ux0:") == 0;
   model_end();
 
-  /* free-space safeguard: only as many new slots as fit (slot_policy.h);
-   * in ARCHIVE mode the Memory Card must also hold the working file */
+  /* free-space safeguard: only as many new slots as fit (slot_policy.h) */
   for (int i = 0; i < JV_NUM_SLOTS; i++)
-    exists[i] = mode != STORAGE_NONE && slot_file_exists(i);
-  if (mode == STORAGE_NONE ||
-      (mode == STORAGE_ARCHIVE && !work_available())) {
+    exists[i] = mc && slot_file_exists(i);
+  if (!mc) {
     for (int i = 0; i < JV_NUM_SLOTS; i++)
-      locked[i] = !exists[i];
+      locked[i] = 1;
   } else {
     slot_policy(slot_free_space(), exists, locked, JV_NUM_SLOTS);
   }
 
   for (int i = 0; i < JV_NUM_SLOTS; i++) {
-    int ok = exists[i] && slot_is_loadable(i) &&
-             slot_info_read(i, &info, g_thumbs[i]) == 0;
+    int ok = exists[i] && slot_info_read(i, &info, g_thumbs[i]) == 0;
 
     model_begin();
     MenuSlot *s = &g_model.slots[i];
@@ -509,6 +507,12 @@ static void refresh_slots(void) {
       snprintf(s->date, sizeof(s->date), "%04d-%02d-%02d  %02d:%02d",
                info.year, info.month, info.day, info.hour, info.minute);
       s->thumb = info.has_thumb ? g_thumbs[i] : NULL;
+      memcpy(s->app_ver, info.app_ver, sizeof(s->app_ver));
+      s->app_ver[sizeof(s->app_ver) - 1] = '\0';
+      if (lookup_app_ver(info.titleid, s->installed_ver,
+                         sizeof(s->installed_ver)) < 0)
+        s->installed_ver[0] = '\0';
+      s->outdated = !app_versions_match(s->app_ver, s->installed_ver);
     }
     model_end();
   }
@@ -517,49 +521,18 @@ static void refresh_slots(void) {
 /* Why save/load cannot run right now, or NULL */
 static const char *storage_problem(void) {
   static char msg[112];
-  if (storage_mode() == STORAGE_NONE) {
+  if (!storage_mc_root()) {
     snprintf(msg, sizeof(msg), "Unavailable: %s", storage_reason());
     return msg;
   }
-  if (storage_mode() == STORAGE_ARCHIVE && !work_available())
-    return "The Memory Card needs 768 MB free for the working file";
   return NULL;
-}
-
-static void copy_progress(int pct) {
-  static char msg[96];
-  snprintf(msg, sizeof(msg), "Copying slot %d  %d%%", g_progress_slot + 1,
-           pct);
-  set_message(MV_BUSY, msg, pct, 0);
 }
 
 static void after_resume(void) {
   static char msg[128];
 
   if (g_res_mode == JAMAISVU_MODE_SAVE) {
-    if (g_res_result == JV_OK && storage_mode() == STORAGE_ARCHIVE) {
-      /* the snapshot is in the Memory Card's working file: copy it to its
-       * slot on uma0 (the old slot is replaced only when this succeeds) */
-      uint32_t len = 0, crc = 0;
-      g_progress_slot = g_res_slot;
-      set_message(MV_BUSY, "Copying to uma0...", 0, 0);
-      g_menu_open = 1;
-      int r = storage_archive_from_work(g_res_slot, &len, &crc,
-                                        copy_progress);
-      if (r == 0) {
-        g_pending_info.state_len = len;
-        g_pending_info.state_crc = crc;
-        r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
-      }
-      close_menu();
-      if (r == 0)
-        snprintf(msg, sizeof(msg), "Saved to slot %u (uma0)",
-                 (unsigned)g_res_slot + 1);
-      else
-        snprintf(msg, sizeof(msg), "Save failed: copy to uma0: %s",
-                 result_text(r));
-      toast(msg, r != 0);
-    } else if (g_res_result == JV_OK) {
+    if (g_res_result == JV_OK) {
       int r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
       if (r == 0)
         snprintf(msg, sizeof(msg), "Saved to slot %u", (unsigned)g_res_slot + 1);
@@ -653,12 +626,8 @@ static void do_save(int slot) {
     return;
   }
 
-  /* DIRECT: the slot file itself is overwritten, so the slot stays
-   * "empty" until the save has fully succeeded. ARCHIVE: the payload
-   * writes the working file; the old slot on uma0 stays valid until the
-   * copy of the new snapshot has completed. */
-  if (storage_mode() == STORAGE_DIRECT)
-    slot_info_remove(slot);
+  /* the slot stays "empty" until the save has fully succeeded */
+  slot_info_remove(slot);
 
   memset(&g_pending_info, 0, sizeof(g_pending_info));
   strncpy(g_pending_info.titleid, g_capture_tid,
@@ -666,6 +635,14 @@ static void do_save(int slot) {
   lookup_title(g_capture_tid, g_pending_info.title,
                sizeof(g_pending_info.title));
   g_pending_info.has_thumb = 1;
+
+  /* the snapshot is only valid for this exact game version */
+  if (lookup_app_ver(g_capture_tid, g_pending_info.app_ver,
+                     sizeof(g_pending_info.app_ver)) < 0) {
+    set_message(MV_MESSAGE, "Cannot save: the game's version could not be "
+                "read", -1, 1);
+    return;
+  }
 
   SceDateTime t;
   memset(&t, 0, sizeof(t));
@@ -708,21 +685,15 @@ static void do_load(int slot) {
     return;
   }
 
-  if (storage_mode() == STORAGE_ARCHIVE) {
-    /* bring the snapshot back into the Memory Card's working file and
-     * verify it there before the payload ever sees it */
-    int res;
-    slots_mkdirs();
-    g_progress_slot = slot;
-    res = slot_prepare(slot, prepare_progress);
-    if (res == 0) {
-      set_message(MV_BUSY, "Copying from uma0...", 0, 0);
-      res = storage_restore_to_work(slot, info.state_len, info.state_crc,
-                                    copy_progress);
-    }
-    if (res < 0) {
-      snprintf(msg, sizeof(msg), "Cannot load: %s - nothing was changed",
-               result_text(res));
+  /* only into exactly the game version the snapshot was taken from */
+  {
+    static char installed[8];
+    if (lookup_app_ver(info.titleid, installed, sizeof(installed)) < 0)
+      installed[0] = '\0';
+    if (!app_versions_match(info.app_ver, installed)) {
+      snprintf(msg, sizeof(msg), "Game version changed (v%.7s -> v%s) - "
+               "this snapshot can't be loaded", info.app_ver,
+               installed[0] ? installed : "?");
       set_message(MV_MESSAGE, msg, -1, 1);
       return;
     }
@@ -735,25 +706,33 @@ static void do_load(int slot) {
   run_and_wait(JAMAISVU_MODE_LOAD, slot, NULL);
 }
 
+/* status.txt lives on the Memory Card like everything else JamaisVu
+ * writes; it is only rewritten when its content changed. */
 static void write_status(void) {
-  SceIoStat st;
+  static char path[64], old[1024];
 
-  /* ux0 may not be mounted yet when the plugin starts */
-  for (int i = 0; i < 60; i++) {
-    if (ksceIoGetstat("ux0:", &st) >= 0)
-      break;
+  /* the Memory Card may not be mounted yet when the plugin starts */
+  for (int i = 0; i < 60 && !storage_detect(); i++)
     ksceKernelDelayThread(1000 * 1000);
-  }
-
-  if (jv_mkdirs() < 0)
+  if (!storage_mc_root() || slots_mkdirs() < 0)
     return;
 
-  SceUID fd = ksceIoOpen(JV_DIR "/status.txt",
-                         SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  jv_file_path(path, sizeof(path), "status.txt");
+  int len = strlen(g_status_text), n = -1;
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  if (fd >= 0) {
+    n = ksceIoRead(fd, old, sizeof(old));
+    ksceIoClose(fd);
+  }
+  if (n == len && memcmp(old, g_status_text, len) == 0)
+    return;
+
+  fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
   if (fd < 0)
     return;
-  ksceIoWrite(fd, g_status_text, strlen(g_status_text));
+  ksceIoWrite(fd, g_status_text, len);
   ksceIoClose(fd);
+  slots_sync();
 }
 
 static int worker_thread(SceSize args, void *argp) {

@@ -11,4 +11,7 @@ void fk_reset(void);
 void fk_add_host_mount(const char *root, const char *dir);
 int fk_blocks_in_use(void);
 int fk_fds_in_use(void);
+/* path as FatFs sees the card, e.g. "ux0:data/JamaisVu/slot1.bin" */
+int fk_card_has(const char *fatfs_path);
+
 #endif

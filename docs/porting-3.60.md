@@ -7,6 +7,7 @@
 > | SceExfatfs | `0x23AA294A` | All 13 offsets of 3.65 land on the same functions in 3.60: identical prologues; `sceExfatfsVopUmount` references the shared resource at data+0x80; `UVFAT_ReleaseFnode` reads fnode+0x20c; the patch site 0x140fe is the same `bne.w`. The live shared resource decodes with the 3.65 layout: 0x100 file caches, file cache pointer at +0x5cd0, 0x400 fnodes of 0x290 bytes at +0x5cd8 with real paths, fileSystems every 0x430 bytes. |
 > | SceIofilemgr | `0x9642948C` | `clear_ncache` 0x5a39 and `invalidate_buff_cache` 0x126f9 are function starts. The vnode loop at text+0xcf04 reads the count at data+0x24, the array at data+0x19dc and the size at data+0x19e0 (values 0x400 / heap pointer / 0x100). |
 > | SceRtc | `0x1E923AD1` | Data segment is exactly the 0x1c0-byte RTC context at offset 0. |
+> | SceIofilemgr mount table | `0x9642948C` | `sceIoFindMountPoint` at text+0x138c1 (as used by StorageMgr) loops over 32 entries of 0x38 bytes at data+0x1a90 comparing the id. Decoding the table from the dump gives xmc0 → `sdstor0:xmc-lp-ign-userext`, gro0/grw0 → `sdstor0:gcd-…`, imc0 → `sdstor0:int-lp-ign-userext`, with ux0/uma0 remapped by a storage plugin. JamaisVu uses it (read-only) to find the official Memory Card. |
 
 ## The cause
 
