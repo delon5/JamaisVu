@@ -348,15 +348,16 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   if (!g_menu_open) {
     if (!combo)
       return;
-    if (!jv_armed()) {
-      static char msg[128];
-      snprintf(msg, sizeof(msg), "JamaisVu is disabled: %s",
-               jv_disabled_reason());
-      toast(msg, 1);
-      return;
-    }
+    /* On firmware without verified offsets the menu still opens (preview
+     * mode: browse, thumbnails, input), but save/load are refused. */
     if (!g_busy)
       open_menu();
+    if (!jv_armed()) {
+      static char msg[128];
+      snprintf(msg, sizeof(msg), "Preview only - save/load disabled: %s",
+               jv_disabled_reason());
+      toast(msg, 1);
+    }
     return;
   }
 
@@ -381,6 +382,12 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         else
           g_model.selected = (sel + 1) % JV_NUM_SLOTS;
         model_end();
+      } else if ((pressed & (SCE_CTRL_CROSS | SCE_CTRL_SQUARE)) &&
+                 !jv_armed()) {
+        static char msg[128];
+        snprintf(msg, sizeof(msg), "Disabled on this firmware: %s",
+                 jv_disabled_reason());
+        set_message(MV_MESSAGE, msg, -1, 1);
       } else if (pressed & SCE_CTRL_CROSS) {
         if (locked)
           set_message(MV_MESSAGE, "Not enough free space - each slot needs "
