@@ -16,15 +16,20 @@
 #include <psp2kern/io/stat.h>
 #include <psp2kern/ctrl.h>
 #include <psp2kern/power.h>
-#include <psp2kern/syscon.h>
 #include <taihen.h>
 
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
 
+#include "compat.h"
 #include "main.h"
 #include "fs.h"
+#include "offsets.h"
+#include "slots.h"
+#include "menu.h"
+
+#define JV_VERSION "2.0-dev"
 
 extern int resume_function(void);
 
@@ -43,6 +48,31 @@ uint32_t ori_resume_func_vaddr;
 
 PayloadArguments pargs;
 uint32_t pargs_size = sizeof(PayloadArguments);
+
+static int g_armed = 0;
+static const char *g_disabled_reason = "not started";
+static const FwOffsets *g_fw = NULL;
+static char g_status[1024];
+
+int jv_armed(void) {
+  return g_armed;
+}
+
+const char *jv_disabled_reason(void) {
+  return g_disabled_reason;
+}
+
+/* Virtual -> physical address of a kernel object (ATS1CPR). 0 on fault. */
+static uint32_t va2pa(const volatile void *va) {
+  uint32_t par;
+  __asm__ volatile ("mcr p15, 0, %1, c7, c8, 0\n\t"
+                    "isb\n\t"
+                    "mrc p15, 0, %0, c7, c4, 0\n\t"
+                    : "=r" (par) : "r" (va));
+  if (par & 1)
+    return 0;
+  return (par & 0xfffff000) | ((uint32_t)va & 0xfff);
+}
 
 static void *pa2va(uint32_t pa) {
   uint32_t va = 0;
@@ -97,7 +127,7 @@ static int get_ttbs_and_titleids(void) {
   uint32_t ttbcr;
   uint32_t ttbr0;
   uint32_t ttbr_mask[2];
-  SceUID vector[32];
+  SceUID vector[JV_MAX_PROCESSES];
   SceClass *cls;
   int i;
   int res;
@@ -109,8 +139,12 @@ static int get_ttbs_and_titleids(void) {
   res = _ksceGUIDGetUIDVectorByClass(cls, 8, vector,
                                      sizeof(vector) / sizeof(SceUID),
                                      (int *)&pargs.process_num);
-  if (res < 0)
+  if (res < 0) {
+    pargs.process_num = 0;
     return res;
+  }
+  if (pargs.process_num > JV_MAX_PROCESSES)
+    pargs.process_num = JV_MAX_PROCESSES;
 
   __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2\n\t"
                     "mrc p15, 0, %1, c2, c0, 0\n\t"
@@ -169,22 +203,35 @@ static int savestate_system_event(int resume, int eventid,
         map_memory();
         get_fattime();
 
-        if (pargs.mode == JAMAISVU_MODE_SAVE) {
+        if (pargs.mode == JAMAISVU_MODE_SAVE)
           get_ttbs_and_titleids();
-        } else if (pargs.mode == JAMAISVU_MODE_LOAD) {
-          set_ignore_writedevice();
-        }
+
+        /* NOTE: writes are deliberately NOT blocked here any more. This
+         * image is about to be discarded (load) or kept (save); either way
+         * its final flush must reach the card so the card is consistent
+         * before the payload looks at it. Blocking happens inside the
+         * restored image instead (the payload arms the flag). */
       }
     } else {
       if (eventid == 0x10000) {
         memcpy(&pargs, (void *)PAYLOAD_ARGS_PADDR, sizeof(PayloadArguments));
         memcpy(g_rtc_ctx, pargs.rtc_ctx, SCE_RTC_CTX_SIZE);
       } else if (eventid == 0x100000) {
-        if (pargs.mode == JAMAISVU_MODE_LOAD) {
-          update_filesystem();
-          clear_ignore_writedevice();
+        int stale = 0;
+
+        if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK) {
+          /* We are the restored image and the payload has armed
+           * FS_WRITES_DROPPED. Re-read ux0 from the card, then allow
+           * writes again - unless files that are still open no longer
+           * exist, in which case ux0 stays read-only until reboot rather
+           * than risk writing through stale cluster chains. */
+          stale = update_filesystem();
+          fs_set_write_mode(stale ? FS_WRITES_READ_ONLY : FS_WRITES_ALLOWED);
+        } else if (fs_get_write_mode() == FS_WRITES_DROPPED) {
+          fs_set_write_mode(FS_WRITES_ALLOWED);
         }
 
+        menu_on_resumed(pargs.mode, pargs.result, pargs.slot, stale);
         pargs.mode = JAMAISVU_MODE_NONE;
       }
     }
@@ -193,45 +240,33 @@ static int savestate_system_event(int resume, int eventid,
   return 0;
 }
 
-static char *get_button_string(uint32_t buttons) {
-  if (buttons & SCE_CTRL_SELECT)
-    return "select";
-  else if (buttons & SCE_CTRL_START)
-    return "start";
-  else if (buttons & SCE_CTRL_TRIANGLE)
-    return "triangle";
-  else if (buttons & SCE_CTRL_CIRCLE)
-    return "circle";
-  else if (buttons & SCE_CTRL_CROSS)
-    return "cross";
-  else if (buttons & SCE_CTRL_SQUARE)
-    return "square";
-  return NULL;
-}
+/* Starts a save or load of a slot: fills in the payload arguments and
+ * requests the soft reset during which the payload runs. */
+int jv_request(int mode, int slot) {
+  uint32_t flag_pa;
 
-int (* prev_ctrlp_callback)(int port, SceCtrlData *pad_data, int unk);
-static int ctrlp_callback(int port, SceCtrlData *pad_data, int unk) {
-  if (pad_data->buttons & SCE_CTRL_PSBUTTON) {
-    if (pad_data->buttons & (SCE_CTRL_L1 | SCE_CTRL_R1)) {
-      char *button = get_button_string(pad_data->buttons);
-      if (button) {
-        snprintf(pargs.path, sizeof(pargs.path), "ux0:savestate/state_%s.bin",
-                 button);
-        if (pad_data->buttons & SCE_CTRL_L1) {
-          pargs.mode = JAMAISVU_MODE_LOAD;
-        } else if (pad_data->buttons & SCE_CTRL_R1) {
-          pargs.mode = JAMAISVU_MODE_SAVE;
-        }
-        kscePowerRequestSoftReset();
-      }
+  if (!g_armed || slot < 0 || slot >= JV_NUM_SLOTS)
+    return -1;
 
-      pad_data->buttons &= ~SCE_CTRL_PSBUTTON;
-    }
+  flag_pa = va2pa(fs_write_mode_addr());
+  if (flag_pa == 0)
+    return -1;
+
+  pargs.slot = slot;
+  slot_state_path(pargs.path, sizeof(pargs.path), slot);
+  pargs.slot_size = JV_SLOT_SIZE;
+  pargs.ignore_flag_paddr = flag_pa;
+  pargs.result = JV_ERR_ARGS;
+  pargs.applied = 0;
+  __sync_synchronize();
+  pargs.mode = mode;
+  __sync_synchronize();
+
+  int res = kscePowerRequestSoftReset();
+  if (res < 0) {
+    pargs.mode = JAMAISVU_MODE_NONE;
+    return res;
   }
-
-  if (prev_ctrlp_callback)
-    prev_ctrlp_callback(port, pad_data, unk);
-
   return 0;
 }
 
@@ -259,53 +294,105 @@ static void get_sysmem_nids(void) {
                                  (uintptr_t *)&_ksceGUIDGetUIDVectorByClass);
 }
 
-static void get_rtc_offsets(void) {
+static int get_rtc_offsets(const FwOffsets *o) {
   tai_module_info_t info;
 
   memset(&info, 0, sizeof(tai_module_info_t));
   info.size = sizeof(tai_module_info_t);
-  taiGetModuleInfoForKernel(KERNEL_PID, "SceRtc", &info);
+  if (taiGetModuleInfoForKernel(KERNEL_PID, "SceRtc", &info) < 0)
+    return -1;
 
-  module_get_offset(KERNEL_PID, info.modid, 1, 0, (uintptr_t *)&g_rtc_ctx);
+  return module_get_offset(KERNEL_PID, info.modid, 1, o->rtc_ctx,
+                           (uintptr_t *)&g_rtc_ctx);
 }
 
-static void patch_ctrl(void) {
-  uintptr_t *g_ctrlp_callback;
+static uint32_t module_nid(const char *name) {
   tai_module_info_t info;
-
-  memset(&info, 0, sizeof(tai_module_info_t));
-  info.size = sizeof(tai_module_info_t);
-  taiGetModuleInfoForKernel(KERNEL_PID, "SceCtrl", &info);
-
-  module_get_offset(KERNEL_PID, info.modid, 1,
-                    0xabc, (uintptr_t *)&g_ctrlp_callback);
-
-  prev_ctrlp_callback = (void *)*g_ctrlp_callback;
-  *g_ctrlp_callback = (uintptr_t)ctrlp_callback;
+  memset(&info, 0, sizeof(info));
+  info.size = sizeof(info);
+  if (taiGetModuleInfoForKernel(KERNEL_PID, name, &info) < 0)
+    return 0;
+  return info.module_nid;
 }
 
-static void patch_syscon(void) {
-  taiHookFunctionExportForKernel(KERNEL_PID,
-                                 &ksceSysconSendCommandRef,
-                                 "SceSyscon",
-                                 TAI_ANY_LIBRARY,
-                                 0xE26488B9,
-                                 ksceSysconSendCommandPatched);
+static int patch_syscon(void) {
+  return taiHookFunctionExportForKernel(KERNEL_PID,
+                                        &ksceSysconSendCommandRef,
+                                        "SceSyscon",
+                                        TAI_ANY_LIBRARY,
+                                        0xE26488B9,
+                                        ksceSysconSendCommandPatched);
+}
+
+static int arm(void) {
+  const char *why;
+
+  g_fw = offsets_find(module_nid("SceIofilemgr"));
+  if (!offsets_usable(g_fw, &why)) {
+    g_disabled_reason = why;
+    return -1;
+  }
+
+  get_sysmem_nids();
+  if (!_ksceKernelFindClassByName || !_ksceGUIDGetUIDVectorByClass) {
+    g_disabled_reason = "SceSysmem functions not found";
+    return -1;
+  }
+
+  if (get_rtc_offsets(g_fw) < 0 || !g_rtc_ctx) {
+    g_disabled_reason = "SceRtc context not found";
+    return -1;
+  }
+
+  if (fs_init(g_fw) < 0) {
+    g_disabled_reason = "could not hook the exFAT driver";
+    return -1;
+  }
+
+  if (patch_syscon() < 0) {
+    g_disabled_reason = "could not hook SceSyscon";
+    return -1;
+  }
+
+  if (ksceKernelRegisterSysEventHandler("savestate_system_event",
+                                        savestate_system_event, NULL) < 0) {
+    g_disabled_reason = "could not register the system event handler";
+    return -1;
+  }
+
+  g_disabled_reason = "armed";
+  return 0;
 }
 
 void _start() __attribute__ ((weak, alias ("module_start")));
 int module_start(SceSize args, void *argp) {
   memset(&pargs, 0, sizeof(PayloadArguments));
 
-  get_sysmem_nids();
-  get_rtc_offsets();
-  get_iofilemgr_offsets();
-  patch_exfatfs();
-  patch_syscon();
-  patch_ctrl();
+  g_armed = (arm() == 0);
 
-  ksceKernelRegisterSysEventHandler("savestate_system_event",
-                                    savestate_system_event, NULL);
+  snprintf(g_status, sizeof(g_status),
+           "JamaisVu " JV_VERSION "\n"
+           "status: %s\n"
+           "firmware table: %s\n"
+           "SceIofilemgr NID: 0x%08X\n"
+           "SceExfatfs NID:   0x%08X\n"
+           "SceRtc NID:       0x%08X\n"
+           "SceSysmem NID:    0x%08X\n"
+           "SceCtrl NID:      0x%08X\n"
+           "SceDisplay NID:   0x%08X\n"
+           "\n"
+           "If status is not \"armed\", JamaisVu changes nothing on this\n"
+           "system. See docs/porting-3.60.md.\n",
+           g_armed ? "armed" : g_disabled_reason,
+           g_fw ? g_fw->name : "none",
+           (unsigned)module_nid("SceIofilemgr"),
+           (unsigned)module_nid("SceExfatfs"),
+           (unsigned)module_nid("SceRtc"),
+           (unsigned)module_nid("SceSysmem"),
+           (unsigned)module_nid("SceCtrl"),
+           (unsigned)module_nid("SceDisplay"));
+
+  menu_init(g_status);
 
   return SCE_KERNEL_START_SUCCESS;
 }

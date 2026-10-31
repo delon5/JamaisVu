@@ -40,6 +40,16 @@
 #define FOOTER_Y   252
 #define RULE_Y     172
 
+/* Bounded string append (kernel plugins have no strcat/strcpy). */
+static void sappend(char *dst, int size, const char *src) {
+  int n = 0;
+  while (n < size - 1 && dst[n])
+    n++;
+  while (n < size - 1 && *src)
+    dst[n++] = *src++;
+  dst[n] = '\0';
+}
+
 static void u_to_dec(char *out, unsigned v, int digits) {
   for (int i = digits - 1; i >= 0; i--) {
     out[i] = '0' + v % 10;
@@ -228,11 +238,11 @@ static void draw_counter(Canvas *c, const MenuModel *m) {
   char buf[32] = "SLOT [";
   char num[8];
   u_to_dec(num, m->selected + 1, 3);
-  strcat(buf, num);
-  strcat(buf, "/");
+  sappend(buf, sizeof(buf), num);
+  sappend(buf, sizeof(buf), "/");
   u_to_dec(num, JV_NUM_SLOTS, 3);
-  strcat(buf, num);
-  strcat(buf, "]");
+  sappend(buf, sizeof(buf), num);
+  sappend(buf, sizeof(buf), "]");
   int w = cv_text_width(&font_medium, buf);
   cv_text(c, &font_medium, MENU_W - 24 - w,
           (HEADER_H - font_medium.height) / 2 + 1, buf, C_TEXT);
@@ -308,7 +318,9 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
   switch (m->mode) {
     case MV_BROWSE:
       labels[n] = "Select"; icons[n] = ICON_LEFT; two[n] = 1; n++;
-      labels[n] = "Save";   icons[n] = ICON_CROSS; n++;
+      if (m->can_save) {
+        labels[n] = "Save"; icons[n] = ICON_CROSS; n++;
+      }
       if (m->can_load) {
         labels[n] = "Load"; icons[n] = ICON_SQUARE; n++;
       }
@@ -344,10 +356,10 @@ static void draw_details(Canvas *c, const MenuModel *m) {
       if (s->used) {
         char info[64];
         info[0] = '\0';
-        strcat(info, s->titleid);
+        sappend(info, sizeof(info), s->titleid);
         if (s->date[0]) {
-          strcat(info, "   ");
-          strcat(info, s->date);
+          sappend(info, sizeof(info), "   ");
+          sappend(info, sizeof(info), s->date);
         }
         cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y,
                          s->title[0] ? s->title : s->titleid, C_TEXT,
@@ -358,15 +370,16 @@ static void draw_details(Canvas *c, const MenuModel *m) {
         cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y, "Empty slot",
                          C_TEXT_DIM, MENU_W - 48);
         cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y,
-                         "Press X to save your game here", C_TEXT_DIM,
-                         MENU_W - 48);
+                         m->can_save ? "Press X to save your game here"
+                                     : "Start a game to save here",
+                         C_TEXT_DIM, MENU_W - 48);
       }
       break;
 
     case MV_CONFIRM_SAVE:
-      strcpy(prompt, s->used ? "Overwrite slot " : "Save to slot ");
-      strcat(prompt, num);
-      strcat(prompt, "?");
+      prompt[0] = 0, sappend(prompt, sizeof(prompt), s->used ? "Overwrite slot " : "Save to slot ");
+      sappend(prompt, sizeof(prompt), num);
+      sappend(prompt, sizeof(prompt), "?");
       cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y, prompt, C_TEXT,
                        MENU_W - 48);
       cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y,
@@ -376,9 +389,9 @@ static void draw_details(Canvas *c, const MenuModel *m) {
       break;
 
     case MV_CONFIRM_LOAD:
-      strcpy(prompt, "Load slot ");
-      strcat(prompt, num);
-      strcat(prompt, "?");
+      prompt[0] = 0, sappend(prompt, sizeof(prompt), "Load slot ");
+      sappend(prompt, sizeof(prompt), num);
+      sappend(prompt, sizeof(prompt), "?");
       cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y, prompt, C_TEXT,
                        MENU_W - 48);
       cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y,

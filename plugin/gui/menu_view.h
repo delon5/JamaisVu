@@ -55,6 +55,7 @@ typedef struct {
   int progress;       /* BUSY: 0..100, or -1 for none */
   int is_error;       /* MESSAGE: red text */
   int can_load;       /* 0 hides the load hint */
+  int can_save;       /* 0 in the LiveArea: no game on screen to save */
 } MenuModel;
 
 void menu_view_render(Canvas *c, const MenuModel *m);

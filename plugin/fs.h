@@ -9,6 +9,9 @@
 #ifndef __FS_H__
 #define __FS_H__
 
+#include <stdint.h>
+#include "offsets.h"
+
 typedef struct {
   void *fnode;
   int type;
@@ -33,12 +36,21 @@ typedef struct {
   int isRoot;
 } SearchFile;
 
-void set_ignore_writedevice(void);
-void clear_ignore_writedevice(void);
+/* exFAT write modes */
+#define FS_WRITES_ALLOWED   0
+#define FS_WRITES_DROPPED   1 /* set by the payload in a restored image */
+#define FS_WRITES_READ_ONLY 2 /* after a load with stale open files */
 
-void update_filesystem(void);
+/* Resolves all offsets and installs the exFAT hooks. < 0 on failure, in
+ * which case nothing is left hooked. */
+int fs_init(const FwOffsets *o);
 
-void get_iofilemgr_offsets(void);
-void patch_exfatfs(void);
+void fs_set_write_mode(uint32_t mode);
+uint32_t fs_get_write_mode(void);
+volatile uint32_t *fs_write_mode_addr(void);
+
+/* Re-reads ux0 after a load. Returns the number of files that are still
+ * open but no longer exist (see update_vnodes). */
+int update_filesystem(void);
 
 #endif

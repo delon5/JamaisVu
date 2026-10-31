@@ -19,6 +19,10 @@ int module_get_export_func(SceUID pid, const char *modname, uint32_t libnid,
 int module_get_offset(SceUID pid, SceUID modid, int segidx,
                       size_t offset, uintptr_t *addr);
 
+int jv_armed(void);
+const char *jv_disabled_reason(void);
+int jv_request(int mode, int slot);
+
 extern int (* _ksceKernelFindClassByName)(const char *name, SceClass **cls);
 extern int (* _ksceGUIDGetUIDVectorByClass)(SceClass *cls, int vis_level,
                                             SceUID *vector, int num, int *ret_num);

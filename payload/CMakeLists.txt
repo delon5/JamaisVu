@@ -25,6 +25,8 @@ add_executable(JamaisVu_payload
   start.S
   main.c
   state.c
+  guard.c
+  crc32.c
   gpio.c
   pervasive.c
   spi.c

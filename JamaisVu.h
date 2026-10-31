@@ -57,6 +57,7 @@ typedef struct {
   char titleid[JV_MAX_PROCESSES][32];
   char rtc_ctx[SCE_RTC_CTX_SIZE];
   char path[256];
+  uint32_t slot; /* 0-based slot index, informational for the plugin */
   /* Exact size the plugin pre-allocated for the slot file. The payload
    * refuses to save into a file of any other size. */
   uint32_t slot_size;
@@ -135,6 +136,9 @@ typedef struct {
 } SaveStateHeader;
 
 #define SAVESTATE_MAGIC   0x54535653
+/* Bump whenever the file format, PayloadArguments or the plugin's
+ * resume handling changes: a restored memory image contains the plugin
+ * build that made the snapshot, and it must agree with the payload. */
 #define SAVESTATE_VERSION 2
 
 #define SAVESTATE_MEDIAID_OFFSET 0x200

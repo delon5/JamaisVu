@@ -61,6 +61,7 @@ int main(int argc, char **argv) {
   MenuModel m;
   memset(&m, 0, sizeof(m));
   m.can_load = 1;
+  m.can_save = 1;
   m.progress = -1;
 
   const char *titles[] = { "Persona 4 Golden", "Gravity Rush",
@@ -96,6 +97,16 @@ int main(int argc, char **argv) {
   strcpy(m.message, "Preparing slot 3 (first use only)  42%");
   m.progress = 42;
   frame(argv[3], "5_preparing_slot", &m);
+
+  /* opened from the LiveArea: load only */
+  m.mode = MV_BROWSE;
+  m.can_save = 0;
+  m.progress = -1;
+  m.selected = 2;
+  frame(argv[3], "8_livearea_empty_slot", &m);
+  m.selected = 0;
+  frame(argv[3], "9_livearea_load", &m);
+  m.can_save = 1;
 
   /* toast after resuming */
   Canvas t = { toast_px, TOAST_W, TOAST_H };

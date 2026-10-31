@@ -17,22 +17,19 @@
 #include "main.h"
 #include "fs.h"
 
-int ksceVfsNodeWaitEventFlag(void *vp);
-int ksceVfsNodeSetEventFlag(void *vp);
 int ksceVopInactive(void *vp);
-int ksceVfsFreeVnode(void *vp);
+/* Resolved at runtime: its stub name differs between VitaSDK versions
+ * (ksceVfsFreeVnode / vfsFreeVnode). */
+static int (* vfs_free_vnode)(void *vp);
 
 static int (* UVFAT_Mount)(void *sharedResource, const char *assignName,
                            int mode, uint32_t *args);
-static int (* UVFAT_ReadManagementArea)(void *sharedResource, void *fileSystem,
-                                        int flags);
 static int (* UVFAT_SearchFile_common)(void *sharedResource, void *file,
                                        void *fileSystem, void *fnode,
                                        void *parent_fnode);
 static void *(* UVFAT_GetParentFnode)(void *sharedResource, void *fileSystem,
                                       const char *path);
 static int (* UVFAT_ReleaseFnode)(void *sharedResource, void *fnode);
-static int (* sceExfatfsVopUmount)(void *drive, int unk);
 static int (* cleanup_cluster_cache_area)(void *drive);
 static int (* invalidate_cluster_cache_data)(void *fnode);
 static int (* FreeFpCache)(void *filep);
@@ -41,22 +38,27 @@ static int (* sfree)(void *p, int size);
 static int (* clear_ncache)(void *nc, int unk);
 static int (* invalidate_buff_cache)(void *file, void *vp);
 
-static int (* utf16_to_utf8)(char *dst, int len, short *src);
-
 static uint32_t *g_num_vnodes, *g_vnode_size;
 static uintptr_t *g_vnodes;
-static uintptr_t *g_mnt_head;
 
 static void *g_shared_resource;
+static const FwOffsets *g_off;
 
-static int g_ignore_writedevice = 0;
+/* Write blocking for the exFAT driver (see fs.h). Must stay a plain
+ * 32-bit global: the payload sets it through its physical address inside
+ * the restored memory image. */
+volatile uint32_t g_ignore_writedevice = FS_WRITES_ALLOWED;
 
 static tai_hook_ref_t UVFAT_WriteDevice_Ref;
+static SceUID g_write_hook = -1;
+static SceUID g_mgmt_patch = -1;
+
+#define SCE_ERROR_ERRNO_EROFS 0x8001001E
 
 static void invalidate_file_caches(void) {
-  uint32_t num = *(uint32_t *)(g_shared_resource + 0x295d5c);
-  void *files = *(uintptr_t **)(g_shared_resource + 0x5cd0);
-  for (int i = 0; i < num; i++) {
+  uint32_t num = *(uint32_t *)(g_shared_resource + g_off->sr_num_files);
+  void *files = *(uintptr_t **)(g_shared_resource + g_off->sr_files);
+  for (uint32_t i = 0; i < num; i++) {
     FileCache *filep = (FileCache *)(files + 0x38 * i);
     if (filep->fnode) {
       FreeFpCache(filep);
@@ -69,12 +71,15 @@ static void invalidate_file_caches(void) {
   }
 }
 
+/* Returns < 0 if the file no longer exists, FNODE_UNUSED for empty slots */
+#define FNODE_UNUSED 1
+
 static int update_fnode(void *fnode) {
   int res;
 
   void *fileSystem = *(uintptr_t **)(fnode + 0x20c);
   if (!fileSystem)
-    return -1;
+    return FNODE_UNUSED;
 
   void *drive = *(uintptr_t **)(fileSystem + 0xac);
 
@@ -83,9 +88,7 @@ static int update_fnode(void *fnode) {
     return res;
 
   static SearchFile file;
-  static char utf8_path[0x104];
   memcpy(file.path, fnode, 0x208);
-  utf16_to_utf8(utf8_path, sizeof(utf8_path), (short *)file.path);
 
   file.isRoot = *(uint16_t *)(file.path + 0x00) == '/' &&
                 *(uint16_t *)(file.path + 0x02) == '\0';
@@ -108,14 +111,19 @@ static int update_fnode(void *fnode) {
 }
 
 static void update_fnodes(void) {
-  int num = *(int *)(g_shared_resource + 0x295d54);
+  int num = *(int *)(g_shared_resource + g_off->sr_num_fnodes);
   for (int i = 0; i < num; i++) {
-    void *fnode = (void *)(g_shared_resource + 0x5cd8 + i * 0x290);
+    void *fnode = (void *)(g_shared_resource + g_off->sr_fnodes +
+                           i * g_off->fnode_size);
     update_fnode(fnode);
   }
 }
 
-static void update_vnodes(void) {
+/* Returns the number of files that are still open but no longer exist on
+ * the card. Their cached cluster chains are stale; writing through them
+ * could overwrite other files. */
+static int update_vnodes(void) {
+  int stale_open = 0;
   int num = *g_num_vnodes;
   for (int i = 0; i < num; i++) {
     void *vp = (void *)(*g_vnodes + *g_vnode_size * i);
@@ -124,9 +132,6 @@ static void update_vnodes(void) {
     void *fnode = *(uintptr_t **)(vp + 0x60);
 
     if (fnode && fnode == nodeData) {
-      static char utf8_path[0x104];
-      utf16_to_utf8(utf8_path, sizeof(utf8_path), (short *)fnode);
-
       int res = update_fnode(fnode);
       if (res < 0) {
         if (refCount == 0) {
@@ -134,13 +139,16 @@ static void update_vnodes(void) {
           if (nc)
             clear_ncache(nc, 0);
           ksceVopInactive(vp);
-          ksceVfsFreeVnode(vp);
+          vfs_free_vnode(vp);
+        } else {
+          stale_open++;
         }
-      } else {
+      } else if (res != FNODE_UNUSED) {
         *(uint64_t *)(vp + 0x80) = *(uint64_t *)(fnode + 0x218);
       }
     }
   }
+  return stale_open;
 }
 
 static void invalidate_buff_caches(void) {
@@ -156,8 +164,8 @@ static void invalidate_buff_caches(void) {
 }
 
 static void remount_filesystems(void) {
-  for (int i = 0; i < 14; i++) {
-    void *fileSystem = (void *)(g_shared_resource + 0x430 * i);
+  for (uint32_t i = 0; i < g_off->fs_count; i++) {
+    void *fileSystem = (void *)(g_shared_resource + g_off->fs_stride * i);
     uint32_t flags = *(uint32_t *)(fileSystem + 0xb0);
     void *drive = *(uintptr_t **)(fileSystem + 0xac);
     void *trash_fnode = *(uintptr_t **)(fileSystem + 0x114);
@@ -190,116 +198,107 @@ static void remount_filesystems(void) {
   }
 }
 
-void update_filesystem(void) {
+int update_filesystem(void) {
   invalidate_buff_caches();
   invalidate_file_caches();
   remount_filesystems();
-  update_vnodes();
+  int stale_open = update_vnodes();
   update_fnodes();
+  return stale_open;
 }
 
-int UVFAT_WriteDevice_Patched(void *fileSystem, int unused, uint64_t sector,
-                              int size, void *buf) {
-  if (g_ignore_writedevice) {
-    return 0;
-  }
+static int UVFAT_WriteDevice_Patched(void *fileSystem, int unused,
+                                     uint64_t sector, int size, void *buf) {
+  uint32_t mode = g_ignore_writedevice;
+
+  if (mode == FS_WRITES_DROPPED)
+    return 0; /* restored OS before remount: stale caches, discard */
+  if (mode == FS_WRITES_READ_ONLY)
+    return SCE_ERROR_ERRNO_EROFS;
 
   return TAI_CONTINUE(int, UVFAT_WriteDevice_Ref, fileSystem, unused,
                                                   sector, size, buf);
 }
 
-void set_ignore_writedevice(void) {
-  g_ignore_writedevice = 1;
+void fs_set_write_mode(uint32_t mode) {
+  g_ignore_writedevice = mode;
 }
 
-void clear_ignore_writedevice(void) {
-  g_ignore_writedevice = 0;
+uint32_t fs_get_write_mode(void) {
+  return g_ignore_writedevice;
 }
 
-void get_iofilemgr_offsets(void) {
-  tai_module_info_t info;
-
-  memset(&info, 0, sizeof(tai_module_info_t));
-  info.size = sizeof(tai_module_info_t);
-  taiGetModuleInfoForKernel(KERNEL_PID, "SceIofilemgr", &info);
-
-  switch (info.module_nid) {
-    case 0x9642948C: // 3.60 retail
-      module_get_offset(KERNEL_PID, info.modid, 0,
-                        0x5a39, (uintptr_t *)&clear_ncache);
-      module_get_offset(KERNEL_PID, info.modid, 0,
-                        0x126f9, (uintptr_t *)&invalidate_buff_cache);
-      break;
-
-    case 0xA96ACE9D: // 3.65 retail
-    case 0x3347A95F: // 3.67 retail
-    case 0x90DA33DE: // 3.68 retail
-      module_get_offset(KERNEL_PID, info.modid, 0,
-                        0x3a11, (uintptr_t *)&clear_ncache);
-      module_get_offset(KERNEL_PID, info.modid, 0,
-                        0x106d1, (uintptr_t *)&invalidate_buff_cache);
-      break;
-
-    case 0xF16E72C7: // 3.69 retail
-    case 0x81A49C2B: // 3.70 retail
-    case 0xF2D59083: // 3.71 retail
-    case 0x9C16D40A: // 3.72 retail
-    case 0xF7794A6C: // 3.73 retail
-      module_get_offset(KERNEL_PID, info.modid, 0,
-                        0x3e69, (uintptr_t *)&clear_ncache);
-      module_get_offset(KERNEL_PID, info.modid, 0,
-                        0x10b29, (uintptr_t *)&invalidate_buff_cache);
-      break;
-  }
-
-  module_get_offset(KERNEL_PID, info.modid, 1,
-                    0x24, (uintptr_t *)&g_num_vnodes);
-  module_get_offset(KERNEL_PID, info.modid, 1,
-                    0x19dc, (uintptr_t *)&g_vnodes);
-  module_get_offset(KERNEL_PID, info.modid, 1,
-                    0x19e0, (uintptr_t *)&g_vnode_size);
-  module_get_offset(KERNEL_PID, info.modid, 1,
-                    0x19fc, (uintptr_t *)&g_mnt_head);
+volatile uint32_t *fs_write_mode_addr(void) {
+  return &g_ignore_writedevice;
 }
 
-void patch_exfatfs(void) {
-  tai_module_info_t info;
+static int get_offset(SceUID modid, int seg, uint32_t off, void *out) {
+  return module_get_offset(KERNEL_PID, modid, seg, off, (uintptr_t *)out);
+}
 
-  memset(&info, 0, sizeof(tai_module_info_t));
-  info.size = sizeof(tai_module_info_t);
-  taiGetModuleInfoForKernel(KERNEL_PID, "SceExfatfs", &info);
+int fs_init(const FwOffsets *o) {
+  tai_module_info_t io_info, ex_info;
+  int res = 0;
 
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x7169, (uintptr_t *)&UVFAT_Mount);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x13f01, (uintptr_t *)&UVFAT_ReadManagementArea);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x10e39, (uintptr_t *)&UVFAT_SearchFile_common);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x7a79, (uintptr_t *)&UVFAT_GetParentFnode);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x7ae9, (uintptr_t *)&UVFAT_ReleaseFnode);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x5f95, (uintptr_t *)&sceExfatfsVopUmount);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x2695, (uintptr_t *)&cleanup_cluster_cache_area);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x2191, (uintptr_t *)&invalidate_cluster_cache_data);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x7ebd, (uintptr_t *)&FreeFpCache);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x68a5, (uintptr_t *)&sfree);
-  module_get_offset(KERNEL_PID, info.modid, 0,
-                    0x19e1, (uintptr_t *)&utf16_to_utf8);
+  g_off = o;
 
-  module_get_offset(KERNEL_PID, info.modid, 1,
-                    0x80, (uintptr_t *)&g_shared_resource);
+  memset(&io_info, 0, sizeof(io_info));
+  io_info.size = sizeof(io_info);
+  if (taiGetModuleInfoForKernel(KERNEL_PID, "SceIofilemgr", &io_info) < 0)
+    return -1;
 
-  taiHookFunctionOffsetForKernel(KERNEL_PID, &UVFAT_WriteDevice_Ref, info.modid,
-                                 0, 0x1315c, 1,  UVFAT_WriteDevice_Patched);
+  memset(&ex_info, 0, sizeof(ex_info));
+  ex_info.size = sizeof(ex_info);
+  if (taiGetModuleInfoForKernel(KERNEL_PID, "SceExfatfs", &ex_info) < 0)
+    return -1;
+
+  res |= get_offset(io_info.modid, 0, o->iofilemgr_clear_ncache, &clear_ncache);
+  res |= get_offset(io_info.modid, 0, o->iofilemgr_invalidate_buff_cache,
+                    &invalidate_buff_cache);
+  res |= get_offset(io_info.modid, 1, o->iofilemgr_num_vnodes, &g_num_vnodes);
+  res |= get_offset(io_info.modid, 1, o->iofilemgr_vnodes, &g_vnodes);
+  res |= get_offset(io_info.modid, 1, o->iofilemgr_vnode_size, &g_vnode_size);
+
+  res |= get_offset(ex_info.modid, 0, o->exfat_mount, &UVFAT_Mount);
+  res |= get_offset(ex_info.modid, 0, o->exfat_search_file_common,
+                    &UVFAT_SearchFile_common);
+  res |= get_offset(ex_info.modid, 0, o->exfat_get_parent_fnode,
+                    &UVFAT_GetParentFnode);
+  res |= get_offset(ex_info.modid, 0, o->exfat_release_fnode,
+                    &UVFAT_ReleaseFnode);
+  res |= get_offset(ex_info.modid, 0, o->exfat_cleanup_cluster_cache,
+                    &cleanup_cluster_cache_area);
+  res |= get_offset(ex_info.modid, 0, o->exfat_invalidate_cluster_cache,
+                    &invalidate_cluster_cache_data);
+  res |= get_offset(ex_info.modid, 0, o->exfat_free_fp_cache, &FreeFpCache);
+  res |= get_offset(ex_info.modid, 0, o->exfat_sfree, &sfree);
+  res |= get_offset(ex_info.modid, 1, o->exfat_shared_resource,
+                    &g_shared_resource);
+  if (res < 0)
+    return -1;
+
+  if (module_get_export_func(KERNEL_PID, "SceIofilemgr", 0x40FD29C7,
+                             0x21D57633, (uintptr_t *)&vfs_free_vnode) < 0)
+    return -1;
+
+  g_write_hook = taiHookFunctionOffsetForKernel(KERNEL_PID,
+                                                &UVFAT_WriteDevice_Ref,
+                                                ex_info.modid, 0,
+                                                o->exfat_write_device, 1,
+                                                UVFAT_WriteDevice_Patched);
+  if (g_write_hook < 0)
+    return -1;
 
   // Allow UVFAT_ReadManagementArea
   uint32_t nop_nop_opcode = 0xbf00bf00;
-  taiInjectDataForKernel(KERNEL_PID, info.modid, 0, 0x140fe,
-                         &nop_nop_opcode, 4);
+  g_mgmt_patch = taiInjectDataForKernel(KERNEL_PID, ex_info.modid, 0,
+                                        o->exfat_read_mgmt_patch,
+                                        &nop_nop_opcode, 4);
+  if (g_mgmt_patch < 0) {
+    taiHookReleaseForKernel(g_write_hook, UVFAT_WriteDevice_Ref);
+    g_write_hook = -1;
+    return -1;
+  }
+
+  return 0;
 }

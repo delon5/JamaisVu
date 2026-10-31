@@ -26,15 +26,30 @@ add_custom_command(OUTPUT ${JamaisVu_payload_object}
 add_executable(JamaisVu
   plugin/main.c
   plugin/fs.c
+  plugin/offsets.c
+  plugin/slots.c
+  plugin/menu.c
+  plugin/gui/render.c
+  plugin/gui/menu_view.c
+  plugin/gui/font_data.c
+  payload/crc32.c
   plugin/resume.S
   ${JamaisVu_payload_object}
 )
+
+# Set -DJAMAISVU_ALLOW_UNVERIFIED_FW=ON to arm on firmware whose offsets
+# have not been verified on hardware (see plugin/offsets.c). Testing only.
+option(JAMAISVU_ALLOW_UNVERIFIED_FW "Arm on unverified firmware" OFF)
+if(JAMAISVU_ALLOW_UNVERIFIED_FW)
+  target_compile_definitions(JamaisVu PRIVATE JAMAISVU_ALLOW_UNVERIFIED_FW)
+endif()
 
 add_dependencies(JamaisVu JamaisVu_payload_binary)
 
 target_link_libraries(JamaisVu
   SceCtrlForDriver_stub
   SceCpuForDriver_stub
+  SceDisplayForDriver_stub
   SceKernelSuspendForDriver_stub
   SceIofilemgrForDriver_stub
   ScePowerForDriver_stub
