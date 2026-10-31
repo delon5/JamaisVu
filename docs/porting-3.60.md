@@ -54,8 +54,8 @@ Fill in the zero fields of the `"3.60"` entry in `plugin/offsets.c`:
 
 ### How to find them
 
-1. On your 3.60 Vita, install the plugin as it is. It stays disabled, but it writes `ux0:data/JamaisVu/status.txt` with the module NIDs of SceIofilemgr, SceExfatfs, SceRtc, … for your firmware.
-2. Obtain **decrypted** `SceExfatfs`, `SceIofilemgr` and `SceRtc` modules of **both 3.60 and 3.65**, dumped from your own consoles (a 3.65 unit, or the 3.65 update files decrypted on your own device).
+1. On your 3.60 Vita, run the read-only dump plugin [`tools/jvdump`](../tools/jvdump/README.md). It writes the loaded (already decrypted) code and data segments of SceExfatfs, SceIofilemgr, SceRtc, SceSysmem and SceCtrl, plus their module NIDs and segment sizes, to `ux0:data/JamaisVu/dump/`.
+2. Optional but helpful: the same dump from a **3.65** console, so the two versions can be diffed directly. Without it, the 3.60 functions are identified from what each one does, using the 3.65 offsets and `plugin/fs.c` as the reference.
 3. Load both versions in Ghidra or IDA with a Vita loader. For every 3.65 offset above, find the same function in 3.60, usually by matching:
    - calls to the same exported functions (e.g. `ksceKernelLockFastMutex` on `drive + 0x1e0`),
    - error constants and string references,
