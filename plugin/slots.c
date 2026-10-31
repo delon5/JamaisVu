@@ -48,7 +48,7 @@ void slots_mark_root_bad(void) {
 void slots_sync(void) {
   ksceIoSync(g_root, 0);
   if (!slots_root_is_ux0())
-    slots_sync();
+    ksceIoSync("ux0:", 0);
 }
 
 static void path_for(char *out, int len, int slot, const char *ext) {
