@@ -18,18 +18,63 @@
 
 #define THUMB_BYTES (JV_THUMB_W * JV_THUMB_H * 4)
 
-static void path_for(char *out, int len, int slot, const char *ext) {
-  snprintf(out, len, JV_DIR "/slot%d.%s", slot + 1, ext);
+#define SLOT_SUBDIR "data/JamaisVu"
+
+static const char *g_root = "ux0:";
+static int g_uma0_bad = 0;
+
+void slots_select_root(void) {
+  SceIoStat st;
+  if (!g_uma0_bad && ksceIoGetstat("uma0:", &st) >= 0)
+    g_root = "uma0:";
+  else
+    g_root = "ux0:";
 }
 
-void slot_state_path(char *out, int len, int slot) {
-  path_for(out, len, slot, "bin");
+const char *slots_root(void) {
+  return g_root;
+}
+
+int slots_root_is_ux0(void) {
+  return strcmp(g_root, "ux0:") == 0;
+}
+
+void slots_mark_root_bad(void) {
+  if (!slots_root_is_ux0())
+    g_uma0_bad = 1;
+  slots_select_root();
+}
+
+void slots_sync(void) {
+  ksceIoSync(g_root, 0);
+  if (!slots_root_is_ux0())
+    slots_sync();
+}
+
+static void path_for(char *out, int len, int slot, const char *ext) {
+  snprintf(out, len, "%s" SLOT_SUBDIR "/slot%d.%s", g_root, slot + 1, ext);
+}
+
+void slot_payload_path(char *out, int len, int slot) {
+  snprintf(out, len, "ux0:" SLOT_SUBDIR "/slot%d.bin", slot + 1);
+}
+
+static int mkdir_ok(const char *path) {
+  int res = ksceIoMkdir(path, 0777);
+  return (res >= 0 || res == (int)0x80010011 /* EEXIST */) ? 0 : res;
 }
 
 int jv_mkdirs(void) {
-  ksceIoMkdir("ux0:data", 0777);
-  int res = ksceIoMkdir(JV_DIR, 0777);
-  return (res >= 0 || res == (int)0x80010011 /* EEXIST */) ? 0 : res;
+  mkdir_ok("ux0:data");
+  return mkdir_ok(JV_DIR);
+}
+
+int slots_mkdirs(void) {
+  static char path[32];
+  snprintf(path, sizeof(path), "%sdata", g_root);
+  mkdir_ok(path);
+  snprintf(path, sizeof(path), "%s" SLOT_SUBDIR, g_root);
+  return mkdir_ok(path);
 }
 
 static int64_t file_size(const char *path) {
@@ -50,7 +95,7 @@ typedef struct {
 int64_t slot_free_space(void) {
   DevInfo info;
   memset(&info, 0, sizeof(info));
-  if (ksceIoDevctl("ux0:", 0x3001, NULL, 0, &info, sizeof(info)) < 0)
+  if (ksceIoDevctl(g_root, 0x3001, NULL, 0, &info, sizeof(info)) < 0)
     return -1;
   return (int64_t)info.free_size;
 }
@@ -112,7 +157,7 @@ int slot_prepare(int slot, void (*progress)(int pct)) {
     ksceIoRemove(path); /* never leave a half-sized slot behind */
 
   /* flush everything the OS wrote before the payload touches the card */
-  ksceIoSync("ux0:", 0);
+  slots_sync();
 
   return res;
 }
@@ -141,7 +186,7 @@ int slot_stamp(int slot, uint8_t nonce[16]) {
                 ? 0 : JV_ERR_SLOT_IO;
   if (ksceIoClose(fd) < 0)
     res = JV_ERR_SLOT_IO;
-  ksceIoSync("ux0:", 0);
+  slots_sync();
 
   if (res == 0 && file_size(path) != JV_SLOT_SIZE)
     res = JV_ERR_SLOT_IO;
@@ -187,7 +232,7 @@ int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
   if (res < 0)
     ksceIoRemove(tmp);
 
-  ksceIoSync("ux0:", 0);
+  slots_sync();
   return res;
 }
 
@@ -227,7 +272,7 @@ int slot_info_remove(int slot) {
   static char path[64];
   path_for(path, sizeof(path), slot, "jvi");
   int res = ksceIoRemove(path);
-  ksceIoSync("ux0:", 0);
+  slots_sync();
   return res;
 }
 

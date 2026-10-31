@@ -62,6 +62,7 @@ int main(int argc, char **argv) {
   memset(&m, 0, sizeof(m));
   m.can_load = 1;
   m.can_save = 1;
+  m.savedata_rolls_back = 1;
   m.progress = -1;
 
   const char *titles[] = { "Persona 4 Golden", "Gravity Rush",

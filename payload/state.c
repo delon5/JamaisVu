@@ -693,7 +693,9 @@ int save_state(FATFS *fs, const char *path) {
   /* 4. Savedata of the running titles. */
   header.files_offset = g_slot.pos;
 
-  for (uint32_t i = 0; i < pargs->process_num && i < JV_MAX_PROCESSES; i++) {
+  for (uint32_t i = 0;
+       pargs->backup_savedata && i < pargs->process_num && i < JV_MAX_PROCESSES;
+       i++) {
     static char savedata_path[64];
     const char *titleid = pargs->titleid[i];
     uint32_t tlen = strnlen(titleid, 32);

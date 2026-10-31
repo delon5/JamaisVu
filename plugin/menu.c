@@ -120,7 +120,7 @@ static const char *result_text(int32_t res) {
     case JV_ERR_GUARD:      return "an unsafe write was blocked";
     case JV_ERR_MEDIAID:    return "Memory Card layout not recognised";
     case JV_ERR_SAVEDATA:   return "could not back up the savedata";
-    case JV_ERR_NOT_MC:     return "ux0 is not the official Memory Card";
+    case JV_ERR_NOT_MC:     return "slot storage is not the official Memory Card";
     case JV_ERR_SLOT_NO_SPACE: return "not enough free space (704 MB needed)";
     case JV_ERR_SLOT_IO:    return "could not create the slot file";
     default:                return "internal error";
@@ -466,9 +466,14 @@ static void prepare_progress(int pct) {
 
 static void refresh_slots(void) {
   static SlotInfo info;
+
+  slots_select_root();
   int exists[JV_NUM_SLOTS], locked[JV_NUM_SLOTS];
 
   /* free-space safeguard: only as many new slots as fit (slot_policy.h) */
+  model_begin();
+  g_model.savedata_rolls_back = slots_root_is_ux0();
+  model_end();
   for (int i = 0; i < JV_NUM_SLOTS; i++)
     exists[i] = slot_file_exists(i);
   slot_policy(slot_free_space(), exists, locked, JV_NUM_SLOTS);
@@ -505,6 +510,12 @@ static void after_resume(void) {
         snprintf(msg, sizeof(msg), "Saved, but the slot info could not be "
                  "written - slot %u stays empty", (unsigned)g_res_slot + 1);
       toast(msg, r != 0);
+    } else if (g_res_result == JV_ERR_NOT_MC && !slots_root_is_ux0()) {
+      /* uma0 exists but is not the Memory Card: nothing was written; use
+       * ux0 from now on (this session) */
+      slots_mark_root_bad();
+      toast("Save failed: uma0 is not the Memory Card - using ux0 now, "
+            "please save again", 1);
     } else {
       snprintf(msg, sizeof(msg), "Save failed: %s",
                result_text(g_res_result));
@@ -558,7 +569,8 @@ static void do_save(int slot) {
     return;
   }
 
-  jv_mkdirs();
+  slots_select_root();
+  slots_mkdirs();
 
   g_progress_slot = slot;
   snprintf(msg, sizeof(msg), "Preparing slot %d...", slot + 1);
@@ -615,7 +627,7 @@ static void do_save(int slot) {
 
   snprintf(msg, sizeof(msg), "Saving to slot %d...", slot + 1);
   set_message(MV_BUSY, msg, -1, 0);
-  ksceIoSync("ux0:", 0);
+  slots_sync();
 
   run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce);
 }
@@ -631,7 +643,7 @@ static void do_load(int slot) {
 
   snprintf(msg, sizeof(msg), "Loading slot %d...", slot + 1);
   set_message(MV_BUSY, msg, -1, 0);
-  ksceIoSync("ux0:", 0);
+  slots_sync();
 
   run_and_wait(JAMAISVU_MODE_LOAD, slot, NULL);
 }

@@ -17,7 +17,25 @@
 #include <stdint.h>
 #include "gui/menu_view.h"
 
+/* Plugin status/log folder (always on the system's ux0) */
 #define JV_DIR "ux0:data/JamaisVu"
+
+/*
+ * Slot files live on the official Memory Card, wherever it is mounted:
+ * uma0 is preferred when it exists (Memory Card remapped to uma0, ux0 being
+ * an SD2Vita/PSVSD/USB), otherwise ux0. The payload addresses the Memory
+ * Card hardware directly, so the mount name does not matter to it; the
+ * slot token check proves it is the same file.
+ *
+ * slots_select_root() re-evaluates the choice (call before using slots).
+ * slots_mark_root_bad() is called when a save proved that the chosen mount
+ * is not the Memory Card; the plugin then falls back to ux0.
+ */
+void slots_select_root(void);
+const char *slots_root(void);       /* "uma0:" or "ux0:" */
+int slots_root_is_ux0(void);
+void slots_mark_root_bad(void);
+void slots_sync(void);
 
 /* Every slot file has exactly JV_SLOT_SIZE bytes (slot_policy.h). DRAM
  * (512 MiB) + CDRAM (128 MiB) is the most memory a snapshot can contain;
@@ -43,7 +61,9 @@ typedef struct {
 #define JV_ERR_SLOT_NO_SPACE (-100)
 #define JV_ERR_SLOT_IO       (-101)
 
-void slot_state_path(char *out, int len, int slot);
+/* Path of slotN.bin as the payload's FatFs sees the Memory Card ("ux0:"
+ * is just FatFs' volume name there, whatever the OS mount is). */
+void slot_payload_path(char *out, int len, int slot);
 
 /* Makes sure slotN.bin exists with JV_SLOT_SIZE bytes, using the OS's own
  * exFAT driver (so all filesystem metadata is written by the OS). The
@@ -71,6 +91,7 @@ int64_t slot_free_space(void);
 /* Game name from param.sfo (ASCII only; falls back to the title ID). */
 void lookup_title(const char *titleid, char *out, int len);
 
-int jv_mkdirs(void);
+int jv_mkdirs(void);       /* status folder on ux0 */
+int slots_mkdirs(void);    /* slot folder on the slot root */
 
 #endif

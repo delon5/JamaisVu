@@ -410,7 +410,10 @@ static void draw_details(Canvas *c, const MenuModel *m) {
       cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y, prompt, C_TEXT,
                        MENU_W - 48);
       cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y,
-                       "Progress since this snapshot will be lost.",
+                       m->savedata_rolls_back
+                           ? "Progress since this snapshot will be lost."
+                           : "Progress will be lost. Savedata on ux0 is "
+                             "not rolled back.",
                        C_TEXT_DIM, MENU_W - 48);
       break;
 

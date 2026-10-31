@@ -58,6 +58,12 @@ typedef struct {
   char rtc_ctx[SCE_RTC_CTX_SIZE];
   char path[256];
   uint32_t slot; /* 0-based slot index, informational for the plugin */
+  /* 1 if the Memory Card holding the slot files is the system's ux0, i.e.
+   * the running games' savedata lives on it and can be backed up/restored.
+   * 0 when the Memory Card is mounted as uma0 (ux0 = SD2Vita/PSVSD/USB):
+   * the payload cannot reach that savedata, and must not touch the
+   * Memory Card's own (unused) savedata folder either. */
+  uint32_t backup_savedata;
   /* Exact size the plugin pre-allocated for the slot file. The payload
    * refuses to save into a file of any other size. */
   uint32_t slot_size;

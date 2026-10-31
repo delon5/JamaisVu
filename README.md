@@ -18,7 +18,8 @@ On any firmware without a verified offset table, the plugin installs no filesyst
 
 ## Requirements
 
-- The official Sony Memory Card as ux0. Setups that redirect ux0 to SD2Vita, PSVSD (3G slot) or USB storage are not supported: the payload talks to the Memory Card hardware directly, and refuses to save if ux0 is a different device.
+- The official Sony Memory Card, mounted as **ux0 or uma0**. If uma0 exists (e.g. ux0 is an SD2Vita/PSVSD and the Memory Card was remapped to uma0), the slots are kept on uma0. The payload talks to the Memory Card hardware directly and verifies, with a token written by the OS, that it writes to the same slot file. If the Memory Card is not mounted at all, saving is refused.
+  - With the Memory Card on uma0, the games' savedata lives on ux0, which the payload cannot reach: loading a slot restores the game but **does not roll back its savedata** (the load prompt says so).
 - **704 MB of free space per slot.** Each slot is a fixed-size file that is created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free.
 - **Slots unlock with free space.** Slots you have already used stay available. Each new slot needs 704 MB: about 1 GB free unlocks one slot, 1.5 GB two, and so on. Locked slots show a padlock.
 
@@ -47,7 +48,7 @@ Press **SELECT + UP** to open the slot menu. The game keeps running underneath b
 
 Each slot shows a thumbnail of the game screen at the moment you saved, the game's name, its title ID and the date.
 
-- **Saving** blacks out the screen for about a minute while memory is written to `ux0:data/JamaisVu/slotN.bin`. Afterwards the game continues, and a message confirms the save or explains why it failed.
+- **Saving** blacks out the screen for about a minute while memory is written to `data/JamaisVu/slotN.bin` on the Memory Card (uma0 or ux0). Afterwards the game continues, and a message confirms the save or explains why it failed.
 - **Loading** works from inside a game and from the **LiveArea**. Saving does not: Save only appears when a running game is on screen, and this is checked again right before the save starts. A game suspended in the background doesn't count, so the LiveArea/shell can never be snapshotted.
 - During save and load **the game card LED is on**. If it **blinks rapidly**, see [If a load fails](#if-a-load-fails).
 

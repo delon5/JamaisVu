@@ -253,7 +253,8 @@ int jv_request(int mode, int slot, const uint8_t *nonce) {
     return -1;
 
   pargs.slot = slot;
-  slot_state_path(pargs.path, sizeof(pargs.path), slot);
+  slot_payload_path(pargs.path, sizeof(pargs.path), slot);
+  pargs.backup_savedata = slots_root_is_ux0();
   pargs.slot_size = JV_SLOT_SIZE;
   if (nonce)
     memcpy(pargs.slot_nonce, nonce, sizeof(pargs.slot_nonce));

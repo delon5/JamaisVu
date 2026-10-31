@@ -57,6 +57,8 @@ typedef struct {
   int is_error;       /* MESSAGE: red text */
   int can_load;       /* 0 hides the load hint */
   int can_save;       /* 0 in the LiveArea: no game on screen to save */
+  int savedata_rolls_back; /* 0 when slots are on uma0: ux0 savedata is
+                              not part of the snapshot */
 } MenuModel;
 
 void menu_view_render(Canvas *c, const MenuModel *m);

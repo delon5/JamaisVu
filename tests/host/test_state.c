@@ -359,6 +359,7 @@ static void reset_args(int mode, const char *path, uint32_t slot_size) {
   strcpy(args.path, path);
   args.slot_size = slot_size;
   args.ignore_flag_paddr = FLAG_PA;
+  args.backup_savedata = 1;
 }
 
 static uint8_t *ram_copy(void) {
@@ -742,6 +743,51 @@ int main(int argc, char **argv) {
     printf("  %-44s -> %d\n", "load after interrupted save", res);
     CHECK(res == JV_ERR_BAD_STATE && args.applied == 0 &&
           changed_outside(NULL, NULL) == 0, "interrupted save must not be loadable");
+  }
+
+  /* --- Memory Card mounted as uma0 (ux0 = SD2Vita/PSVSD) ---------------- */
+  printf("memory card as uma0 (no savedata backup)\n");
+  {
+    fill_pattern(0xdddd);
+    uint8_t *ram_d = ram_copy();
+    stamp_slot(slot);
+    snapshot_card();
+    reset_args(JAMAISVU_MODE_SAVE, slot, slot_size);
+    args.backup_savedata = 0;
+    mount();
+    res = save_state(&fs, slot);
+    unmount();
+    printf("  %-44s -> %d\n", "save without savedata", res);
+    CHECK(res == JV_OK, "save (uma0) failed: %d", res);
+    CHECK(changed_outside(&ext, NULL) == 0, "save (uma0) wrote outside slot");
+    st = read_state(slot, &len);
+    CHECK(((SaveStateHeader *)st)->file_num == 0, "savedata was backed up");
+
+    /* savedata changes after the save must survive the load untouched */
+    allow_everything();
+    mount();
+    write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_b, sizeof(sav_b));
+    unmount();
+    guard_deny_all();
+    fill_pattern(0xeeee);
+
+    reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+    args.backup_savedata = 0;
+    mount();
+    res = load_state(&fs, slot);
+    unmount();
+    printf("  %-44s -> %d\n", "load without savedata", res);
+    CHECK(res == JV_OK, "load (uma0) failed: %d", res);
+    memcpy(ram_d + (FLAG_PA - 0x40000000u), "\x01\x00\x00\x00", 4);
+    CHECK(ram_equal(ram_d), "memory not restored (uma0)");
+    allow_everything();
+    mount();
+    CHECK(read_file("ux0:user/00/savedata/PCSE00123/data.bin", buf, sizeof(buf), &len) == 0 &&
+          len == sizeof(sav_b) && memcmp(buf, sav_b, len) == 0,
+          "savedata must not be touched when the card is uma0");
+    unmount();
+    guard_deny_all();
+    free(ram_d);
   }
 
   snprintf(out, sizeof(out), "%s/04_final.img", outdir);
