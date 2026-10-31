@@ -1,0 +1,73 @@
+# Why JamaisVu works on 3.65 but not 3.60, and how to port it
+
+## The cause
+
+Most of what the plugin does goes through **NID exports**: named, numbered functions that every firmware provides at whatever address they live. Those work on 3.60 and 3.65 alike. This includes the syscon reset hook, the system event handler, file I/O, the controller and the display. The plugin already looked up both the 3.60 and 3.65 variants of the two SceSysmem functions whose NIDs changed in 3.63.
+
+Loading a state, however, needs to reach **inside the exFAT driver (SceExfatfs) and the I/O manager (SceIofilemgr)**. It has to flush caches and remount ux0 after the memory image is replaced. None of these internals are exported, so the original plugin used **hard-coded offsets** into those modules:
+
+| What | Original code | 3.60 handling in the original |
+| --- | --- | --- |
+| 13 SceExfatfs function offsets, the `UVFAT_WriteDevice` hook, a 4-byte NOP patch, the shared-resource global | `patch_exfatfs()` | **none: 3.65 values used unconditionally** |
+| SceIofilemgr `clear_ncache`, `invalidate_buff_cache` | `get_iofilemgr_offsets()` | 3.60 values present ✔ |
+| SceIofilemgr vnode table globals (`0x24`, `0x19dc`, `0x19e0`) | `get_iofilemgr_offsets()` | **3.65 values used unconditionally** |
+| SceCtrl callback pointer (`0xabc`) | `patch_ctrl()` | **3.65 value used unconditionally** |
+| exFAT structure layout (`0x295d5c`, `0x5cd0`, `0x290`, `0x430`, …) | `fs.c` | **3.65 layout assumed** |
+
+So on 3.60 the original plugin:
+
+1. hooked and NOP-patched **random instructions inside the 3.60 exFAT driver**,
+2. overwrote a random word in SceCtrl's data, so the button combination never worked, or crashed, and
+3. walked the exFAT driver's memory with the wrong structure layout during a load.
+
+Item 1 alone explains "works on 3.65, not 3.60". It is also a Memory Card corruption risk in its own right, because it modifies the filesystem driver's code.
+
+## What has changed in JamaisVu
+
+- **The controller is firmware-independent now.** The menu polls `ksceCtrlPeekBufferPositive` and masks game input by hooking the `sceCtrl*` syscall exports by NID, so there is no SceCtrl offset any more.
+- **The display overlay is firmware-independent** (`ksceDisplaySetFrameBufInternal`, by NID).
+- **Every remaining offset is in one table**, `plugin/offsets.c`, keyed by the SceIofilemgr module NID. The plugin refuses to arm (no hooks, no patches, nothing changed) unless the running firmware has a complete entry that is marked as verified.
+- **The 3.60 entry exists**, with the two known SceIofilemgr offsets filled in. Everything else is `0` (= unknown), so 3.60 is currently disabled.
+
+## What is needed for 3.60
+
+Fill in the zero fields of the `"3.60"` entry in `plugin/offsets.c`:
+
+| Field | Module / segment | 3.65 value | Function or meaning |
+| --- | --- | --- | --- |
+| `iofilemgr_num_vnodes` | SceIofilemgr, data | `0x24` | number of vnodes |
+| `iofilemgr_vnodes` | SceIofilemgr, data | `0x19dc` | pointer to the vnode array |
+| `iofilemgr_vnode_size` | SceIofilemgr, data | `0x19e0` | size of one vnode |
+| `exfat_mount` | SceExfatfs, text | `0x7169` | `UVFAT_Mount` |
+| `exfat_search_file_common` | SceExfatfs, text | `0x10e39` | `UVFAT_SearchFile_common` |
+| `exfat_get_parent_fnode` | SceExfatfs, text | `0x7a79` | `UVFAT_GetParentFnode` |
+| `exfat_release_fnode` | SceExfatfs, text | `0x7ae9` | `UVFAT_ReleaseFnode` |
+| `exfat_cleanup_cluster_cache` | SceExfatfs, text | `0x2695` | `cleanup_cluster_cache_area` |
+| `exfat_invalidate_cluster_cache` | SceExfatfs, text | `0x2191` | `invalidate_cluster_cache_data` |
+| `exfat_free_fp_cache` | SceExfatfs, text | `0x7ebd` | `FreeFpCache` |
+| `exfat_sfree` | SceExfatfs, text | `0x68a5` | `sfree` |
+| `exfat_write_device` | SceExfatfs, text | `0x1315c` | `UVFAT_WriteDevice` (hooked; even = ARM/Thumb flag handled by taiHEN) |
+| `exfat_read_mgmt_patch` | SceExfatfs, text | `0x140fe` | the 4-byte check inside `UVFAT_ReadManagementArea` that is replaced with two Thumb NOPs so the management area can be re-read on remount |
+| `exfat_shared_resource` | SceExfatfs, data | `0x80` | the driver's shared resource pointer |
+| `rtc_ctx` | SceRtc, data | `0x0` | RTC context (`0x1c0` bytes). May well be `0` on 3.60 too, but must be confirmed |
+| `sr_num_files`, `sr_files`, `sr_num_fnodes`, `sr_fnodes`, `fnode_size`, `fs_stride`, `fs_count` | exFAT structures | see table | shared-resource layout; the offsets inside fnode/fileSystem/drive used in `plugin/fs.c` (`0x20c`, `0xac`, `0x1e0`, `0x280`…) must also be confirmed |
+
+### How to find them
+
+1. On your 3.60 Vita, install the plugin as it is. It stays disabled, but it writes `ux0:data/JamaisVu/status.txt` with the module NIDs of SceIofilemgr, SceExfatfs, SceRtc, … for your firmware.
+2. Obtain **decrypted** `SceExfatfs`, `SceIofilemgr` and `SceRtc` modules of **both 3.60 and 3.65**, dumped from your own consoles (a 3.65 unit, or the 3.65 update files decrypted on your own device).
+3. Load both versions in Ghidra or IDA with a Vita loader. For every 3.65 offset above, find the same function in 3.60, usually by matching:
+   - calls to the same exported functions (e.g. `ksceKernelLockFastMutex` on `drive + 0x1e0`),
+   - error constants and string references,
+   - basic-block structure (BinDiff / Ghidra Version Tracking work well, since 3.60 → 3.65 changed little in these modules).
+4. Check the structure offsets used in `plugin/fs.c` at the matched call sites.
+5. Put the values in the 3.60 entry and build with `-DJAMAISVU_ALLOW_UNVERIFIED_FW=ON`. Test on a console with a **backed-up / spare Memory Card**:
+   - save → load in the same game,
+   - load after creating and deleting files,
+   - load after rebooting,
+   - load from the LiveArea.
+
+   Run `fsck` on the card from a PC after each test.
+6. When it passes, set `.verified = 1` for 3.60.
+
+If you can share the decrypted 3.60 and 3.65 modules (or a project already annotated for them), the matching in step 3 can be done for you. Without the binaries the offsets cannot be derived, because they come from Sony's compiled code.
