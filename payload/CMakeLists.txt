@@ -8,7 +8,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   endif()
 endif()
 
-project(dejavu_payload C ASM)
+project(JamaisVu_payload C ASM)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O0 -mcpu=cortex-a9 -mthumb-interwork -fno-builtin -Wno-main")
@@ -21,7 +21,7 @@ include_directories(
   FatFs
 )
 
-add_executable(dejavu_payload
+add_executable(JamaisVu_payload
   start.S
   main.c
   state.c
@@ -40,13 +40,13 @@ add_executable(dejavu_payload
   FatFs/ffunicode.c
 )
 
-target_link_libraries(dejavu_payload
+target_link_libraries(JamaisVu_payload
   gcc
 )
 
-add_custom_command(TARGET dejavu_payload
-  COMMAND ${CMAKE_OBJCOPY} -S -O binary dejavu_payload dejavu_payload.bin
-  DEPENDS dejavu_payload
+add_custom_command(TARGET JamaisVu_payload
+  COMMAND ${CMAKE_OBJCOPY} -S -O binary JamaisVu_payload JamaisVu_payload.bin
+  DEPENDS JamaisVu_payload
 )
 
-add_custom_target(dejavu_payload_binary DEPENDS dejavu_payload)
+add_custom_target(JamaisVu_payload_binary DEPENDS JamaisVu_payload)

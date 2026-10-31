@@ -10,29 +10,29 @@ endif()
 
 add_subdirectory(payload)
 
-project(dejavu C ASM)
+project(JamaisVu C ASM)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O3 -nostdlib")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -fno-exceptions")
 
-set(dejavu_payload_object "${CMAKE_CURRENT_BINARY_DIR}/payload/dejavu_payload.bin.o")
-add_custom_command(OUTPUT ${dejavu_payload_object}
-  COMMAND ${CMAKE_LINKER} -r -b binary -o ${dejavu_payload_object} payload/dejavu_payload.bin
-  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/payload/dejavu_payload.bin
+set(JamaisVu_payload_object "${CMAKE_CURRENT_BINARY_DIR}/payload/JamaisVu_payload.bin.o")
+add_custom_command(OUTPUT ${JamaisVu_payload_object}
+  COMMAND ${CMAKE_LINKER} -r -b binary -o ${JamaisVu_payload_object} payload/JamaisVu_payload.bin
+  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/payload/JamaisVu_payload.bin
   COMMENT "Building payload object"
 )
 
-add_executable(dejavu
+add_executable(JamaisVu
   plugin/main.c
   plugin/fs.c
   plugin/resume.S
-  ${dejavu_payload_object}
+  ${JamaisVu_payload_object}
 )
 
-add_dependencies(dejavu dejavu_payload_binary)
+add_dependencies(JamaisVu JamaisVu_payload_binary)
 
-target_link_libraries(dejavu
+target_link_libraries(JamaisVu
   SceCtrlForDriver_stub
   SceCpuForDriver_stub
   SceKernelSuspendForDriver_stub
@@ -48,9 +48,9 @@ target_link_libraries(dejavu
   taihenModuleUtils_stub
 )
 
-vita_create_self(dejavu.skprx dejavu CONFIG plugin/exports.yml UNSAFE)
+vita_create_self(JamaisVu.skprx JamaisVu CONFIG plugin/exports.yml UNSAFE)
 
 add_custom_target(copy
-  COMMAND cp dejavu.skprx F:/tai/dejavu.skprx
-  DEPENDS dejavu.skprx
+  COMMAND cp JamaisVu.skprx F:/tai/JamaisVu.skprx
+  DEPENDS JamaisVu.skprx
 )

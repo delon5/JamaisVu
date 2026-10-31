@@ -1,4 +1,4 @@
-/* dejavu savestate plugin
+/* JamaisVu savestate plugin
  *
  * Copyright (C) 2020 TheFloW
  *
@@ -9,7 +9,7 @@
 #ifndef __MAIN_H__
 #define __MAIN_H__
 
-#include "../dejavu.h"
+#include "../JamaisVu.h"
 
 typedef struct {
   uint32_t off;

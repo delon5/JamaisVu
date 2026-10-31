@@ -1,4 +1,4 @@
-/* dejavu savestate plugin
+/* JamaisVu savestate plugin
  *
  * Copyright (C) 2020 TheFloW
  *
@@ -10,7 +10,7 @@
 #define __MAIN_H__
 
 #include <psp2kern/kernel/sysmem.h>
-#include "../dejavu.h"
+#include "../JamaisVu.h"
 
 int ksceRtcGetCurrentClock(SceDateTime *time);
 

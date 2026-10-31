@@ -1,6 +1,6 @@
-# déjàvu: Vita SaveState Plugin
+# JamaisVu: Vita SaveState Plugin
 
-*déjàvu* is a plugin for the PlayStation Vita that allows you to make a snapshot of the RAM at any point and later restore it. It allows you save in games where it is officially not possible. A potential use case for developers is to temporarily downgrade/update the firmware (in RAM) in order test things (this has not been tested yet).
+*JamaisVu* is a plugin for the PlayStation Vita that allows you to make a snapshot of the RAM at any point and later restore it. It allows you save in games where it is officially not possible. A potential use case for developers is to temporarily downgrade/update the firmware (in RAM) in order test things (this has not been tested yet).
 
 ## Requirements
 
@@ -8,13 +8,13 @@ A Memory Card is required for this plugin.
 
 ## Installation
 
-1. Download [dejavu.skprx](https://github.com/TheOfficialFloW/dejavu/releases) and copy it to `ux0:tai/dejavu.skprx`.
+1. Download [JamaisVu.skprx](https://github.com/delon5/JamaisVu/releases) and copy it to `ux0:tai/JamaisVu.skprx`.
 
 2. Edit `ux0:tai/config.txt` and add its path to `*KERNEL` as follows:
 
    ```
    *KERNEL
-   ux0:tai/dejavu.skprx
+   ux0:tai/JamaisVu.skprx
    ```
 
 3. Reboot your device and enjoy this new feature.
@@ -48,7 +48,7 @@ Loading a state is not yet 100% stable.
 
 ## Notice
 
-- This plugin is only experimental and may contain bugs. If you encounter any, please give a detailed feedback in [Issues](https://github.com/TheOfficialFloW/dejavu/issues).
+- This plugin is only experimental and may contain bugs. If you encounter any, please give a detailed feedback in [Issues](https://github.com/delon5/JamaisVu/issues).
 - This plugin has only been tested on a PS Vita Slim on firmware 3.65.
 
 ## Technical Details

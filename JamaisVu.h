@@ -1,4 +1,4 @@
-/* dejavu savestate plugin
+/* JamaisVu savestate plugin
  *
  * Copyright (C) 2020 TheFloW
  *
@@ -6,8 +6,8 @@
  * of the MIT license.  See the LICENSE file for details.
  */
 
-#ifndef __DEJAVU_H__
-#define __DEJAVU_H__
+#ifndef __JAMAISVU_H__
+#define __JAMAISVU_H__
 
 #include "shared.h"
 
@@ -52,10 +52,10 @@ typedef struct {
   char path[256];
 } PayloadArguments;
 
-enum DejavuModes {
-  DEJAVU_MODE_NONE,
-  DEJAVU_MODE_LOAD,
-  DEJAVU_MODE_SAVE,
+enum JamaisVuModes {
+  JAMAISVU_MODE_NONE,
+  JAMAISVU_MODE_LOAD,
+  JAMAISVU_MODE_SAVE,
 };
 
 typedef struct {

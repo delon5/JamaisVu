@@ -1,4 +1,4 @@
-@ dejavu savestate plugin
+@ JamaisVu savestate plugin
 @
 @ Copyright (C) 2020 TheFloW
 @
@@ -37,8 +37,8 @@ resume_function:
   bl resume_memcpy
 
   ldr r0, =PAYLOAD_PADDR
-  ldr r1, =_binary_payload_dejavu_payload_bin_start
-  ldr r2, =_binary_payload_dejavu_payload_bin_size
+  ldr r1, =_binary_payload_JamaisVu_payload_bin_start
+  ldr r2, =_binary_payload_JamaisVu_payload_bin_size
   bl resume_memcpy
 
   dsb

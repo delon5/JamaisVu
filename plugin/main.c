@@ -1,4 +1,4 @@
-/* dejavu savestate plugin
+/* JamaisVu savestate plugin
  *
  * Copyright (C) 2020 TheFloW
  *
@@ -28,8 +28,8 @@
 
 extern int resume_function(void);
 
-extern uint8_t _binary_payload_dejavu_payload_bin_start;
-extern uint8_t _binary_payload_dejavu_payload_bin_size;
+extern uint8_t _binary_payload_JamaisVu_payload_bin_start;
+extern uint8_t _binary_payload_JamaisVu_payload_bin_size;
 
 int (* _ksceKernelFindClassByName)(const char *name, SceClass **cls);
 int (* _ksceGUIDGetUIDVectorByClass)(SceClass *cls, int vis_level,
@@ -146,7 +146,7 @@ static void get_fattime(void) {
 static int ksceSysconSendCommandPatched(int cmd, void *buffer, uint32_t size) {
   SceSysconResumeContext *resume_ctx;
 
-  if (pargs.mode != DEJAVU_MODE_NONE) {
+  if (pargs.mode != JAMAISVU_MODE_NONE) {
     if (cmd == SCE_SYSCON_CMD_RESET_DEVICE && size == sizeof(uintptr_t)) {
       if (*(uintptr_t *)buffer != 0) {
         resume_ctx = (SceSysconResumeContext *)pa2va(*(uintptr_t *)buffer);
@@ -161,7 +161,7 @@ static int ksceSysconSendCommandPatched(int cmd, void *buffer, uint32_t size) {
 
 static int savestate_system_event(int resume, int eventid,
                                   void *args, void *opt) {
-  if (pargs.mode != DEJAVU_MODE_NONE) {
+  if (pargs.mode != JAMAISVU_MODE_NONE) {
     if (!resume) {
       if (eventid == 0x4000) {
         memcpy(pargs.rtc_ctx, g_rtc_ctx, SCE_RTC_CTX_SIZE);
@@ -169,9 +169,9 @@ static int savestate_system_event(int resume, int eventid,
         map_memory();
         get_fattime();
 
-        if (pargs.mode == DEJAVU_MODE_SAVE) {
+        if (pargs.mode == JAMAISVU_MODE_SAVE) {
           get_ttbs_and_titleids();
-        } else if (pargs.mode == DEJAVU_MODE_LOAD) {
+        } else if (pargs.mode == JAMAISVU_MODE_LOAD) {
           set_ignore_writedevice();
         }
       }
@@ -180,12 +180,12 @@ static int savestate_system_event(int resume, int eventid,
         memcpy(&pargs, (void *)PAYLOAD_ARGS_PADDR, sizeof(PayloadArguments));
         memcpy(g_rtc_ctx, pargs.rtc_ctx, SCE_RTC_CTX_SIZE);
       } else if (eventid == 0x100000) {
-        if (pargs.mode == DEJAVU_MODE_LOAD) {
+        if (pargs.mode == JAMAISVU_MODE_LOAD) {
           update_filesystem();
           clear_ignore_writedevice();
         }
 
-        pargs.mode = DEJAVU_MODE_NONE;
+        pargs.mode = JAMAISVU_MODE_NONE;
       }
     }
   }
@@ -218,9 +218,9 @@ static int ctrlp_callback(int port, SceCtrlData *pad_data, int unk) {
         snprintf(pargs.path, sizeof(pargs.path), "ux0:savestate/state_%s.bin",
                  button);
         if (pad_data->buttons & SCE_CTRL_L1) {
-          pargs.mode = DEJAVU_MODE_LOAD;
+          pargs.mode = JAMAISVU_MODE_LOAD;
         } else if (pad_data->buttons & SCE_CTRL_R1) {
-          pargs.mode = DEJAVU_MODE_SAVE;
+          pargs.mode = JAMAISVU_MODE_SAVE;
         }
         kscePowerRequestSoftReset();
       }

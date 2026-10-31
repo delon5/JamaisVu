@@ -1,4 +1,4 @@
-/* dejavu savestate plugin
+/* JamaisVu savestate plugin
  *
  * Copyright (C) 2020 TheFloW
  *
@@ -100,9 +100,9 @@ int main(void) {
   FATFS fs;
   f_mount(&fs, "ux0:", 1);
 
-  if (pargs->mode == DEJAVU_MODE_LOAD) {
+  if (pargs->mode == JAMAISVU_MODE_LOAD) {
     load_state(pargs->path);
-  } else if (pargs->mode == DEJAVU_MODE_SAVE) {
+  } else if (pargs->mode == JAMAISVU_MODE_SAVE) {
     save_state(pargs->path);
   }
 
