@@ -1,5 +1,13 @@
 # Why JamaisVu works on 3.65 but not 3.60, and how to port it
 
+> **Status (dump received from a retail 3.60 console):** the 3.60 offset table is complete and every offset was checked against that dump (details below). It is enabled in the **testing build** (`JamaisVu-testing.skprx`, `-DJAMAISVU_TESTING=ON`) and only arms if SceExfatfs is module NID `0x23AA294A`. The release build will enable 3.60 once save and load have been tested on hardware.
+>
+> | Module (3.60) | NID | Result |
+> | --- | --- | --- |
+> | SceExfatfs | `0x23AA294A` | All 13 offsets of 3.65 land on the same functions in 3.60: identical prologues; `sceExfatfsVopUmount` references the shared resource at data+0x80; `UVFAT_ReleaseFnode` reads fnode+0x20c; the patch site 0x140fe is the same `bne.w`. The live shared resource decodes with the 3.65 layout: 0x100 file caches, file cache pointer at +0x5cd0, 0x400 fnodes of 0x290 bytes at +0x5cd8 with real paths, fileSystems every 0x430 bytes. |
+> | SceIofilemgr | `0x9642948C` | `clear_ncache` 0x5a39 and `invalidate_buff_cache` 0x126f9 are function starts. The vnode loop at text+0xcf04 reads the count at data+0x24, the array at data+0x19dc and the size at data+0x19e0 (values 0x400 / heap pointer / 0x100). |
+> | SceRtc | `0x1E923AD1` | Data segment is exactly the 0x1c0-byte RTC context at offset 0. |
+
 ## The cause
 
 Most of what the plugin does goes through **NID exports**: named, numbered functions that every firmware provides at whatever address they live. Those work on 3.60 and 3.65 alike. This includes the syscon reset hook, the system event handler, file I/O, the controller and the display. The plugin already looked up both the 3.60 and 3.65 variants of the two SceSysmem functions whose NIDs changed in 3.63.

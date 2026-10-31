@@ -23,7 +23,8 @@
 typedef struct {
   const char *name;
   uint32_t iofilemgr_nids[5]; /* SceIofilemgr module NIDs, 0 terminated */
-  int verified;               /* save AND load tested on real hardware */
+  uint32_t exfat_nid;         /* required SceExfatfs module NID, 0 = any */
+  int verified;               /* VERIFIED_* below */
 
   /* SceIofilemgr, text segment (Thumb, so odd) */
   uint32_t iofilemgr_clear_ncache;
@@ -65,11 +66,29 @@ typedef struct {
   uint32_t fs_count;        /* number of fileSystems */
 } FwOffsets;
 
+/* How much an entry has been checked */
+#define VERIFIED_NONE     0 /* copied/assumed, never checked             */
+#define VERIFIED_DUMP     1 /* every offset checked against a module dump
+                               of that firmware (static analysis)       */
+#define VERIFIED_HARDWARE 2 /* save and load tested on a console        */
+
+/* Minimum level the plugin arms itself for: release builds need hardware
+ * verification, -DJAMAISVU_TESTING builds also accept dump-verified
+ * entries, -DJAMAISVU_ALLOW_UNVERIFIED_FW accepts anything complete. */
+#if defined(JAMAISVU_ALLOW_UNVERIFIED_FW)
+#define VERIFIED_REQUIRED VERIFIED_NONE
+#elif defined(JAMAISVU_TESTING)
+#define VERIFIED_REQUIRED VERIFIED_DUMP
+#else
+#define VERIFIED_REQUIRED VERIFIED_HARDWARE
+#endif
+
 /* Returns the matching entry, or NULL if this firmware is unknown. */
 const FwOffsets *offsets_find(uint32_t iofilemgr_nid);
 
-/* An entry is usable when every field is filled in and it has been
- * verified (or JAMAISVU_ALLOW_UNVERIFIED_FW was set at build time). */
-int offsets_usable(const FwOffsets *o, const char **why);
+/* An entry is usable when every field is filled in, the running SceExfatfs
+ * is the one the entry was checked against, and it is verified to at least
+ * VERIFIED_REQUIRED. */
+int offsets_usable(const FwOffsets *o, uint32_t exfat_nid, const char **why);
 
 #endif

@@ -12,7 +12,7 @@
 | --- | --- |
 | 3.65 | Supported (the only firmware the original plugin was tested on) |
 | 3.67, 3.68, 3.69–3.73 | Offsets present but **unverified**. Disabled unless built with `-DJAMAISVU_ALLOW_UNVERIFIED_FW=ON` |
-| 3.60 | **Not supported yet.** The filesystem driver offsets for 3.60 still need to be found. See [docs/porting-3.60.md](docs/porting-3.60.md) |
+| 3.60 | **Testing build only** (`JamaisVu-testing.skprx`): offsets checked against a dump of a retail 3.60 console ([details](docs/porting-3.60.md)), not yet tested on hardware |
 
 On any firmware without a verified offset table, the plugin installs no filesystem hooks and changes nothing. SELECT + UP still opens the menu in **preview mode**, so the interface can be tried, but Save and Load explain why they are unavailable. `ux0:data/JamaisVu/status.txt` records the reason and the module NIDs it found. To help add 3.60, run the read-only [jvdump](tools/jvdump/README.md) plugin once and share its output.
 

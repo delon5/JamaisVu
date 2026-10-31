@@ -52,5 +52,14 @@ gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_slot_policy" \
 "$WORK/test_slot_policy" || rc=1
 echo
 
+for flavour in release testing; do
+  def=""
+  [ "$flavour" = testing ] && def="-DJAMAISVU_TESTING"
+  gcc -Wall -Wextra $def -I"$ROOT/plugin" -o "$WORK/test_offsets_$flavour" \
+    "$ROOT/tests/host/test_offsets.c" "$ROOT/plugin/offsets.c"
+  "$WORK/test_offsets_$flavour" || rc=1
+done
+echo
+
 if [ $rc -eq 0 ]; then echo "ALL HOST TESTS PASSED"; else echo "HOST TESTS FAILED"; fi
 exit $rc

@@ -45,6 +45,13 @@ if(JAMAISVU_ALLOW_UNVERIFIED_FW)
   target_compile_definitions(JamaisVu PRIVATE JAMAISVU_ALLOW_UNVERIFIED_FW)
 endif()
 
+# Set -DJAMAISVU_TESTING=ON to also arm on firmware whose offsets were
+# checked against a module dump but not yet tested on hardware (3.60).
+option(JAMAISVU_TESTING "Arm on dump-verified firmware (testing build)" OFF)
+if(JAMAISVU_TESTING)
+  target_compile_definitions(JamaisVu PRIVATE JAMAISVU_TESTING)
+endif()
+
 add_dependencies(JamaisVu JamaisVu_payload_binary)
 
 target_link_libraries(JamaisVu

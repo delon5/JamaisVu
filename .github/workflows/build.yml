@@ -35,6 +35,12 @@ jobs:
           cmake .. -DCMAKE_BUILD_TYPE=Release
           make -j"$(nproc)"
 
+      - name: Build JamaisVu testing build (also arms on 3.60)
+        run: |
+          mkdir -p build-testing && cd build-testing
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DJAMAISVU_TESTING=ON
+          make -j"$(nproc)"
+
       - name: Build jvdump
         run: |
           mkdir -p tools/jvdump/build && cd tools/jvdump/build
@@ -51,6 +57,7 @@ jobs:
         run: |
           mkdir -p out
           cp build/JamaisVu.skprx out/
+          cp build-testing/JamaisVu.skprx out/JamaisVu-testing.skprx
           cp tools/jvdump/build/jvdump.skprx out/
           sha256sum out/*.skprx | tee out/SHA256SUMS.txt
 

@@ -20,6 +20,7 @@ int module_get_offset(SceUID pid, SceUID modid, int segidx,
                       size_t offset, uintptr_t *addr);
 
 int jv_armed(void);
+int jv_armed_untested(void);
 const char *jv_disabled_reason(void);
 int jv_request(int mode, int slot, const uint8_t *nonce);
 

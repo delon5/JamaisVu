@@ -58,6 +58,11 @@ int jv_armed(void) {
   return g_armed;
 }
 
+/* armed on offsets that are not hardware-verified yet (testing build) */
+int jv_armed_untested(void) {
+  return g_armed && g_fw && g_fw->verified < VERIFIED_HARDWARE;
+}
+
 const char *jv_disabled_reason(void) {
   return g_disabled_reason;
 }
@@ -333,7 +338,7 @@ static int arm(void) {
   const char *why;
 
   g_fw = offsets_find(module_nid("SceIofilemgr"));
-  if (!offsets_usable(g_fw, &why)) {
+  if (!offsets_usable(g_fw, module_nid("SceExfatfs"), &why)) {
     g_disabled_reason = why;
     return -1;
   }
@@ -378,7 +383,8 @@ int module_start(SceSize args, void *argp) {
   snprintf(g_status, sizeof(g_status),
            "JamaisVu " JV_VERSION "\n"
            "status: %s\n"
-           "firmware table: %s\n"
+           "firmware table: %s (verification level %d of 2)\n"
+           "build: %s\n"
            "SceIofilemgr NID: 0x%08X\n"
            "SceExfatfs NID:   0x%08X\n"
            "SceRtc NID:       0x%08X\n"
@@ -389,7 +395,12 @@ int module_start(SceSize args, void *argp) {
            "If status is not \"armed\", JamaisVu changes nothing on this\n"
            "system. See docs/porting-3.60.md.\n",
            g_armed ? "armed" : g_disabled_reason,
-           g_fw ? g_fw->name : "none",
+           g_fw ? g_fw->name : "none", g_fw ? g_fw->verified : 0,
+#if defined(JAMAISVU_TESTING)
+           "testing",
+#else
+           "release",
+#endif
            (unsigned)module_nid("SceIofilemgr"),
            (unsigned)module_nid("SceExfatfs"),
            (unsigned)module_nid("SceRtc"),

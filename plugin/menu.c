@@ -357,6 +357,9 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
       snprintf(msg, sizeof(msg), "Preview only - save/load disabled: %s",
                jv_disabled_reason());
       toast(msg, 1);
+    } else if (jv_armed_untested()) {
+      toast("TEST BUILD - firmware not hardware-tested, back up your card",
+            1);
     }
     return;
   }

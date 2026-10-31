@@ -41,20 +41,28 @@
 
 static const FwOffsets g_table[] = {
   {
-    /* 3.60: SceIofilemgr function offsets were already known to the
-     * original plugin. Everything else must be located in the 3.60
-     * modules before this entry can be enabled (docs/porting-3.60.md).
-     * Zero = unknown. */
+    /* 3.60, from a jvdump of a retail 3.60 console (docs/porting-3.60.md):
+     * - SceExfatfs 0x23AA294A: every 3.65 offset lands on the same function
+     *   (prologues, the 0x80 shared-resource reference, fnode+0x20c), the
+     *   patch site is the same bne.w, and the live shared resource decodes
+     *   with the 3.65 layout (0x100 file caches, 0x400 fnodes of 0x290
+     *   bytes, fileSystems every 0x430 bytes).
+     * - SceIofilemgr 0x9642948C: the vnode loop at text+0xcf04 reads count
+     *   data+0x24, array data+0x19dc, size data+0x19e0.
+     * - SceRtc: data segment is exactly the 0x1c0-byte RTC context. */
     .name = "3.60",
     .iofilemgr_nids = { 0x9642948C, 0 },
-    .verified = 0,
+    .exfat_nid = 0x23AA294A,
+    .verified = VERIFIED_DUMP,
     .iofilemgr_clear_ncache = 0x5a39,
     .iofilemgr_invalidate_buff_cache = 0x126f9,
+    IOFILEMGR_DATA_365,
+    EXFAT_365,
   },
   {
     .name = "3.65",
     .iofilemgr_nids = { 0xA96ACE9D, 0 },
-    .verified = 1, /* the only firmware the original author tested */
+    .verified = VERIFIED_HARDWARE, /* tested by the original author */
     .iofilemgr_clear_ncache = 0x3a11,
     .iofilemgr_invalidate_buff_cache = 0x106d1,
     IOFILEMGR_DATA_365,
@@ -63,7 +71,7 @@ static const FwOffsets g_table[] = {
   {
     .name = "3.67-3.68",
     .iofilemgr_nids = { 0x3347A95F, 0x90DA33DE, 0 },
-    .verified = 0,
+    .verified = VERIFIED_NONE,
     .iofilemgr_clear_ncache = 0x3a11,
     .iofilemgr_invalidate_buff_cache = 0x106d1,
     IOFILEMGR_DATA_365,
@@ -73,7 +81,7 @@ static const FwOffsets g_table[] = {
     .name = "3.69-3.73",
     .iofilemgr_nids = { 0xF16E72C7, 0x81A49C2B, 0xF2D59083, 0x9C16D40A,
                         0xF7794A6C },
-    .verified = 0,
+    .verified = VERIFIED_NONE,
     .iofilemgr_clear_ncache = 0x3e69,
     .iofilemgr_invalidate_buff_cache = 0x10b29,
     IOFILEMGR_DATA_365,
@@ -91,9 +99,14 @@ const FwOffsets *offsets_find(uint32_t iofilemgr_nid) {
   return NULL;
 }
 
-int offsets_usable(const FwOffsets *o, const char **why) {
+int offsets_usable(const FwOffsets *o, uint32_t exfat_nid, const char **why) {
   if (!o) {
     *why = "unknown firmware";
+    return 0;
+  }
+
+  if (o->exfat_nid && o->exfat_nid != exfat_nid) {
+    *why = "SceExfatfs differs from the one the offsets were checked against";
     return 0;
   }
 
@@ -114,12 +127,12 @@ int offsets_usable(const FwOffsets *o, const char **why) {
     return 0;
   }
 
-#ifndef JAMAISVU_ALLOW_UNVERIFIED_FW
-  if (!o->verified) {
-    *why = "offsets for this firmware are not verified on hardware";
+  if (o->verified < VERIFIED_REQUIRED) {
+    *why = o->verified == VERIFIED_DUMP
+               ? "offsets not yet tested on hardware (use the testing build)"
+               : "offsets for this firmware are not verified";
     return 0;
   }
-#endif
 
   *why = "ok";
   return 1;
