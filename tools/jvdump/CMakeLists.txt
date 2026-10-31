@@ -11,7 +11,7 @@ endif()
 project(jvdump C)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -nostdlib")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu17 -Wl,-q -Wall -O2 -nostdlib")
 
 add_executable(jvdump main.c)
 
