@@ -69,6 +69,21 @@ static volatile int g_rearm_input;
 
 static const char *g_status_text;
 
+/* L1+L2 data cache clean+invalidate for a VA range (SceCpuForDriver
+ * 0x364E68A4, resolved by NID because its name differs between SDKs). The
+ * display reads framebuffers straight from memory, so every row we write
+ * must leave the CPU caches, and rows we read must not come from stale
+ * cache lines. */
+static int (*g_dcache_clean_inv)(void *addr, unsigned int size);
+
+static void fb_cache_sync(void *addr, unsigned int size) {
+  if (!g_dcache_clean_inv || !size)
+    return;
+  uintptr_t a = (uintptr_t)addr & ~(uintptr_t)63;
+  uintptr_t e = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
+  g_dcache_clean_inv((void *)a, e - a);
+}
+
 static int64_t now_us(void) {
   return ksceKernelGetSystemTimeWide();
 }
@@ -161,6 +176,7 @@ static void capture(const SceDisplayFrameBuf *p) {
   for (int ty = 0; ty < JV_THUMB_H; ty++) {
     int sy = (2 * ty + 1) * h / (2 * JV_THUMB_H);
     const uint32_t *src = (const uint32_t *)p->base + sy * p->pitch;
+    fb_cache_sync((void *)src, w * 4);
     if (jv_copy_from_user(g_rowbuf, src, w * 4) < 0)
       return;
     for (int tx = 0; tx < JV_THUMB_W; tx++) {
@@ -200,11 +216,13 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c, int dx,
   for (int j = 0; j < fh; j++) {
     int sy = j * c->h / fh;
     uint32_t *dst = (uint32_t *)p->base + (fy0 + j) * p->pitch + fx0;
+    fb_cache_sync(dst, fw * 4);
     if (jv_copy_from_user(g_rowbuf, dst, fw * 4) < 0)
       return;
     cv_compose_row(g_rowbuf, &c->px[sy * c->w], xmap, fw);
     if (jv_copy_to_user(dst, g_rowbuf, fw * 4) < 0)
       return;
+    fb_cache_sync(dst, fw * 4);
   }
 }
 
@@ -786,6 +804,10 @@ int menu_init(const char *status_text) {
   void *base;
 
   g_status_text = status_text;
+
+  if (module_get_export_func(KERNEL_PID, "SceSysmem", 0x40ECDB0E, 0x364E68A4,
+                             (uintptr_t *)&g_dcache_clean_inv) < 0)
+    g_dcache_clean_inv = NULL;
 
   uint32_t size = MENU_W * MENU_H * 4 + TOAST_W * TOAST_H * 4 +
                   (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_SCREEN_W * 4;
