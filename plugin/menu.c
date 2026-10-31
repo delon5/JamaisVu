@@ -28,7 +28,7 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 #define EVF_WORK    1
 #define EVF_RESUMED 2
 
-enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD };
+enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY };
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
 #define PENDING  JV_NUM_SLOTS /* thumbnail index of the live capture */
@@ -65,6 +65,7 @@ static char g_capture_tid[16];
 static volatile uint32_t g_res_mode, g_res_slot;
 static volatile int32_t g_res_result;
 static volatile int g_res_stale;
+static volatile uint32_t g_res_debug, g_res_stage;
 static volatile int g_rearm_input;
 
 static const char *g_status_text;
@@ -426,9 +427,19 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
                     "- it can't be loaded", -1, 1);
       } else if ((pressed & SCE_CTRL_SQUARE) && used) {
         set_message(MV_CONFIRM_LOAD, "", -1, 0);
+      } else if (pressed & SCE_CTRL_START) {
+        set_message(MV_DIAG, "", -1, 0);
       } else if (pressed & SCE_CTRL_CIRCLE) {
         close_menu();
       }
+      break;
+    case MV_DIAG:
+      if (pressed & SCE_CTRL_CROSS)
+        start_op(OP_TEST_RESET, sel);
+      else if (pressed & SCE_CTRL_SQUARE)
+        start_op(OP_TEST_DRY, sel);
+      else if (pressed & SCE_CTRL_CIRCLE)
+        set_message(MV_BROWSE, "", -1, 0);
       break;
     case MV_CONFIRM_SAVE:
     case MV_CONFIRM_LOAD:
@@ -546,8 +557,39 @@ static const char *storage_problem(void) {
   return NULL;
 }
 
+static const char *stage_name(uint32_t stage) {
+  switch (stage) {
+    case JV_STAGE_ENTRY:      return "payload started";
+    case JV_STAGE_L2_FLUSH:   return "cache flush";
+    case JV_STAGE_SYSCON:     return "syscon";
+    case JV_STAGE_CDRAM:      return "CDRAM";
+    case JV_STAGE_MC_POWER:   return "card power";
+    case JV_STAGE_MC_START:   return "card start";
+    case JV_STAGE_MC_MOUNT:   return "card auth";
+    case JV_STAGE_FS_MOUNT:   return "filesystem";
+    case JV_STAGE_SLOT_FOUND: return "slot file found";
+    case JV_STAGE_SLOT_TOKEN: return "slot token ok";
+    case JV_STAGE_WRITING:    return "writing";
+    default:                  return "none";
+  }
+}
+
 static void after_resume(void) {
   static char msg[128];
+
+  if (g_res_debug != JV_TEST_NONE) {
+    /* diagnostics: report and never touch the slot info */
+    if (g_res_result == JV_TEST_DONE)
+      snprintf(msg, sizeof(msg), "%s passed - reached stage %u (%s)",
+               g_res_debug == JV_TEST_RESET ? "Reset test" : "Dry run",
+               (unsigned)g_res_stage, stage_name(g_res_stage));
+    else
+      snprintf(msg, sizeof(msg), "Test stopped at stage %u (%s): %s",
+               (unsigned)g_res_stage, stage_name(g_res_stage),
+               result_text(g_res_result));
+    toast(msg, g_res_result != JV_TEST_DONE);
+    return;
+  }
 
   if (g_res_mode == JAMAISVU_MODE_SAVE) {
     if (g_res_result == JV_OK) {
@@ -579,11 +621,12 @@ static void after_resume(void) {
   }
 }
 
-static void run_and_wait(int mode, int slot, const uint8_t *nonce) {
+static void run_and_wait(int mode, int slot, const uint8_t *nonce,
+                         int debug_mode) {
   ksceKernelClearEventFlag(g_evf, ~EVF_RESUMED);
   close_menu();
 
-  if (jv_request(mode, slot, nonce) < 0) {
+  if (jv_request(mode, slot, nonce, debug_mode) < 0) {
     toast("Could not start - the system refused to reset", 1);
     return;
   }
@@ -683,7 +726,7 @@ static void do_save(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
 
-  run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce);
+  run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce, JV_TEST_NONE);
 }
 
 static void do_load(int slot) {
@@ -721,11 +764,52 @@ static void do_load(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
 
-  run_and_wait(JAMAISVU_MODE_LOAD, slot, NULL);
+  run_and_wait(JAMAISVU_MODE_LOAD, slot, NULL, JV_TEST_NONE);
 }
 
 /* status.txt lives on the Memory Card like everything else JamaisVu
  * writes; it is only rewritten when its content changed. */
+/* Diagnostics. Neither test writes anything: the reset test returns from
+ * the payload before touching any hardware, the dry run stops right before
+ * the first write (the slot file is only created/stamped, like before a
+ * save, and the selected slot must be empty). */
+static void do_test(int dry, int slot) {
+  static uint8_t nonce[16];
+
+  if (!jv_armed()) {
+    set_message(MV_MESSAGE, "Tests need an armed build", -1, 1);
+    return;
+  }
+  storage_detect();
+  if (storage_problem()) {
+    set_message(MV_MESSAGE, storage_problem(), -1, 1);
+    return;
+  }
+
+  if (dry) {
+    if (slot_is_loadable(slot)) {
+      set_message(MV_MESSAGE, "Dry run: select an empty slot", -1, 1);
+      return;
+    }
+    slots_mkdirs();
+    g_progress_slot = slot;
+    int res = slot_prepare(slot, prepare_progress);
+    if (res == 0)
+      res = slot_stamp(slot, nonce);
+    if (res < 0) {
+      static char err[128];
+      snprintf(err, sizeof(err), "Cannot test: %s", result_text(res));
+      set_message(MV_MESSAGE, err, -1, 1);
+      return;
+    }
+  }
+
+  set_message(MV_BUSY, dry ? "Dry run..." : "Reset test...", -1, 0);
+  slots_sync();
+  run_and_wait(JAMAISVU_MODE_SAVE, slot, dry ? nonce : NULL,
+               dry ? JV_TEST_DRYRUN : JV_TEST_RESET);
+}
+
 static void write_status(void) {
   static char path[64], old[1024];
 
@@ -773,6 +857,12 @@ static int worker_thread(SceSize args, void *argp) {
       case OP_LOAD:
         do_load(g_op_slot);
         break;
+      case OP_TEST_RESET:
+        do_test(0, g_op_slot);
+        break;
+      case OP_TEST_DRY:
+        do_test(1, g_op_slot);
+        break;
     }
 
     if (g_menu_open)
@@ -786,7 +876,10 @@ static int worker_thread(SceSize args, void *argp) {
 /* ------------------------------------------------------------------------ */
 
 void menu_on_resumed(uint32_t mode, int32_t result, uint32_t slot,
-                     int stale_open_files) {
+                     int stale_open_files, uint32_t debug_mode,
+                     uint32_t stage) {
+  g_res_debug = debug_mode;
+  g_res_stage = stage;
   g_res_mode = mode;
   g_res_result = result;
   g_res_slot = slot;

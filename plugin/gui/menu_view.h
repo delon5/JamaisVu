@@ -49,6 +49,7 @@ typedef enum {
   MV_CONFIRM_LOAD,
   MV_BUSY,
   MV_MESSAGE,
+  MV_DIAG,      /* diagnostics: reset test / dry run */
 } MenuMode;
 
 typedef struct {

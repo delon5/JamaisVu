@@ -237,7 +237,8 @@ static int savestate_system_event(int resume, int eventid,
           fs_set_write_mode(FS_WRITES_ALLOWED);
         }
 
-        menu_on_resumed(pargs.mode, pargs.result, pargs.slot, stale);
+        menu_on_resumed(pargs.mode, pargs.result, pargs.slot, stale,
+                        pargs.debug_mode, pargs.stage);
         pargs.mode = JAMAISVU_MODE_NONE;
       }
     }
@@ -248,7 +249,7 @@ static int savestate_system_event(int resume, int eventid,
 
 /* Starts a save or load of a slot: fills in the payload arguments and
  * requests the soft reset during which the payload runs. */
-int jv_request(int mode, int slot, const uint8_t *nonce) {
+int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode) {
   uint32_t flag_pa;
 
   if (!g_armed || slot < 0 || slot >= JV_NUM_SLOTS)
@@ -271,8 +272,10 @@ int jv_request(int mode, int slot, const uint8_t *nonce) {
   else
     memset(pargs.slot_nonce, 0, sizeof(pargs.slot_nonce));
   pargs.ignore_flag_paddr = flag_pa;
+  pargs.debug_mode = debug_mode;
   pargs.result = JV_ERR_ARGS;
   pargs.applied = 0;
+  pargs.stage = 0;
   __sync_synchronize();
   pargs.mode = mode;
   __sync_synchronize();

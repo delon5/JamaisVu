@@ -75,9 +75,12 @@ typedef struct {
   /* Physical address of the plugin's write-blocking flag. Stored in the
    * savestate so the payload can arm the flag inside the restored image. */
   uint32_t ignore_flag_paddr;
+  /* Diagnostics (JV_TEST_*): 0 for a normal save/load */
+  uint32_t debug_mode;
   /* Filled in by the payload. */
   int32_t result;
   uint32_t applied; /* load: 1 once the payload started modifying anything */
+  uint32_t stage;   /* last JV_STAGE_* reached (diagnostics) */
 } PayloadArguments;
 
 enum JamaisVuModes {
@@ -86,7 +89,26 @@ enum JamaisVuModes {
   JAMAISVU_MODE_SAVE,
 };
 
+/* Diagnostics: neither test writes anything */
+#define JV_TEST_NONE   0
+#define JV_TEST_RESET  1 /* payload returns immediately: soft reset only */
+#define JV_TEST_DRYRUN 2 /* runs a save up to (not including) the first write */
+
+/* Payload progress (PayloadArguments.stage) */
+#define JV_STAGE_ENTRY        1
+#define JV_STAGE_L2_FLUSH     2
+#define JV_STAGE_SYSCON       3
+#define JV_STAGE_CDRAM        4
+#define JV_STAGE_MC_POWER     5
+#define JV_STAGE_MC_START     6
+#define JV_STAGE_MC_MOUNT     7
+#define JV_STAGE_FS_MOUNT     8
+#define JV_STAGE_SLOT_FOUND   9
+#define JV_STAGE_SLOT_TOKEN   10
+#define JV_STAGE_WRITING      11
+
 /* Payload result codes (PayloadArguments.result) */
+#define JV_TEST_DONE            1 /* a diagnostics run finished */
 #define JV_OK                   0
 #define JV_ERR_CARD          (-1)  /* Memory Card init / mount failed      */
 #define JV_ERR_NO_SLOT       (-2)  /* slot file missing or wrong size      */

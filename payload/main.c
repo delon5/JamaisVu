@@ -77,11 +77,14 @@ static int run(void) {
 
   if (msproal_start() != 0)
     return JV_ERR_CARD;
+  pargs->stage = JV_STAGE_MC_START;
   if (msproal_mount() != 0)
     return JV_ERR_CARD;
+  pargs->stage = JV_STAGE_MC_MOUNT;
 
   if (f_mount(&fs, "ux0:", 1) != FR_OK)
     return JV_ERR_CARD;
+  pargs->stage = JV_STAGE_FS_MOUNT;
 
   if (pargs->mode == JAMAISVU_MODE_LOAD)
     res = load_state(&fs, pargs->path);
@@ -98,14 +101,25 @@ int main(void) {
   pargs = (PayloadArguments *)PAYLOAD_ARGS_PADDR;
   pargs->result = JV_ERR_CARD;
   pargs->applied = 0;
+  pargs->stage = JV_STAGE_ENTRY;
   pargs->path[sizeof(pargs->path) - 1] = '\0';
+
+  /* Diagnostics: hand control straight back, touching no hardware. Tests
+   * the soft reset / resume path on its own. */
+  if (pargs->debug_mode == JV_TEST_RESET) {
+    pargs->result = JV_TEST_DONE;
+    return 0;
+  }
 
   /* No write may reach the card unless explicitly allowed. */
   guard_deny_all();
 
   l2_flush();
+  pargs->stage = JV_STAGE_L2_FLUSH;
   syscon_init();
+  pargs->stage = JV_STAGE_SYSCON;
   cdram_enable();
+  pargs->stage = JV_STAGE_CDRAM;
 
   // Turn on Game Card LED
   syscon_common_write(0x80 | 0x40, 0x891, 2);
@@ -117,6 +131,7 @@ int main(void) {
   pervasive_msif_set_clock(4);
   pervasive_reset_exit_msif();
   pervasive_clock_enable_msif();
+  pargs->stage = JV_STAGE_MC_POWER;
 
   pargs->result = run();
 

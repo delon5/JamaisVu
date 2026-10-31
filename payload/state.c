@@ -49,7 +49,7 @@
 #define MAX_PATH_LEN    512
 #define MAX_DIR_DEPTH   16
 #define MAX_SAVEDATA_FILE_SIZE (512u * 1024 * 1024)
-#define MAX_EXTENTS     2048
+#define MAX_EXTENTS     4096
 #define CLMT_SIZE       (2 * MAX_EXTENTS + 2)
 #define SECTOR_SIZE     512u
 
@@ -650,6 +650,7 @@ int save_state(FATFS *fs, const char *path) {
   res = slot_open(fs, path);
   if (res < 0)
     return res;
+  pargs->stage = JV_STAGE_SLOT_FOUND;
 
   /* 1b. Make sure this is the file the OS created as ux0 (and not a file
    * with the same name on a Memory Card while ux0 is SD2Vita/USB). */
@@ -665,6 +666,15 @@ int save_state(FATFS *fs, const char *path) {
       goto out;
     }
   }
+
+  pargs->stage = JV_STAGE_SLOT_TOKEN;
+
+  /* Diagnostics: stop here, before the first write. */
+  if (pargs->debug_mode == JV_TEST_DRYRUN) {
+    res = JV_TEST_DONE;
+    goto out;
+  }
+  pargs->stage = JV_STAGE_WRITING;
 
   /* 2. Invalidate the header first, so a partial save is never loadable. */
   res = slot_write_sectors(0, zero_sector, 1);

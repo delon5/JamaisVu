@@ -344,6 +344,11 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
     case MV_MESSAGE:
       labels[n] = "Close";   icons[n] = ICON_CIRCLE; n++;
       break;
+    case MV_DIAG:
+      labels[n] = "Reset test"; icons[n] = ICON_CROSS; n++;
+      labels[n] = "Dry run";    icons[n] = ICON_SQUARE; n++;
+      labels[n] = "Back";       icons[n] = ICON_CIRCLE; n++;
+      break;
     case MV_BUSY:
       cv_text_centered(c, &font_small, MENU_W / 2, y,
                        "Please wait - do not turn off the system",
@@ -442,6 +447,15 @@ static void draw_details(Canvas *c, const MenuModel *m) {
           cv_round_rect(c, bx, by, bw * p / 100 < 8 ? 8 : bw * p / 100, 8, 4,
                         C_ACCENT);
       }
+      break;
+
+    case MV_DIAG:
+      cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y,
+                       "Diagnostics - nothing is written", C_TEXT,
+                       MENU_W - 48);
+      cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y,
+                       "Dry run uses the selected slot; it must be empty",
+                       C_TEXT_DIM, MENU_W - 48);
       break;
 
     case MV_MESSAGE:
