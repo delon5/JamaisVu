@@ -20,6 +20,7 @@
 #include "main.h"
 #include "menu.h"
 #include "slots.h"
+#include "storage.h"
 #include "gui/menu_view.h"
 
 int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
@@ -120,7 +121,10 @@ static const char *result_text(int32_t res) {
     case JV_ERR_GUARD:      return "an unsafe write was blocked";
     case JV_ERR_MEDIAID:    return "Memory Card layout not recognised";
     case JV_ERR_SAVEDATA:   return "could not back up the savedata";
-    case JV_ERR_NOT_MC:     return "slot storage is not the official Memory Card";
+    case JV_ERR_NOT_MC:     return "slot file is not on the official Memory Card";
+    case JV_ERR_NO_MC:      return "no usable Memory Card";
+    case JV_ERR_ARCHIVE_BAD: return "the slot copy is damaged";
+    case JV_ERR_ARCHIVE_VERIFY: return "Memory Card read-back did not match";
     case JV_ERR_SLOT_NO_SPACE: return "not enough free space (704 MB needed)";
     case JV_ERR_SLOT_IO:    return "could not create the slot file";
     default:                return "internal error";
@@ -469,17 +473,26 @@ static void prepare_progress(int pct) {
 
 static void refresh_slots(void) {
   static SlotInfo info;
-
-  slots_select_root();
   int exists[JV_NUM_SLOTS], locked[JV_NUM_SLOTS];
 
-  /* free-space safeguard: only as many new slots as fit (slot_policy.h) */
+  StorageMode mode = storage_detect();
+  const char *mc = storage_mc_root();
+
   model_begin();
-  g_model.savedata_rolls_back = slots_root_is_ux0();
+  g_model.savedata_rolls_back = mc && strcmp(mc, "ux0:") == 0;
   model_end();
+
+  /* free-space safeguard: only as many new slots as fit (slot_policy.h);
+   * in ARCHIVE mode the Memory Card must also hold the working file */
   for (int i = 0; i < JV_NUM_SLOTS; i++)
-    exists[i] = slot_file_exists(i);
-  slot_policy(slot_free_space(), exists, locked, JV_NUM_SLOTS);
+    exists[i] = mode != STORAGE_NONE && slot_file_exists(i);
+  if (mode == STORAGE_NONE ||
+      (mode == STORAGE_ARCHIVE && !work_available())) {
+    for (int i = 0; i < JV_NUM_SLOTS; i++)
+      locked[i] = !exists[i];
+  } else {
+    slot_policy(slot_free_space(), exists, locked, JV_NUM_SLOTS);
+  }
 
   for (int i = 0; i < JV_NUM_SLOTS; i++) {
     int ok = exists[i] && slot_is_loadable(i) &&
@@ -501,11 +514,52 @@ static void refresh_slots(void) {
   }
 }
 
+/* Why save/load cannot run right now, or NULL */
+static const char *storage_problem(void) {
+  static char msg[112];
+  if (storage_mode() == STORAGE_NONE) {
+    snprintf(msg, sizeof(msg), "Unavailable: %s", storage_reason());
+    return msg;
+  }
+  if (storage_mode() == STORAGE_ARCHIVE && !work_available())
+    return "The Memory Card needs 768 MB free for the working file";
+  return NULL;
+}
+
+static void copy_progress(int pct) {
+  static char msg[96];
+  snprintf(msg, sizeof(msg), "Copying slot %d  %d%%", g_progress_slot + 1,
+           pct);
+  set_message(MV_BUSY, msg, pct, 0);
+}
+
 static void after_resume(void) {
   static char msg[128];
 
   if (g_res_mode == JAMAISVU_MODE_SAVE) {
-    if (g_res_result == JV_OK) {
+    if (g_res_result == JV_OK && storage_mode() == STORAGE_ARCHIVE) {
+      /* the snapshot is in the Memory Card's working file: copy it to its
+       * slot on uma0 (the old slot is replaced only when this succeeds) */
+      uint32_t len = 0, crc = 0;
+      g_progress_slot = g_res_slot;
+      set_message(MV_BUSY, "Copying to uma0...", 0, 0);
+      g_menu_open = 1;
+      int r = storage_archive_from_work(g_res_slot, &len, &crc,
+                                        copy_progress);
+      if (r == 0) {
+        g_pending_info.state_len = len;
+        g_pending_info.state_crc = crc;
+        r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
+      }
+      close_menu();
+      if (r == 0)
+        snprintf(msg, sizeof(msg), "Saved to slot %u (uma0)",
+                 (unsigned)g_res_slot + 1);
+      else
+        snprintf(msg, sizeof(msg), "Save failed: copy to uma0: %s",
+                 result_text(r));
+      toast(msg, r != 0);
+    } else if (g_res_result == JV_OK) {
       int r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
       if (r == 0)
         snprintf(msg, sizeof(msg), "Saved to slot %u", (unsigned)g_res_slot + 1);
@@ -513,12 +567,6 @@ static void after_resume(void) {
         snprintf(msg, sizeof(msg), "Saved, but the slot info could not be "
                  "written - slot %u stays empty", (unsigned)g_res_slot + 1);
       toast(msg, r != 0);
-    } else if (g_res_result == JV_ERR_NOT_MC && !slots_root_is_ux0()) {
-      /* uma0 exists but is not the Memory Card: nothing was written; use
-       * ux0 from now on (this session) */
-      slots_mark_root_bad();
-      toast("Save failed: uma0 is not the Memory Card - using ux0 now, "
-            "please save again", 1);
     } else {
       snprintf(msg, sizeof(msg), "Save failed: %s",
                result_text(g_res_result));
@@ -572,7 +620,11 @@ static void do_save(int slot) {
     return;
   }
 
-  slots_select_root();
+  storage_detect();
+  if (storage_problem()) {
+    set_message(MV_MESSAGE, storage_problem(), -1, 1);
+    return;
+  }
   slots_mkdirs();
 
   g_progress_slot = slot;
@@ -601,8 +653,12 @@ static void do_save(int slot) {
     return;
   }
 
-  /* the slot stays "empty" until the save has fully succeeded */
-  slot_info_remove(slot);
+  /* DIRECT: the slot file itself is overwritten, so the slot stays
+   * "empty" until the save has fully succeeded. ARCHIVE: the payload
+   * writes the working file; the old slot on uma0 stays valid until the
+   * copy of the new snapshot has completed. */
+  if (storage_mode() == STORAGE_DIRECT)
+    slot_info_remove(slot);
 
   memset(&g_pending_info, 0, sizeof(g_pending_info));
   strncpy(g_pending_info.titleid, g_capture_tid,
@@ -636,12 +692,40 @@ static void do_save(int slot) {
 }
 
 static void do_load(int slot) {
-  static char msg[64];
+  static char msg[96];
+  static SlotInfo info;
 
-  if (!slot_is_loadable(slot)) {
+  storage_detect();
+  if (storage_problem()) {
+    set_message(MV_MESSAGE, storage_problem(), -1, 1);
+    return;
+  }
+
+  if (!slot_is_loadable(slot) ||
+      slot_info_read(slot, &info, g_thumbs[PENDING]) < 0) {
     snprintf(msg, sizeof(msg), "Slot %d is empty or damaged", slot + 1);
     set_message(MV_MESSAGE, msg, -1, 1);
     return;
+  }
+
+  if (storage_mode() == STORAGE_ARCHIVE) {
+    /* bring the snapshot back into the Memory Card's working file and
+     * verify it there before the payload ever sees it */
+    int res;
+    slots_mkdirs();
+    g_progress_slot = slot;
+    res = slot_prepare(slot, prepare_progress);
+    if (res == 0) {
+      set_message(MV_BUSY, "Copying from uma0...", 0, 0);
+      res = storage_restore_to_work(slot, info.state_len, info.state_crc,
+                                    copy_progress);
+    }
+    if (res < 0) {
+      snprintf(msg, sizeof(msg), "Cannot load: %s - nothing was changed",
+               result_text(res));
+      set_message(MV_MESSAGE, msg, -1, 1);
+      return;
+    }
   }
 
   snprintf(msg, sizeof(msg), "Loading slot %d...", slot + 1);

@@ -47,6 +47,48 @@ for cluster in 4K 32K 128K; do
   echo
 done
 
+# --- plugin storage (Memory Card detection, uma0 archive) -----------------
+# Two FatFs copies: the plugin's read-only one (raw Memory Card) and a
+# read-write one playing the OS (symbols renamed to os_*).
+SO="$WORK/storage_obj"
+mkdir -p "$SO"
+CF="-std=gnu11 -O1 -g -Wall -Wno-unused-parameter -fsanitize=address,undefined"
+SZ="-DJV_SLOT_SIZE=0x800000u -DJV_FREE_SPACE_MARGIN=0x100000ull"
+gcc $CF -c -I"$WORK/fatfs" -o "$SO/ff_os.o" "$WORK/fatfs/ff.c"
+gcc $CF -c -I"$WORK/fatfs" -o "$SO/ffuni_os.o" "$WORK/fatfs/ffunicode.c"
+{
+  nm -g --defined-only "$SO/ff_os.o" "$SO/ffuni_os.o" | awk 'NF==3{print $3}'
+  echo disk_read; echo disk_write; echo disk_status; echo disk_initialize
+  echo disk_ioctl; echo get_fattime
+} | sort -u | awk '{print $1" os_"$1}' > "$SO/rename.txt"
+objcopy --redefine-syms="$SO/rename.txt" "$SO/ff_os.o"
+objcopy --redefine-syms="$SO/rename.txt" "$SO/ffuni_os.o"
+for src in "$WORK/fatfs/ff.c" "$WORK/fatfs/ffunicode.c"; do
+  gcc $CF -DFF_FS_READONLY=1 -c -I"$WORK/fatfs" \
+    -o "$SO/ro_$(basename "$src" .c).o" "$src"
+done
+for src in "$ROOT/plugin/storage.c" "$ROOT/plugin/slots.c" \
+           "$ROOT/plugin/mc_raw.c" "$ROOT/payload/crc32.c"; do
+  gcc $CF $SZ -DFF_FS_READONLY=1 -c -I"$ROOT/tests/host/fake_sdk" \
+    -I"$ROOT/plugin" -I"$WORK/fatfs" -o "$SO/$(basename "$src" .c).o" "$src"
+done
+for src in "$ROOT/tests/host/fake_kernel.c" "$ROOT/tests/host/test_storage.c"; do
+  gcc $CF $SZ -c -I"$ROOT/tests/host/fake_sdk" -I"$ROOT/tests/host" \
+    -I"$ROOT/plugin" -I"$WORK/fatfs" -o "$SO/$(basename "$src" .c).o" "$src"
+done
+gcc $CF -o "$WORK/test_storage" "$SO"/*.o
+echo "=== plugin storage (detection, uma0 first, archive copies) ==="
+mkdir -p "$WORK/img/storage"
+truncate -s 64M "$WORK/img/storage/card.img"
+mkfs.exfat -q -c 32K "$WORK/img/storage/card.img" >/dev/null
+"$WORK/test_storage" "$WORK/img/storage/card.img" "$WORK/img/storage" || rc=1
+if fsck.exfat -n "$WORK/img/storage/card.img" >/dev/null 2>&1; then
+  echo "fsck.exfat: card image clean"
+else
+  echo "fsck.exfat: card image ERRORS"; rc=1
+fi
+echo
+
 gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_slot_policy" \
   "$ROOT/tests/host/test_slot_policy.c" "$ROOT/plugin/slot_policy.c"
 "$WORK/test_slot_policy" || rc=1

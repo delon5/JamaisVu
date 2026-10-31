@@ -14,50 +14,59 @@
 #include <string.h>
 
 #include "slots.h"
+#include "storage.h"
 #include "../payload/crc32.h"
 
 #define THUMB_BYTES (JV_THUMB_W * JV_THUMB_H * 4)
 
 #define SLOT_SUBDIR "data/JamaisVu"
 
-static const char *g_root = "ux0:";
-static int g_uma0_bad = 0;
-
-void slots_select_root(void) {
-  SceIoStat st;
-  if (!g_uma0_bad && ksceIoGetstat("uma0:", &st) >= 0)
-    g_root = "uma0:";
-  else
-    g_root = "ux0:";
+static const char *slot_root(void) {
+  return storage_slot_root() ? storage_slot_root() : "ux0:";
 }
 
-const char *slots_root(void) {
-  return g_root;
-}
-
-int slots_root_is_ux0(void) {
-  return strcmp(g_root, "ux0:") == 0;
-}
-
-void slots_mark_root_bad(void) {
-  if (!slots_root_is_ux0())
-    g_uma0_bad = 1;
-  slots_select_root();
+static const char *mc_root(void) {
+  return storage_mc_root() ? storage_mc_root() : "ux0:";
 }
 
 void slots_sync(void) {
-  ksceIoSync(g_root, 0);
-  if (!slots_root_is_ux0())
+  const char *r = slot_root(), *m = mc_root();
+  ksceIoSync(r, 0);
+  if (strcmp(m, r) != 0)
+    ksceIoSync(m, 0);
+  if (strcmp(r, "ux0:") != 0 && strcmp(m, "ux0:") != 0)
     ksceIoSync("ux0:", 0);
 }
 
-static void path_for(char *out, int len, int slot, const char *ext) {
-  snprintf(out, len, "%s" SLOT_SUBDIR "/slot%d.%s", g_root, slot + 1, ext);
+void slot_path(char *out, int len, int slot, const char *ext) {
+  snprintf(out, len, "%s" SLOT_SUBDIR "/slot%d.%s", slot_root(), slot + 1,
+           ext);
+}
+
+void work_os_path(char *out, int len) {
+  snprintf(out, len, "%s" SLOT_SUBDIR "/work.bin", mc_root());
+}
+
+void work_payload_path(char *out, int len) {
+  snprintf(out, len, "ux0:" SLOT_SUBDIR "/work.bin");
+}
+
+/* the file the payload writes: slotN.bin (DIRECT) or work.bin (ARCHIVE) */
+static void target_os_path(char *out, int len, int slot) {
+  if (storage_mode() == STORAGE_ARCHIVE)
+    work_os_path(out, len);
+  else
+    slot_path(out, len, slot, "bin");
 }
 
 void slot_payload_path(char *out, int len, int slot) {
-  snprintf(out, len, "ux0:" SLOT_SUBDIR "/slot%d.bin", slot + 1);
+  if (storage_mode() == STORAGE_ARCHIVE)
+    work_payload_path(out, len);
+  else
+    snprintf(out, len, "ux0:" SLOT_SUBDIR "/slot%d.bin", slot + 1);
 }
+
+#define path_for slot_path
 
 static int mkdir_ok(const char *path) {
   int res = ksceIoMkdir(path, 0777);
@@ -71,13 +80,19 @@ int jv_mkdirs(void) {
 
 int slots_mkdirs(void) {
   static char path[32];
-  snprintf(path, sizeof(path), "%sdata", g_root);
-  mkdir_ok(path);
-  snprintf(path, sizeof(path), "%s" SLOT_SUBDIR, g_root);
-  return mkdir_ok(path);
+  const char *roots[2] = { slot_root(), mc_root() };
+  int res = 0;
+  for (int i = 0; i < 2; i++) {
+    snprintf(path, sizeof(path), "%sdata", roots[i]);
+    mkdir_ok(path);
+    snprintf(path, sizeof(path), "%s" SLOT_SUBDIR, roots[i]);
+    if (mkdir_ok(path) < 0)
+      res = -1;
+  }
+  return res;
 }
 
-static int64_t file_size(const char *path) {
+int64_t slot_file_size(const char *path) {
   SceIoStat st;
   memset(&st, 0, sizeof(st));
   if (ksceIoGetstat(path, &st) < 0)
@@ -92,29 +107,47 @@ typedef struct {
   uint32_t unk;
 } DevInfo;
 
-int64_t slot_free_space(void) {
+static int64_t free_space(const char *root) {
   DevInfo info;
   memset(&info, 0, sizeof(info));
-  if (ksceIoDevctl(g_root, 0x3001, NULL, 0, &info, sizeof(info)) < 0)
+  if (ksceIoDevctl(root, 0x3001, NULL, 0, &info, sizeof(info)) < 0)
     return -1;
   return (int64_t)info.free_size;
 }
 
+int64_t slot_free_space(void) {
+  return free_space(slot_root());
+}
+
+int64_t mc_free_space(void) {
+  return free_space(mc_root());
+}
+
+int work_available(void) {
+  static char path[80];
+  work_os_path(path, sizeof(path));
+  if (slot_file_size(path) == JV_SLOT_SIZE)
+    return 1;
+  int64_t avail = mc_free_space();
+  return avail < 0 ||
+         (uint64_t)avail >= (uint64_t)JV_SLOT_SIZE + JV_FREE_SPACE_MARGIN;
+}
+
 int slot_prepare(int slot, void (*progress)(int pct)) {
-  static char path[64];
+  static char path[80];
   SceUID blk, fd;
   void *zero;
   int res = 0;
 
-  path_for(path, sizeof(path), slot, "bin");
+  target_os_path(path, sizeof(path), slot);
 
-  if (file_size(path) == JV_SLOT_SIZE)
+  if (slot_file_size(path) == JV_SLOT_SIZE)
     return 0;
 
   /* wrong size (or old format): recreate */
   ksceIoRemove(path);
 
-  int64_t avail = slot_free_space();
+  int64_t avail = mc_free_space();
   if (avail >= 0 &&
       (uint64_t)avail < (uint64_t)JV_SLOT_SIZE + JV_FREE_SPACE_MARGIN)
     return JV_ERR_SLOT_NO_SPACE;
@@ -150,7 +183,7 @@ int slot_prepare(int slot, void (*progress)(int pct)) {
     res = JV_ERR_SLOT_IO;
   ksceKernelFreeMemBlock(blk);
 
-  if (res == 0 && file_size(path) != JV_SLOT_SIZE)
+  if (res == 0 && slot_file_size(path) != JV_SLOT_SIZE)
     res = JV_ERR_SLOT_IO;
 
   if (res < 0)
@@ -163,7 +196,7 @@ int slot_prepare(int slot, void (*progress)(int pct)) {
 }
 
 int slot_stamp(int slot, uint8_t nonce[16]) {
-  static char path[64];
+  static char path[80];
   static uint8_t sector[512];
   static uint32_t counter;
 
@@ -178,7 +211,7 @@ int slot_stamp(int slot, uint8_t nonce[16]) {
   memset(sector, 0, sizeof(sector));
   memcpy(sector, nonce, 16);
 
-  path_for(path, sizeof(path), slot, "bin");
+  target_os_path(path, sizeof(path), slot);
   SceUID fd = ksceIoOpen(path, SCE_O_WRONLY, 0);
   if (fd < 0)
     return JV_ERR_SLOT_IO;
@@ -188,7 +221,7 @@ int slot_stamp(int slot, uint8_t nonce[16]) {
     res = JV_ERR_SLOT_IO;
   slots_sync();
 
-  if (res == 0 && file_size(path) != JV_SLOT_SIZE)
+  if (res == 0 && slot_file_size(path) != JV_SLOT_SIZE)
     res = JV_ERR_SLOT_IO;
   return res;
 }
@@ -201,7 +234,7 @@ static uint32_t info_crc(const SlotInfo *info, const uint32_t *thumb) {
 }
 
 int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
-  static char path[64], tmp[64];
+  static char path[80], tmp[80];
   int res = 0;
 
   path_for(path, sizeof(path), slot, "jvi");
@@ -237,7 +270,7 @@ int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
 }
 
 int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb) {
-  static char path[64];
+  static char path[80];
   int res = 0;
 
   path_for(path, sizeof(path), slot, "jvi");
@@ -269,7 +302,7 @@ int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb) {
 }
 
 int slot_info_remove(int slot) {
-  static char path[64];
+  static char path[80];
   path_for(path, sizeof(path), slot, "jvi");
   int res = ksceIoRemove(path);
   slots_sync();
@@ -277,20 +310,28 @@ int slot_info_remove(int slot) {
 }
 
 int slot_file_exists(int slot) {
-  static char path[64];
+  static char path[80];
   path_for(path, sizeof(path), slot, "bin");
-  return file_size(path) == JV_SLOT_SIZE;
+  int64_t size = slot_file_size(path);
+  if (storage_mode() == STORAGE_ARCHIVE)
+    return size > 0;
+  return size == JV_SLOT_SIZE;
 }
 
 int slot_is_loadable(int slot) {
-  static char path[64];
+  static char path[80];
   static SlotInfo info;
   static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
 
-  path_for(path, sizeof(path), slot, "bin");
-  if (file_size(path) != JV_SLOT_SIZE)
+  if (storage_mode() == STORAGE_NONE)
     return 0;
-  return slot_info_read(slot, &info, thumb) == 0;
+  if (slot_info_read(slot, &info, thumb) < 0)
+    return 0;
+  path_for(path, sizeof(path), slot, "bin");
+  int64_t size = slot_file_size(path);
+  if (storage_mode() == STORAGE_ARCHIVE)
+    return info.state_len >= 1024 && size == (int64_t)info.state_len;
+  return size == JV_SLOT_SIZE;
 }
 
 /* --- param.sfo ---------------------------------------------------------- */

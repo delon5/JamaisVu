@@ -30,6 +30,10 @@ add_executable(JamaisVu
   plugin/slots.c
   plugin/slot_policy.c
   plugin/menu.c
+  plugin/storage.c
+  plugin/mc_raw.c
+  payload/FatFs/ff.c
+  payload/FatFs/ffunicode.c
   plugin/gui/render.c
   plugin/gui/menu_view.c
   plugin/gui/font_data.c
@@ -37,6 +41,10 @@ add_executable(JamaisVu
   plugin/resume.S
   ${JamaisVu_payload_object}
 )
+
+# Read-only FatFs over the raw Memory Card (plugin/mc_raw.c)
+target_include_directories(JamaisVu PRIVATE payload/FatFs)
+target_compile_definitions(JamaisVu PRIVATE FF_FS_READONLY=1)
 
 # Set -DJAMAISVU_ALLOW_UNVERIFIED_FW=ON to arm on firmware whose offsets
 # have not been verified on hardware (see plugin/offsets.c). Testing only.

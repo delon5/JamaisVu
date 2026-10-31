@@ -12,10 +12,14 @@
 
 #include <stdint.h>
 
+#ifndef JV_SLOT_SIZE /* host tests use smaller values */
 #define JV_SLOT_SIZE 0x2C000000u /* 704 MiB per slot file */
+#endif
 
 /* Free space that must remain on ux0 after creating a slot file. */
+#ifndef JV_FREE_SPACE_MARGIN
 #define JV_FREE_SPACE_MARGIN (64ull * 1024 * 1024)
+#endif
 
 /*
  * A slot whose file already exists is always usable (its space is already

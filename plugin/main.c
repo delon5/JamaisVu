@@ -28,6 +28,7 @@
 #include "offsets.h"
 #include "slots.h"
 #include "menu.h"
+#include "storage.h"
 
 #define JV_VERSION "2.0-dev"
 
@@ -259,7 +260,9 @@ int jv_request(int mode, int slot, const uint8_t *nonce) {
 
   pargs.slot = slot;
   slot_payload_path(pargs.path, sizeof(pargs.path), slot);
-  pargs.backup_savedata = slots_root_is_ux0();
+  /* savedata lives on ux0: only back it up if ux0 is the Memory Card */
+  pargs.backup_savedata = storage_mc_root() &&
+                          strcmp(storage_mc_root(), "ux0:") == 0;
   pargs.slot_size = JV_SLOT_SIZE;
   if (nonce)
     memcpy(pargs.slot_nonce, nonce, sizeof(pargs.slot_nonce));
