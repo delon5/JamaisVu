@@ -462,7 +462,7 @@ void menu_view_render(Canvas *c, const MenuModel *m) {
   cv_fill(c, 1, 12, MENU_W - 2, HEADER_H - 12, C_HEADER);
   cv_round_rect(c, 1, 1, MENU_W - 2, 24, 11, C_HEADER);
   cv_fill(c, 1, HEADER_H, MENU_W - 2, 1, C_RULE);
-  draw_logo(c, 24, 8);
+  draw_logo(c, 24, 13); /* letters + rising particles centred in the header */
   draw_counter(c, m);
 
   for (int i = 0; i < JV_NUM_SLOTS; i++)
