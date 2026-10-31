@@ -242,7 +242,7 @@ static int savestate_system_event(int resume, int eventid,
 
 /* Starts a save or load of a slot: fills in the payload arguments and
  * requests the soft reset during which the payload runs. */
-int jv_request(int mode, int slot) {
+int jv_request(int mode, int slot, const uint8_t *nonce) {
   uint32_t flag_pa;
 
   if (!g_armed || slot < 0 || slot >= JV_NUM_SLOTS)
@@ -255,6 +255,10 @@ int jv_request(int mode, int slot) {
   pargs.slot = slot;
   slot_state_path(pargs.path, sizeof(pargs.path), slot);
   pargs.slot_size = JV_SLOT_SIZE;
+  if (nonce)
+    memcpy(pargs.slot_nonce, nonce, sizeof(pargs.slot_nonce));
+  else
+    memset(pargs.slot_nonce, 0, sizeof(pargs.slot_nonce));
   pargs.ignore_flag_paddr = flag_pa;
   pargs.result = JV_ERR_ARGS;
   pargs.applied = 0;

@@ -120,6 +120,7 @@ static const char *result_text(int32_t res) {
     case JV_ERR_GUARD:      return "an unsafe write was blocked";
     case JV_ERR_MEDIAID:    return "Memory Card layout not recognised";
     case JV_ERR_SAVEDATA:   return "could not back up the savedata";
+    case JV_ERR_NOT_MC:     return "ux0 is not the official Memory Card";
     case JV_ERR_SLOT_NO_SPACE: return "not enough free space (704 MB needed)";
     case JV_ERR_SLOT_IO:    return "could not create the slot file";
     default:                return "internal error";
@@ -363,6 +364,7 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   MenuMode mode = g_model.mode;
   int sel = g_model.selected;
   int used = g_model.slots[sel].used;
+  int locked = g_model.slots[sel].locked;
   ksceKernelUnlockMutex(g_mtx, 1);
 
   if (combo && mode != MV_BUSY) {
@@ -380,7 +382,10 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
           g_model.selected = (sel + 1) % JV_NUM_SLOTS;
         model_end();
       } else if (pressed & SCE_CTRL_CROSS) {
-        if (g_capture_ok)
+        if (locked)
+          set_message(MV_MESSAGE, "Not enough free space - each slot needs "
+                      "704 MB", -1, 1);
+        else if (g_capture_ok)
           set_message(MV_CONFIRM_SAVE, "", -1, 0);
         else
           set_message(MV_MESSAGE, "Start a game first - the LiveArea "
@@ -454,13 +459,21 @@ static void prepare_progress(int pct) {
 
 static void refresh_slots(void) {
   static SlotInfo info;
+  int exists[JV_NUM_SLOTS], locked[JV_NUM_SLOTS];
+
+  /* free-space safeguard: only as many new slots as fit (slot_policy.h) */
+  for (int i = 0; i < JV_NUM_SLOTS; i++)
+    exists[i] = slot_file_exists(i);
+  slot_policy(slot_free_space(), exists, locked, JV_NUM_SLOTS);
 
   for (int i = 0; i < JV_NUM_SLOTS; i++) {
-    int ok = slot_is_loadable(i) && slot_info_read(i, &info, g_thumbs[i]) == 0;
+    int ok = exists[i] && slot_is_loadable(i) &&
+             slot_info_read(i, &info, g_thumbs[i]) == 0;
 
     model_begin();
     MenuSlot *s = &g_model.slots[i];
     memset(s, 0, sizeof(*s));
+    s->locked = locked[i];
     if (ok) {
       s->used = 1;
       strncpy(s->titleid, info.titleid, sizeof(s->titleid) - 1);
@@ -506,11 +519,11 @@ static void after_resume(void) {
   }
 }
 
-static void run_and_wait(int mode, int slot) {
+static void run_and_wait(int mode, int slot, const uint8_t *nonce) {
   ksceKernelClearEventFlag(g_evf, ~EVF_RESUMED);
   close_menu();
 
-  if (jv_request(mode, slot) < 0) {
+  if (jv_request(mode, slot, nonce) < 0) {
     toast("Could not start - the system refused to reset", 1);
     return;
   }
@@ -586,11 +599,18 @@ static void do_save(int slot) {
   g_pending_info.minute = t.minute;
   g_pending_info.second = t.second;
 
+  static uint8_t nonce[16];
+  if (slot_stamp(slot, nonce) < 0) {
+    set_message(MV_MESSAGE, "Cannot save: could not write the slot file",
+                -1, 1);
+    return;
+  }
+
   snprintf(msg, sizeof(msg), "Saving to slot %d...", slot + 1);
   set_message(MV_BUSY, msg, -1, 0);
   ksceIoSync("ux0:", 0);
 
-  run_and_wait(JAMAISVU_MODE_SAVE, slot);
+  run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce);
 }
 
 static void do_load(int slot) {
@@ -606,7 +626,7 @@ static void do_load(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   ksceIoSync("ux0:", 0);
 
-  run_and_wait(JAMAISVU_MODE_LOAD, slot);
+  run_and_wait(JAMAISVU_MODE_LOAD, slot, NULL);
 }
 
 static void write_status(void) {

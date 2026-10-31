@@ -37,7 +37,7 @@ gcc -O2 -Wall -I"$ROOT/plugin/gui" -o "$WORK/preview" \
 python3 - "$WORK" "$OUT" <<'PY'
 import sys, glob, os
 from PIL import Image
-for f in sorted(glob.glob(sys.argv[1] + "/[0-9]_*.rgba")):
+for f in sorted(glob.glob(sys.argv[1] + "/[0-9]*_*.rgba")):
     img = Image.frombytes("RGBA", (960, 544), open(f, "rb").read()).convert("RGB")
     out = os.path.join(sys.argv[2], os.path.basename(f)[:-5] + ".png")
     img.save(out)

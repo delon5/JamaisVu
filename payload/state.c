@@ -651,6 +651,21 @@ int save_state(FATFS *fs, const char *path) {
   if (res < 0)
     return res;
 
+  /* 1b. Make sure this is the file the OS created as ux0 (and not a file
+   * with the same name on a Memory Card while ux0 is SD2Vita/USB). */
+  {
+    uint32_t card_sec, contig;
+    if (slot_map(0, &card_sec, &contig) < 0 ||
+        ms_read_sector(io_buf, card_sec, 1) != 0) {
+      res = JV_ERR_IO;
+      goto out;
+    }
+    if (memcmp(io_buf, pargs->slot_nonce, sizeof(pargs->slot_nonce)) != 0) {
+      res = JV_ERR_NOT_MC;
+      goto out;
+    }
+  }
+
   /* 2. Invalidate the header first, so a partial save is never loadable. */
   res = slot_write_sectors(0, zero_sector, 1);
   if (res < 0)

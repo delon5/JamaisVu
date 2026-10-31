@@ -103,6 +103,8 @@ void *jv_phys(uint32_t pa, uint32_t size) {
 static PayloadArguments args;
 PayloadArguments *pargs = &args;
 
+static uint8_t g_nonce[16];
+
 /* ------------------------------------------------------------------------ */
 /* Helpers                                                                  */
 /* ------------------------------------------------------------------------ */
@@ -228,6 +230,26 @@ static int read_file(const char *path, void *data, uint32_t max, uint32_t *len) 
   return 0;
 }
 
+/* What the plugin does right before a save: write a fresh token at the
+ * start of the slot file through the OS (here: FatFs, guard open). */
+static void stamp_slot(const char *path) {
+  static uint32_t ctr = 1;
+  FIL f;
+  UINT bw;
+  uint8_t sector[512] = { 0 };
+  for (int i = 0; i < 16; i++)
+    g_nonce[i] = (uint8_t)(ctr * 37 + i * 11);
+  ctr++;
+  memcpy(sector, g_nonce, 16);
+  allow_everything();
+  mount();
+  CHECK(f_open(&f, path, FA_WRITE) == FR_OK, "stamp open %s", path);
+  f_write(&f, sector, sizeof(sector), &bw);
+  f_close(&f);
+  f_unmount("ux0:");
+  guard_deny_all();
+}
+
 static void get_file_extents(const char *path, RangeSet *set) {
   static DWORD tbl[8192];
   FIL f;
@@ -326,6 +348,7 @@ static void make_card(const char *part_img) {
 
 static void reset_args(int mode, const char *path, uint32_t slot_size) {
   memset(&args, 0, sizeof(args));
+  memcpy(args.slot_nonce, g_nonce, sizeof(g_nonce));
   args.mode = mode;
   args.process_num = 2;
   strcpy(args.titleid[0], "PCSE00123");
@@ -529,6 +552,7 @@ int main(int argc, char **argv) {
 
   /* --- Save ----------------------------------------------------------- */
   printf("save\n");
+  stamp_slot(slot);
   snapshot_card();
   reset_args(JAMAISVU_MODE_SAVE, slot, slot_size);
   mount();
@@ -639,6 +663,19 @@ int main(int argc, char **argv) {
   /* --- Save failure modes ------------------------------------------------ */
   printf("save failure modes\n");
   {
+    /* slot file whose token does not match (e.g. ux0 is an SD2Vita and a
+     * same-named file exists on the Memory Card) */
+    stamp_slot(slot);
+    snapshot_card();
+    reset_args(JAMAISVU_MODE_SAVE, slot, slot_size);
+    args.slot_nonce[0] ^= 0xff;
+    mount();
+    res = save_state(&fs, slot);
+    unmount();
+    printf("  %-44s -> %d\n", "slot token mismatch (not this card)", res);
+    CHECK(res == JV_ERR_NOT_MC, "token mismatch: %d", res);
+    CHECK(changed_outside(NULL, NULL) == 0, "token mismatch wrote to the card");
+
     snapshot_card();
     reset_args(JAMAISVU_MODE_SAVE, slot, slot_size + 512);
     mount();
@@ -666,6 +703,7 @@ int main(int argc, char **argv) {
     get_file_extents(small, &sext);
     unmount();
     guard_deny_all();
+    stamp_slot(small);
     snapshot_card();
     reset_args(JAMAISVU_MODE_SAVE, small, 1024 * 1024);
     mount();
@@ -684,6 +722,7 @@ int main(int argc, char **argv) {
           changed_outside(NULL, NULL) == 0, "failed save must not be loadable");
 
     /* card write error in the middle of a save */
+    stamp_slot(slot);
     snapshot_card();
     reset_args(JAMAISVU_MODE_SAVE, slot, slot_size);
     writes_done = 0;

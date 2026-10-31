@@ -61,6 +61,11 @@ typedef struct {
   /* Exact size the plugin pre-allocated for the slot file. The payload
    * refuses to save into a file of any other size. */
   uint32_t slot_size;
+  /* Random token the plugin wrote (through the OS) at the start of the
+   * slot file just before a save. The payload only writes to the file it
+   * finds on the Memory Card if it contains the same token, i.e. if it is
+   * the very file the OS sees as ux0 (not e.g. an SD2Vita/USB ux0). */
+  uint8_t slot_nonce[16];
   /* Physical address of the plugin's write-blocking flag. Stored in the
    * savestate so the payload can arm the flag inside the restored image. */
   uint32_t ignore_flag_paddr;
@@ -88,6 +93,7 @@ enum JamaisVuModes {
 #define JV_ERR_MEDIAID       (-9)  /* mediaid partition not found          */
 #define JV_ERR_SAVEDATA      (-10) /* savedata backup failed               */
 #define JV_ERR_ARGS          (-11) /* invalid arguments from the plugin    */
+#define JV_ERR_NOT_MC        (-12) /* ux0 is not the official Memory Card  */
 
 typedef struct {
   uint32_t addr; /* physical address (or special value) */

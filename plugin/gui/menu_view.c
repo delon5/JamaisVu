@@ -278,10 +278,19 @@ static void draw_slot(Canvas *c, const MenuModel *m, int i) {
       cv_fill(c, x + 4, y + k, 1, 4, C_EMPTY_EDGE);
       cv_fill(c, x + JV_THUMB_W - 5, y + k, 1, 4, C_EMPTY_EDGE);
     }
-    cv_text_centered(c, &font_small, x + JV_THUMB_W / 2,
-                     y + (JV_THUMB_H - font_small.height) / 2,
-                     s->used ? "NO PREVIEW" : "EMPTY", C_TEXT_DIM,
-                     JV_THUMB_W);
+    if (s->locked) {
+      /* padlock */
+      int lx = x + JV_THUMB_W / 2, ly = y + JV_THUMB_H / 2 - 14;
+      cv_round_frame(c, lx - 8, ly, 16, 18, 8, 3, C_TEXT_DIM);
+      cv_round_rect(c, lx - 12, ly + 10, 24, 18, 4, C_TEXT_DIM);
+      cv_text_centered(c, &font_small, lx, y + JV_THUMB_H - 26, "LOCKED",
+                       C_TEXT_DIM, JV_THUMB_W);
+    } else {
+      cv_text_centered(c, &font_small, x + JV_THUMB_W / 2,
+                       y + (JV_THUMB_H - font_small.height) / 2,
+                       s->used ? "NO PREVIEW" : "EMPTY", C_TEXT_DIM,
+                       JV_THUMB_W);
+    }
   }
 
   /* slot number badge */
@@ -318,10 +327,10 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
   switch (m->mode) {
     case MV_BROWSE:
       labels[n] = "Select"; icons[n] = ICON_LEFT; two[n] = 1; n++;
-      if (m->can_save) {
+      if (m->can_save && !m->slots[m->selected].locked) {
         labels[n] = "Save"; icons[n] = ICON_CROSS; n++;
       }
-      if (m->can_load) {
+      if (m->can_load && m->slots[m->selected].used) {
         labels[n] = "Load"; icons[n] = ICON_SQUARE; n++;
       }
       labels[n] = "Close";  icons[n] = ICON_CIRCLE; n++;
@@ -365,6 +374,12 @@ static void draw_details(Canvas *c, const MenuModel *m) {
                          s->title[0] ? s->title : s->titleid, C_TEXT,
                          MENU_W - 48);
         cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y, info,
+                         C_TEXT_DIM, MENU_W - 48);
+      } else if (s->locked) {
+        cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y,
+                         "Not enough free space", C_TEXT_DIM, MENU_W - 48);
+        cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y,
+                         "Each slot needs 704 MB free on the Memory Card",
                          C_TEXT_DIM, MENU_W - 48);
       } else {
         cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y, "Empty slot",

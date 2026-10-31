@@ -108,6 +108,14 @@ int main(int argc, char **argv) {
   frame(argv[3], "9_livearea_load", &m);
   m.can_save = 1;
 
+  /* free-space safeguard: ~1.5 GB free -> slots 3 and 5 locked */
+  m.slots[2].locked = 1;
+  m.slots[4].locked = 1;
+  m.selected = 4;
+  frame(argv[3], "10_locked_slot", &m);
+  m.slots[2].locked = 0;
+  m.slots[4].locked = 0;
+
   /* toast after resuming */
   Canvas t = { toast_px, TOAST_W, TOAST_H };
   memcpy(fb, bg, sizeof(fb));

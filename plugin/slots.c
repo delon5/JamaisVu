@@ -5,6 +5,7 @@
  */
 
 #include <psp2kern/kernel/sysmem.h>
+#include <psp2kern/kernel/threadmgr.h>
 #include <psp2kern/io/fcntl.h>
 #include <psp2kern/io/stat.h>
 #include <psp2kern/io/devctl.h>
@@ -46,7 +47,7 @@ typedef struct {
   uint32_t unk;
 } DevInfo;
 
-static int64_t free_space(void) {
+int64_t slot_free_space(void) {
   DevInfo info;
   memset(&info, 0, sizeof(info));
   if (ksceIoDevctl("ux0:", 0x3001, NULL, 0, &info, sizeof(info)) < 0)
@@ -68,7 +69,7 @@ int slot_prepare(int slot, void (*progress)(int pct)) {
   /* wrong size (or old format): recreate */
   ksceIoRemove(path);
 
-  int64_t avail = free_space();
+  int64_t avail = slot_free_space();
   if (avail >= 0 &&
       (uint64_t)avail < (uint64_t)JV_SLOT_SIZE + JV_FREE_SPACE_MARGIN)
     return JV_ERR_SLOT_NO_SPACE;
@@ -113,6 +114,37 @@ int slot_prepare(int slot, void (*progress)(int pct)) {
   /* flush everything the OS wrote before the payload touches the card */
   ksceIoSync("ux0:", 0);
 
+  return res;
+}
+
+int slot_stamp(int slot, uint8_t nonce[16]) {
+  static char path[64];
+  static uint8_t sector[512];
+  static uint32_t counter;
+
+  /* Not cryptographic: it only has to differ from whatever happens to be
+   * in a same-named file on another device. */
+  uint32_t x = (uint32_t)ksceKernelGetSystemTimeWide() ^ (++counter * 0x9e3779b9u);
+  for (int i = 0; i < 16; i++) {
+    x = x * 1664525u + 1013904223u;
+    nonce[i] = x >> 24;
+  }
+
+  memset(sector, 0, sizeof(sector));
+  memcpy(sector, nonce, 16);
+
+  path_for(path, sizeof(path), slot, "bin");
+  SceUID fd = ksceIoOpen(path, SCE_O_WRONLY, 0);
+  if (fd < 0)
+    return JV_ERR_SLOT_IO;
+  int res = ksceIoWrite(fd, sector, sizeof(sector)) == sizeof(sector)
+                ? 0 : JV_ERR_SLOT_IO;
+  if (ksceIoClose(fd) < 0)
+    res = JV_ERR_SLOT_IO;
+  ksceIoSync("ux0:", 0);
+
+  if (res == 0 && file_size(path) != JV_SLOT_SIZE)
+    res = JV_ERR_SLOT_IO;
   return res;
 }
 
@@ -197,6 +229,12 @@ int slot_info_remove(int slot) {
   int res = ksceIoRemove(path);
   ksceIoSync("ux0:", 0);
   return res;
+}
+
+int slot_file_exists(int slot) {
+  static char path[64];
+  path_for(path, sizeof(path), slot, "bin");
+  return file_size(path) == JV_SLOT_SIZE;
 }
 
 int slot_is_loadable(int slot) {

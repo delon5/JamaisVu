@@ -21,7 +21,7 @@ int module_get_offset(SceUID pid, SceUID modid, int segidx,
 
 int jv_armed(void);
 const char *jv_disabled_reason(void);
-int jv_request(int mode, int slot);
+int jv_request(int mode, int slot, const uint8_t *nonce);
 
 extern int (* _ksceKernelFindClassByName)(const char *name, SceClass **cls);
 extern int (* _ksceGUIDGetUIDVectorByClass)(SceClass *cls, int vis_level,

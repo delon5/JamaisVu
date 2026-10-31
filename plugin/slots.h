@@ -19,13 +19,11 @@
 
 #define JV_DIR "ux0:data/JamaisVu"
 
-/* Every slot file has exactly this size. DRAM (512 MiB) + CDRAM (128 MiB)
- * is the most memory a snapshot can contain; the rest is headroom for the
- * savedata backup. A save that does not fit fails cleanly. */
-#define JV_SLOT_SIZE 0x2C000000u /* 704 MiB */
-
-/* Free space that must remain on ux0 after creating a slot file. */
-#define JV_FREE_SPACE_MARGIN (64ull * 1024 * 1024)
+/* Every slot file has exactly JV_SLOT_SIZE bytes (slot_policy.h). DRAM
+ * (512 MiB) + CDRAM (128 MiB) is the most memory a snapshot can contain;
+ * the rest is headroom for the savedata backup. A save that does not fit
+ * fails cleanly. */
+#include "slot_policy.h"
 
 #define SLOT_INFO_MAGIC   0x4956534a /* "JSVI" */
 #define SLOT_INFO_VERSION 1
@@ -53,12 +51,22 @@ void slot_state_path(char *out, int len, int slot);
  * reported in percent. */
 int slot_prepare(int slot, void (*progress)(int pct));
 
+/* Writes a fresh random token at the start of slotN.bin through the OS and
+ * flushes it to the card; returns the token for the payload to verify. */
+int slot_stamp(int slot, uint8_t nonce[16]);
+
 int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb);
 int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb);
 int slot_info_remove(int slot);
 
 /* slotN.jvi is valid and slotN.bin has the right size */
 int slot_is_loadable(int slot);
+
+/* slotN.bin exists with the right size (space already reserved) */
+int slot_file_exists(int slot);
+
+/* Free bytes on ux0, or < 0 if unknown */
+int64_t slot_free_space(void);
 
 /* Game name from param.sfo (ASCII only; falls back to the title ID). */
 void lookup_title(const char *titleid, char *out, int len);

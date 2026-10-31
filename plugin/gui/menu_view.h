@@ -33,6 +33,7 @@
 
 typedef struct {
   int used;
+  int locked;             /* not enough free space to create this slot */
   char titleid[16];
   char title[128];
   char date[32];          /* preformatted, e.g. "2026-10-31  21:40" */

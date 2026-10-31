@@ -28,6 +28,7 @@ add_executable(JamaisVu
   plugin/fs.c
   plugin/offsets.c
   plugin/slots.c
+  plugin/slot_policy.c
   plugin/menu.c
   plugin/gui/render.c
   plugin/gui/menu_view.c

@@ -47,5 +47,10 @@ for cluster in 4K 32K 128K; do
   echo
 done
 
+gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_slot_policy" \
+  "$ROOT/tests/host/test_slot_policy.c" "$ROOT/plugin/slot_policy.c"
+"$WORK/test_slot_policy" || rc=1
+echo
+
 if [ $rc -eq 0 ]; then echo "ALL HOST TESTS PASSED"; else echo "HOST TESTS FAILED"; fi
 exit $rc
