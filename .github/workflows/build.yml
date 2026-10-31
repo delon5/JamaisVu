@@ -13,13 +13,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install VitaSDK (official vdpm bootstrap, includes taiHEN)
+      - name: Install VitaSDK (official vdpm bootstrap) and taiHEN
+        env:
+          VDPM_NONINTERACTIVE: "1"
         run: |
           git clone --depth 1 https://github.com/vitasdk/vdpm
-          cd vdpm
-          ./bootstrap-vitasdk.sh
-          ./install-all.sh
+          ./vdpm/bootstrap-vitasdk.sh
+          export PATH="$VITASDK/bin:$PATH"
           echo "$VITASDK/bin" >> "$GITHUB_PATH"
+          # use the vdpm installed into the SDK (the repo's helper scripts
+          # can lag behind the package client layout)
+          if [ ! -f "$VITASDK/arm-vita-eabi/lib/libtaihenForKernel_stub.a" ]; then
+            "$VITASDK/bin/vdpm" install taihen || "$VITASDK/bin/vdpm" taihen
+          fi
+          ls "$VITASDK/arm-vita-eabi/lib/" | grep -i taihen
+          ls "$VITASDK/arm-vita-eabi/include/taihen.h"
 
       - name: Build JamaisVu (plugin + payload)
         run: |

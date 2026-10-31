@@ -14,12 +14,13 @@
 | 3.67, 3.68, 3.69–3.73 | Offsets present but **unverified**. Disabled unless built with `-DJAMAISVU_ALLOW_UNVERIFIED_FW=ON` |
 | 3.60 | **Not supported yet.** The filesystem driver offsets for 3.60 still need to be found. See [docs/porting-3.60.md](docs/porting-3.60.md) |
 
-On any firmware without a verified offset table, the plugin installs no filesystem hooks and changes nothing. SELECT + UP then just shows *"JamaisVu is disabled: …"*. `ux0:data/JamaisVu/status.txt` records the reason and the module NIDs it found.
+On any firmware without a verified offset table, the plugin installs no filesystem hooks and changes nothing. SELECT + UP still opens the menu in **preview mode**, so the interface can be tried, but Save and Load explain why they are unavailable. `ux0:data/JamaisVu/status.txt` records the reason and the module NIDs it found. To help add 3.60, run the read-only [jvdump](tools/jvdump/README.md) plugin once and share its output.
 
 ## Requirements
 
-- A Memory Card (ux0).
+- The official Sony Memory Card as ux0. Setups that redirect ux0 to SD2Vita, PSVSD (3G slot) or USB storage are not supported: the payload talks to the Memory Card hardware directly, and refuses to save if ux0 is a different device.
 - **704 MB of free space per slot.** Each slot is a fixed-size file that is created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free.
+- **Slots unlock with free space.** Slots you have already used stay available. Each new slot needs 704 MB: about 1 GB free unlocks one slot, 1.5 GB two, and so on. Locked slots show a padlock.
 
 ## Installation
 
@@ -101,7 +102,9 @@ If the load fails **before** anything was changed (damaged snapshot, other card,
 
 ## Building
 
-Requires [VitaSDK](https://vitasdk.org) and taiHEN.
+Every push is built by GitHub Actions with the official VitaSDK (`.github/workflows/build.yml`). The `.skprx` files are attached to each run as an artifact.
+
+To build locally you need [VitaSDK](https://vitasdk.org), which includes taiHEN.
 
 ```bash
 mkdir build && cd build
