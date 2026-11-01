@@ -112,6 +112,10 @@ typedef struct {
   /* Filled in by the payload: memory written (save) or restored (load), in
    * bytes, and the ms the memory part took - for comparing speeds. */
   uint32_t mem_bytes, mem_ms;
+  /* Filled in by the payload: 1 if it ran with the instruction cache on,
+   * and the measured length of one xerpi delay() unit (ns, cache off). */
+  uint32_t icache_on;
+  uint32_t delay_unit_ns;
 } PayloadArguments;
 
 /* First sector of data/JamaisVu/trace.bin on the Memory Card. The plugin

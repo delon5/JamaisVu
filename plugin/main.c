@@ -453,6 +453,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   __sync_synchronize();
 
   pargs.mem_bytes = pargs.mem_ms = 0;
+  pargs.icache_on = pargs.delay_unit_ns = 0;
   g_t_request = ksceKernelGetSystemTimeWide();
   g_t_suspend = g_t_resume = g_t_resumed = 0;
   int res = kscePowerRequestSoftReset();

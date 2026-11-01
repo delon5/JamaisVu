@@ -259,6 +259,29 @@ static uint32_t vbar_get(void) {
   return v;
 }
 
+/* Instruction cache, MMU still off (ARMv7: instruction fetches are then
+ * cacheable). Data accesses stay uncached, so nothing changes for the
+ * data the payload reads and writes. start.S left SCTLR = 0; the cache
+ * is switched off and emptied again before the OS resumes, so it gets
+ * SCTLR exactly as before. */
+static void icache_on(void) {
+  uint32_t v;
+  __asm__ volatile("mcr p15, 0, %0, c7, c5, 0\n\tdsb\n\tisb" :: "r"(0));
+  __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(v));
+  v |= 1u << 12; /* SCTLR.I */
+  __asm__ volatile("mcr p15, 0, %0, c1, c0, 0\n\tisb" :: "r"(v));
+}
+
+static void icache_off(void) {
+  uint32_t v;
+  __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(v));
+  v &= ~(1u << 12);
+  __asm__ volatile("mcr p15, 0, %0, c1, c0, 0\n\tisb" :: "r"(v));
+  __asm__ volatile("mcr p15, 0, %0, c7, c5, 0\n\t" /* ICIALLU */
+                   "mcr p15, 0, %0, c7, c5, 6\n\t" /* BPIALL */
+                   "dsb\n\tisb" :: "r"(0));
+}
+
 static void vbar_set(uint32_t v) {
   __asm__ volatile("mcr p15, 0, %0, c12, c0, 0\n\tisb" :: "r"(v));
 }
@@ -666,7 +689,12 @@ int main(void) {
   g_old_vbar = old_vbar;
   vbar_set((uint32_t)jv_vectors);
   pmu_start();
+  pargs->icache_on = 0;
+  pargs->delay_unit_ns = jv_delay_calibrate(); /* before the cache is on */
+  icache_on();
+  pargs->icache_on = 1;
   payload_main();
+  icache_off();
   pmu_stop();
   vbar_set(old_vbar);
   return 0;
@@ -685,6 +713,7 @@ void payload_cleanup(void) {
   }
   if (pargs->stage >= JV_STAGE_CDRAM)
     gpio_port_clear(0, GPIO_PORT_GAMECARD_LED);
+  icache_off();
   pmu_stop();
   vbar_set(g_old_vbar);
 }

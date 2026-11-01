@@ -1675,6 +1675,10 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
                    (int)((g_t_suspend - g_t_request) / 1000));
     else
       n = snprintf(tl, sizeof(tl), "    timing:");
+    if (g_res_pa.delay_unit_ns)
+      n += snprintf(tl + n, sizeof(tl) - n, " payload I-cache %s, delay "
+                    "unit %u us;", g_res_pa.icache_on ? "on" : "off",
+                    (unsigned)(g_res_pa.delay_unit_ns / 1000));
     if (g_res_pa.mem_bytes && g_res_pa.mem_ms)
       n += snprintf(tl + n, sizeof(tl) - n, " memory %u MB in %u ms (%u MB/s);",
                     (unsigned)(g_res_pa.mem_bytes >> 20),

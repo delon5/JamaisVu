@@ -88,6 +88,15 @@ static inline uint32_t smc(uint32_t cmd, uint32_t arg1,
 
 void delay(uint32_t n);
 
+/* JamaisVu: delay() and the waits below used to count loop iterations.
+ * With the instruction cache on (payload main()) loops run several times
+ * faster, so they are now timed with the cycle counter instead, keeping
+ * the lengths they had with the cache off: jv_delay_calibrate() measures
+ * delay()'s unit once, before the cache is switched on. */
+uint32_t jv_time_us(void);
+uint32_t jv_delay_calibrate(void);
+uint32_t jv_wait_limit_us(uint32_t polls);
+
 /* JamaisVu: every busy-wait on the hardware gives up after JV_WAIT_MAX
  * polls (a fraction of a second) and is counted, so a device that never
  * answers cannot hang the payload with the screen on (seen on hardware). */
@@ -96,11 +105,14 @@ extern volatile uint32_t g_jv_wait_timeouts;
 #define JV_WAIT_WHILE(cond) JV_WAIT_WHILE_N(cond, JV_WAIT_MAX)
 #define JV_WAIT_WHILE_N(cond, max)                            \
 	do {                                                  \
-		uint32_t jv_n_ = 0;                           \
-		while ((cond) && ++jv_n_ < (max))             \
-			;                                     \
-		if (jv_n_ >= (max))                           \
-			g_jv_wait_timeouts++;                 \
+		uint32_t jv_t0_ = jv_time_us();               \
+		uint32_t jv_lim_ = jv_wait_limit_us(max);     \
+		while (cond) {                                \
+			if (jv_time_us() - jv_t0_ >= jv_lim_) {   \
+				g_jv_wait_timeouts++;         \
+				break;                        \
+			}                                     \
+		}                                             \
 	} while (0)
 uint32_t get_cpu_id(void);
 
