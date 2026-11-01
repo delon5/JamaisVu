@@ -75,6 +75,10 @@ endif()
 
 add_dependencies(JamaisVu JamaisVu_payload_binary)
 
+# room for vita-elf-create's SCE data between the segments (see the file)
+target_link_options(JamaisVu PRIVATE
+  "-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/plugin/sce_gap.ld")
+
 target_link_libraries(JamaisVu
   SceCtrlForDriver_stub
   SceCpuForDriver_stub
