@@ -61,6 +61,8 @@ typedef struct {
   MenuMode mode;
   char message[128];  /* BUSY / MESSAGE text */
   int progress;       /* BUSY: 0..100, or -1 for none */
+  int can_cancel;     /* BUSY: ○ cancels (preparing a slot) */
+  int swap_ox;        /* ○ confirms, ✕ goes back (Japanese/Asian games) */
   int is_error;       /* MESSAGE: red text */
   int can_load;       /* 0 hides the load hint */
   int can_save;       /* 0 in the LiveArea: no game on screen to save */

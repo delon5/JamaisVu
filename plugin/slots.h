@@ -79,6 +79,7 @@ typedef struct {
 
 #define JV_ERR_SLOT_NO_SPACE (-100)
 #define JV_ERR_SLOT_IO       (-101)
+#define JV_ERR_SLOT_CANCELLED (-102)
 
 /* Path of slotN.bin as the payload's FatFs sees the Memory Card ("ux0:"
  * is just FatFs' volume name there, whatever the OS mount is). */
@@ -88,7 +89,9 @@ void slot_payload_path(char *out, int len, int slot);
  * bytes, using the OS's own exFAT driver (so all filesystem metadata is
  * written by the OS). Creating it writes zeros, which takes a while;
  * progress is reported in percent. */
-int slot_prepare(int slot, void (*progress)(int pct));
+/* progress (may be NULL) returns nonzero to cancel: the partial file is
+ * removed and JV_ERR_SLOT_CANCELLED returned. */
+int slot_prepare(int slot, int (*progress)(int pct));
 
 /* Writes a fresh random token at the start of slotN.bin through the OS and
  * flushes it; the payload verifies it. */

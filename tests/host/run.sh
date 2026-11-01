@@ -86,6 +86,12 @@ gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_slot_policy" \
 gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_md5" \
   "$ROOT/tests/host/test_md5.c" "$ROOT/plugin/md5.c"
 "$WORK/test_md5" || rc=1
+
+for enums in "" "-fshort-enums"; do
+  gcc -Wall -Wextra $enums -I"$ROOT/plugin" -o "$WORK/test_remap" \
+    "$ROOT/tests/host/test_remap.c" "$ROOT/plugin/remap.c"
+  "$WORK/test_remap" || rc=1
+done
 echo
 
 for flavour in release testing; do

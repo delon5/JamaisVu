@@ -29,6 +29,7 @@ add_executable(JamaisVu
   plugin/offsets.c
   plugin/slots.c
   plugin/md5.c
+  plugin/remap.c
   plugin/slot_policy.c
   plugin/menu.c
   plugin/storage.c
@@ -77,6 +78,7 @@ target_link_libraries(JamaisVu
   SceKernelSuspendForDriver_stub
   SceIofilemgrForDriver_stub
   ScePowerForDriver_stub
+  SceRegMgrForDriver_stub
   SceRtcForDriver_stub
   SceSysclibForDriver_stub
   SceSysconForDriver_stub

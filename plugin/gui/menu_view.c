@@ -318,6 +318,14 @@ static int hints_width(const char *const *labels, const int *two, int n) {
   return w - 26;
 }
 
+/* ✕ = confirm / ○ = back, swapped for games that use the other way */
+static IconType ok_icon(const MenuModel *m) {
+  return m->swap_ox ? ICON_CIRCLE : ICON_CROSS;
+}
+static IconType back_icon(const MenuModel *m) {
+  return m->swap_ox ? ICON_CROSS : ICON_CIRCLE;
+}
+
 static void draw_footer(Canvas *c, const MenuModel *m) {
   int y = FOOTER_Y + (MENU_H - FOOTER_Y - font_small.height) / 2;
   const char *labels[6];
@@ -330,9 +338,9 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
     case MV_BROWSE:
       labels[n] = "Select"; icons[n] = ICON_LEFT; two[n] = 1; n++;
       if (m->can_save && !cur->locked) {
-        labels[n] = "Save"; icons[n] = ICON_CROSS; n++;
+        labels[n] = "Save"; icons[n] = ok_icon(m); n++;
       } else if (!m->can_save && !cur->locked && !cur->prepared) {
-        labels[n] = "Prepare"; icons[n] = ICON_CROSS; n++;
+        labels[n] = "Prepare"; icons[n] = ok_icon(m); n++;
       }
       if (m->can_load && m->slots[m->selected].used &&
           !m->slots[m->selected].outdated &&
@@ -342,23 +350,27 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
       if (!m->can_save && m->prepare_count > 1) {
         labels[n] = "Prepare all"; icons[n] = ICON_TRIANGLE; n++;
       }
-      labels[n] = "Close";  icons[n] = ICON_CIRCLE; n++;
+      labels[n] = "Close";  icons[n] = back_icon(m); n++;
       break;
     case MV_CONFIRM_PREPARE:
     case MV_CONFIRM_SAVE:
     case MV_CONFIRM_LOAD:
-      labels[n] = "Confirm"; icons[n] = ICON_CROSS; n++;
-      labels[n] = "Cancel";  icons[n] = ICON_CIRCLE; n++;
+      labels[n] = "Confirm"; icons[n] = ok_icon(m); n++;
+      labels[n] = "Cancel";  icons[n] = back_icon(m); n++;
       break;
     case MV_MESSAGE:
-      labels[n] = "Close";   icons[n] = ICON_CIRCLE; n++;
+      labels[n] = "Close";   icons[n] = back_icon(m); n++;
       break;
     case MV_DIAG:
-      labels[n] = "Reset test"; icons[n] = ICON_CROSS; n++;
+      labels[n] = "Reset test"; icons[n] = ok_icon(m); n++;
       labels[n] = "Dry run";    icons[n] = ICON_SQUARE; n++;
-      labels[n] = "Back";       icons[n] = ICON_CIRCLE; n++;
+      labels[n] = "Back";       icons[n] = back_icon(m); n++;
       break;
     case MV_BUSY:
+      if (m->can_cancel) {
+        labels[n] = "Cancel"; icons[n] = back_icon(m); n++;
+        break;
+      }
       cv_text_centered(c, &font_small, MENU_W / 2, y,
                        "Please wait - do not turn off the system",
                        C_TEXT_DIM, MENU_W - 40);
@@ -417,11 +429,16 @@ static void draw_details(Canvas *c, const MenuModel *m) {
       } else {
         const char *info;
         if (m->can_save)
-          info = s->prepared ? "Press X to save your game here"
+          info = s->prepared ? (m->swap_ox ? "Press O to save your game here"
+                                            : "Press X to save your game here")
+                             : m->swap_ox ? "Press O to save your game here (the "
+                                            "first save prepares the slot)"
                              : "Press X to save your game here (the first "
                                "save prepares the slot)";
         else
           info = s->prepared ? "Ready - start a game to save here"
+                             : m->swap_ox ? "Press O to prepare this slot now (704 "
+                                            "MB), so saving starts right away"
                              : "Press X to prepare this slot now (704 MB), "
                                "so saving starts right away";
         cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y,

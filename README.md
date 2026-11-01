@@ -49,6 +49,10 @@ Press **START + UP** to open the slot menu; **START + UP** or **START + DOWN** c
 | △ (LiveArea) | Prepare all empty slots there is space for |
 | SELECT | Diagnostics (reset test / dry run) |
 
+**✕ and ○ follow the running game.** Japanese and Asian games (title IDs `PCSG`, `PCSC`, `VLJM`, `VLJS`, `PCSH`, `PCSD`, `VCAS`, `VLAS`) confirm with ○, so in them the menu does too, and ✕ goes back; the hints show the right icons. If ✕/○ are swapped for the game in **PSV-Shell-Plus** or **reVita**, the menu follows that as well (their profiles are only read). In the LiveArea the console's own ✕/○ setting applies. `log.txt` records which button was chosen and why.
+
+Preparing slots can be cancelled with the back button; slots already finished are kept.
+
 Each slot shows a thumbnail of the game screen at the moment you saved, the game's name, its title ID, its version and the date.
 
 **A snapshot only loads into the exact game version it was taken with.** The version (`APP_VER` from the game's `param.sfo`, or from its installed update) is stored with the slot. If the game has been updated (e.g. 01.01 → 01.02) or downgraded since, the slot is marked and cannot be loaded.

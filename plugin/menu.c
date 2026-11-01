@@ -11,6 +11,7 @@
 #include <psp2kern/io/stat.h>
 #include <psp2kern/ctrl.h>
 #include <psp2kern/display.h>
+#include <psp2kern/registrymgr.h>
 #include <taihen.h>
 
 #include <stdio.h>
@@ -22,6 +23,7 @@
 #include "slots.h"
 #include "storage.h"
 #include "trace.h"
+#include "remap.h"
 #include "gui/menu_view.h"
 
 int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
@@ -62,6 +64,58 @@ static volatile uint32_t g_toast_seq;
  * draws, so the menu offers Load but never Save. */
 static volatile int g_capture_req, g_capture_ok;
 static char g_capture_tid[16];
+
+/* ✕/○ convention of what is running (see remap.c). In the LiveArea the
+ * console's own setting applies; in a game, its region and any ✕/○ swap
+ * set for it in PSV-Shell-Plus or reVita. */
+static int g_system_circle_enter;
+static volatile int g_swap_ox;
+static char g_swap_tid[16]; /* title the current g_swap_ox was decided for */
+static void log_append(const char *text);
+
+static int read_small(const char *path, void *buf, int cap) {
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  if (fd < 0)
+    return -1;
+  int n = ksceIoRead(fd, buf, cap);
+  ksceIoClose(fd);
+  return n;
+}
+
+/* read-only: ur0:data/PSVshell/profiles/<TITLEID>, else "global" */
+static int psvs_swap_for(const char *tid) {
+  static char path[96];
+  static uint8_t buf[128];
+  snprintf(path, sizeof(path), "ur0:data/PSVshell/profiles/%s", tid);
+  int n = read_small(path, buf, sizeof(buf));
+  if (n < 0)
+    n = read_small("ur0:data/PSVshell/profiles/global", buf, sizeof(buf));
+  return n > 0 ? psvs_profile_swaps(buf, n) : -1;
+}
+
+/* read-only: ur0:data/reVita/Profile/<TITLEID>.INI, else GLOBAL.INI */
+static int revita_swap_for(const char *tid) {
+  static char path[96];
+  static char buf[16384];
+  snprintf(path, sizeof(path), "ur0:data/reVita/Profile/%s.INI", tid);
+  int n = read_small(path, buf, sizeof(buf));
+  if (n < 0)
+    n = read_small("ur0:data/reVita/Profile/GLOBAL.INI", buf, sizeof(buf));
+  return n > 0 ? revita_ini_swaps(buf, n) : -1;
+}
+
+static void decide_buttons(const char *tid) {
+  static char line[192];
+  int psvs = psvs_swap_for(tid), revita = revita_swap_for(tid);
+  g_swap_ox = menu_swap_ox(tid, psvs, revita);
+  snprintf(line, sizeof(line), "menu buttons for %s: confirm with %s "
+           "(%s game, PSV-Shell swap %s, reVita swap %s)\r\n", tid,
+           g_swap_ox ? "O" : "X",
+           title_confirms_with_circle(tid) ? "O-confirm" : "X-confirm",
+           psvs < 0 ? "n/a" : psvs ? "on" : "off",
+           revita < 0 ? "n/a" : revita ? "on" : "off");
+  log_append(line);
+}
 
 /* Result of the last payload run (set on resume) */
 static volatile uint32_t g_res_mode, g_res_slot;
@@ -325,6 +379,7 @@ static void start_op(int op, int slot) {
   if (g_busy)
     return;
   g_busy = 1;
+  g_cancel_req = 0;
   g_op = op;
   g_op_slot = slot;
   ksceKernelSetEventFlag(g_evf, EVF_WORK);
@@ -332,6 +387,8 @@ static void start_op(int op, int slot) {
 
 static void open_menu(void) {
   g_capture_ok = 0;
+  g_swap_ox = g_system_circle_enter; /* until a game frame is captured */
+  g_swap_tid[0] = '\0';
   g_capture_req = 1;
   model_begin();
   g_model.mode = MV_BROWSE;
@@ -386,6 +443,24 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
             1);
     }
     return;
+  }
+
+  /* follow the ✕/○ convention of what is running (decided once per game
+   * per menu opening; file reads happen here, not in the display hook).
+   * Everything below is written for ✕ = confirm, ○ = back. */
+  if (g_capture_ok && strncmp(g_swap_tid, g_capture_tid, sizeof(g_swap_tid))) {
+    strncpy(g_swap_tid, g_capture_tid, sizeof(g_swap_tid) - 1);
+    decide_buttons(g_swap_tid);
+  }
+  if (g_swap_ox) {
+    uint32_t ox = pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE);
+    if (ox == SCE_CTRL_CROSS || ox == SCE_CTRL_CIRCLE)
+      pressed ^= SCE_CTRL_CROSS | SCE_CTRL_CIRCLE;
+  }
+  if (g_model.swap_ox != g_swap_ox) {
+    model_begin();
+    g_model.swap_ox = g_swap_ox;
+    model_end();
   }
 
   ksceKernelLockMutex(g_mtx, 1, NULL);
@@ -475,6 +550,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         set_message(MV_BROWSE, "", -1, 0);
       break;
     case MV_BUSY:
+      if ((pressed & SCE_CTRL_CIRCLE) && g_model.can_cancel)
+        g_cancel_req = 1;
       break;
   }
 }
@@ -518,12 +595,24 @@ static SlotInfo g_pending_info;
 static int g_progress_slot;
 
 static const char *g_progress_note = " (first use only)";
+static volatile int g_cancel_req;
 
-static void prepare_progress(int pct) {
+/* Progress of a slot being prepared; ○ cancels (see handle_buttons). */
+static int prepare_progress(int pct) {
   static char msg[96];
   snprintf(msg, sizeof(msg), "Preparing slot %d%s  %d%%",
            g_progress_slot + 1, g_progress_note, pct);
+  model_begin();
+  g_model.can_cancel = 1;
+  model_end();
   set_message(MV_BUSY, msg, pct, 0);
+  return g_cancel_req;
+}
+
+static void prepare_done(void) {
+  model_begin();
+  g_model.can_cancel = 0;
+  model_end();
 }
 
 static void refresh_slots(void) {
@@ -748,6 +837,7 @@ static void do_save(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
 
   res = slot_prepare(slot, prepare_progress);
+  prepare_done();
   if (res < 0) {
     static char err[128];
     snprintf(err, sizeof(err), "Cannot save: %s", result_text(res));
@@ -901,6 +991,7 @@ static void do_test(int dry, int slot, int variant) {
     slots_mkdirs();
     g_progress_slot = slot;
     int res = slot_prepare(slot, prepare_progress);
+    prepare_done();
     if (res == 0)
       res = slot_stamp(slot, nonce);
     if (res < 0) {
@@ -954,6 +1045,18 @@ static void do_prepare(int all, int slot) {
     g_progress_slot = i;
     prepare_progress(0);
     int res = slot_prepare(i, prepare_progress);
+    prepare_done();
+    if (res == JV_ERR_SLOT_CANCELLED) {
+      g_progress_note = " (first use only)";
+      if (done > 0)
+        snprintf(msg, sizeof(msg), "Cancelled - %d slot%s already prepared "
+                 "%s kept", done, done == 1 ? "" : "s",
+                 done == 1 ? "is" : "are");
+      else
+        snprintf(msg, sizeof(msg), "Cancelled");
+      set_message(MV_MESSAGE, msg, -1, 0);
+      return;
+    }
     if (res < 0) {
       g_progress_note = " (first use only)";
       snprintf(msg, sizeof(msg), "Slot %d: %s", i + 1, result_text(res));
@@ -1073,6 +1176,10 @@ void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
 }
 
 int menu_init(const char *status_text) {
+  int assign = 1;
+  /* /CONFIG/SYSTEM/button_assign: 0 = ○ confirms (Japan), 1 = ✕ confirms */
+  if (ksceRegMgrGetKeyInt("/CONFIG/SYSTEM", "button_assign", &assign) >= 0)
+    g_system_circle_enter = (assign == 0);
   SceUID thid;
   void *base;
 

@@ -89,7 +89,7 @@ int64_t slot_free_space(void) {
   return (int64_t)info.free_size;
 }
 
-int slot_prepare(int slot, void (*progress)(int pct)) {
+int slot_prepare(int slot, int (*progress)(int pct)) {
   static char path[80];
   SceUID blk, fd;
   void *zero;
@@ -133,9 +133,14 @@ int slot_prepare(int slot, void (*progress)(int pct)) {
     }
     int pct = (int)((uint64_t)done * 100 / JV_SLOT_SIZE);
     if (pct != last && progress) {
-      progress(pct);
       last = pct;
+      if (progress(pct)) {
+        res = JV_ERR_SLOT_CANCELLED; /* the partial file is removed below */
+        break;
+      }
     }
+    /* let the rest of the system get at the Memory Card in between */
+    ksceKernelDelayThread(2000);
   }
 
   if (ksceIoClose(fd) < 0 && res == 0)

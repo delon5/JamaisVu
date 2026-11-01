@@ -75,6 +75,7 @@ const char *jv_result_text(int32_t res) {
 
     case JV_ERR_SLOT_NO_SPACE: return "not enough free space (704 MB needed)";
     case JV_ERR_SLOT_IO:    return "could not create the slot file";
+    case JV_ERR_SLOT_CANCELLED: return "cancelled";
     default:                return "internal error";
   }
 }

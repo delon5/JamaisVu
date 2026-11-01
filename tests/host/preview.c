@@ -99,7 +99,9 @@ int main(int argc, char **argv) {
   m.selected = 2;
   strcpy(m.message, "Preparing slot 3 (first use only)  42%");
   m.progress = 42;
+  m.can_cancel = 1;
   frame(argv[3], "5_preparing_slot", &m);
+  m.can_cancel = 0;
 
   /* opened from the LiveArea: load only */
   m.mode = MV_BROWSE;
@@ -125,7 +127,9 @@ int main(int argc, char **argv) {
   m.mode = MV_BUSY;
   strcpy(m.message, "Preparing slot 3  42%");
   m.progress = 42;
+  m.can_cancel = 1;
   frame(argv[3], "15_preparing_from_livearea", &m);
+  m.can_cancel = 0;
   m.mode = MV_BROWSE;
   m.progress = -1;
   m.prepare_all = 0;
@@ -139,6 +143,15 @@ int main(int argc, char **argv) {
   frame(argv[3], "10_locked_slot", &m);
   m.slots[2].locked = 0;
   m.slots[4].locked = 0;
+
+  /* Japanese/Asian game: ○ confirms, ✕ goes back */
+  m.swap_ox = 1;
+  m.selected = 0;
+  frame(argv[3], "16_japanese_game_buttons", &m);
+  m.mode = MV_CONFIRM_LOAD;
+  frame(argv[3], "17_japanese_game_confirm", &m);
+  m.mode = MV_BROWSE;
+  m.swap_ox = 0;
 
   /* game updated since the snapshot: cannot be loaded */
   strcpy(m.slots[3].installed_ver, "01.03");
