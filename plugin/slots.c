@@ -18,7 +18,26 @@
 #include "storage.h"
 #include "../payload/crc32.h"
 
-#define THUMB_BYTES (JV_THUMB_W * JV_THUMB_H * 4)
+#define THUMB_PIXELS  (JV_THUMB_W * JV_THUMB_H)
+#define THUMB_BYTES   (THUMB_PIXELS * 4) /* in memory; v2/v3 files */
+#define THUMB_BYTES16 (THUMB_PIXELS * 2) /* v4 files: RGB565      */
+
+/* In memory thumbnails are RGBA8888 (R in the low byte, see render.h). */
+static uint16_t to_565(uint32_t c) {
+  uint32_t r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
+  return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
+static uint32_t from_565(uint16_t v) {
+  uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+  r = (r << 3) | (r >> 2);
+  g = (g << 2) | (g >> 4);
+  b = (b << 3) | (b >> 2);
+  return r | (g << 8) | (b << 16) | 0xff000000u;
+}
+
+#define CHUNK_PX 2048
+static uint16_t g_px16[CHUNK_PX]; /* conversion chunk (worker thread) */
 
 #define SLOT_SUBDIR "data/JamaisVu"
 
@@ -193,11 +212,23 @@ int slot_stamp(int slot, uint8_t nonce[16]) {
   return res;
 }
 
-static uint32_t info_crc(const SlotInfo *info, const uint32_t *thumb) {
+/* CRC of the slot info (up to crc) and, as stored in v4, the RGB565
+ * thumbnail; with fd >= 0 the thumbnail is also written. */
+static int info_crc_write565(const SlotInfo *info, const uint32_t *thumb,
+                             SceUID fd, uint32_t *crc_out) {
   uint32_t crc = crc32_update(0, info, offsetof(SlotInfo, crc));
-  if (info->has_thumb)
-    crc = crc32_update(crc, thumb, THUMB_BYTES);
-  return crc;
+  if (info->has_thumb) {
+    for (int done = 0; done < THUMB_PIXELS; done += CHUNK_PX) {
+      int n = THUMB_PIXELS - done < CHUNK_PX ? THUMB_PIXELS - done : CHUNK_PX;
+      for (int i = 0; i < n; i++)
+        g_px16[i] = to_565(thumb[done + i]);
+      crc = crc32_update(crc, g_px16, n * 2);
+      if (fd >= 0 && ksceIoWrite(fd, g_px16, n * 2) != n * 2)
+        return -1;
+    }
+  }
+  *crc_out = crc;
+  return 0;
 }
 
 int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
@@ -214,15 +245,16 @@ int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
   info->version = SLOT_INFO_VERSION;
   info->thumb_w = JV_THUMB_W;
   info->thumb_h = JV_THUMB_H;
-  info->crc = info_crc(info, thumb);
+  uint32_t crc;
+  info_crc_write565(info, thumb, -1, &crc);
+  info->crc = crc;
 
   SceUID fd = ksceIoOpen(tmp, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
   if (fd < 0)
     return JV_ERR_SLOT_IO;
   if (ksceIoWrite(fd, info, sizeof(*info)) != sizeof(*info))
     res = JV_ERR_SLOT_IO;
-  if (res == 0 && info->has_thumb &&
-      ksceIoWrite(fd, thumb, THUMB_BYTES) != THUMB_BYTES)
+  if (res == 0 && info_crc_write565(info, thumb, fd, &crc) < 0)
     res = JV_ERR_SLOT_IO;
   if (ksceIoClose(fd) < 0)
     res = JV_ERR_SLOT_IO;
@@ -239,8 +271,23 @@ int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
   return res;
 }
 
-/* Reads the thumbnail that follows the slot info into thumb, or, if thumb
- * is NULL, only through the CRC in small chunks (no 56 KB buffer). */
+/* v4: reads the RGB565 thumbnail through the CRC and, if thumb is not
+ * NULL, expands it to RGBA8888. */
+static int read_thumb565(SceUID fd, uint32_t *thumb, uint32_t *crc) {
+  for (int done = 0; done < THUMB_PIXELS; done += CHUNK_PX) {
+    int n = THUMB_PIXELS - done < CHUNK_PX ? THUMB_PIXELS - done : CHUNK_PX;
+    if (ksceIoRead(fd, g_px16, n * 2) != n * 2)
+      return -1;
+    *crc = crc32_update(*crc, g_px16, n * 2);
+    if (thumb)
+      for (int i = 0; i < n; i++)
+        thumb[done + i] = from_565(g_px16[i]);
+  }
+  return 0;
+}
+
+/* v2/v3: reads the RGBA8888 thumbnail that follows the slot info into
+ * thumb, or, if thumb is NULL, only through the CRC in small chunks. */
 static int read_thumb(SceUID fd, uint32_t *thumb, uint32_t *crc) {
   static uint8_t chunk[4096];
   if (thumb) {
@@ -310,14 +357,17 @@ int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb) {
     res = JV_ERR_SLOT_IO;
   } else if (info->version == 2) {
     res = slot_info_read_v2(fd, info, thumb);
-  } else if (info->version != SLOT_INFO_VERSION ||
+  } else if ((info->version != 3 && info->version != 4) ||
              ksceIoRead(fd, (uint8_t *)info + 8, sizeof(*info) - 8) !=
                  (int)(sizeof(*info) - 8) ||
              info->thumb_w != JV_THUMB_W || info->thumb_h != JV_THUMB_H) {
     res = JV_ERR_SLOT_IO;
   } else {
+    /* 3: RGBA8888 thumbnail, 4: RGB565 (same header layout) */
     uint32_t crc = crc32_update(0, info, offsetof(SlotInfo, crc));
-    if (info->has_thumb && read_thumb(fd, thumb, &crc) < 0)
+    if (info->has_thumb &&
+        (info->version == 4 ? read_thumb565(fd, thumb, &crc)
+                            : read_thumb(fd, thumb, &crc)) < 0)
       res = JV_ERR_SLOT_IO;
     if (res == 0 && crc != info->crc)
       res = JV_ERR_SLOT_IO;

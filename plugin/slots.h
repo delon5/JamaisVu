@@ -34,7 +34,9 @@ int64_t slot_file_size(const char *path); /* -1 if missing */
 #include "slot_policy.h"
 
 #define SLOT_INFO_MAGIC   0x4956534a /* "JSVI" */
-#define SLOT_INFO_VERSION 3
+/* 4: thumbnail stored as RGB565 (28,800 bytes); 2 and 3 store it as
+ * RGBA8888 (57,600 bytes) and are still read. */
+#define SLOT_INFO_VERSION 4
 
 #define JV_CFG_FILES 2
 #define JV_CFG_ABSENT     0 /* the file does not exist */
