@@ -57,6 +57,13 @@ static inline void put(Canvas *c, int x, int y, uint32_t color, uint32_t cov) {
   if ((unsigned)x >= (unsigned)c->w || (unsigned)y >= (unsigned)c->h)
     return;
   uint32_t *p = &c->px[y * c->w + x];
+  /* fully covered and opaque: the result is the colour itself (exactly
+   * what blend() returns), without reading the pixel first - in the
+   * payload that read goes to uncached video memory */
+  if (cov == 255 && (color >> 24) == 255) {
+    *p = color;
+    return;
+  }
   *p = blend(*p, color, cov);
 }
 

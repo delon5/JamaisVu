@@ -1200,9 +1200,9 @@ int load_state(FATFS *fs, const char *path) {
     goto out;
   }
 
-  /* Read in 1 MiB pieces (the same bytes into the same places as one
+  /* Read in 8 MiB pieces (the same bytes into the same places as one
    * read per segment) so the progress screen can follow; the hooks only
-   * draw. */
+   * draw. (1 MiB pieces cost seconds on hardware.) */
   progress_load_begin(header.data_size);
   uint32_t done = 0;
   for (uint32_t i = 0; i < header.segs_num; i++) {
@@ -1212,7 +1212,7 @@ int load_state(FATFS *fs, const char *path) {
       goto out;
     }
     for (uint32_t off = 0; off < segments[i].size;) {
-      uint32_t n = MIN(segments[i].size - off, 0x100000u);
+      uint32_t n = MIN(segments[i].size - off, 0x800000u);
       res = state_read(&fp, (uint8_t *)dst + off, n);
       if (res < 0)
         goto out;
