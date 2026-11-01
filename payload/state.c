@@ -1179,6 +1179,7 @@ int load_state(FATFS *fs, const char *path) {
     res = JV_ERR_IO;
     goto out;
   }
+  stage_mark(JV_STAGE_LOAD_SAVEDATA);
   guard_deny_all();
   guard_allow(vol_start, vol_end - vol_start);
   res = restore_files(&fp, header.file_num);
@@ -1203,6 +1204,7 @@ int load_state(FATFS *fs, const char *path) {
   /* Read in 8 MiB pieces (the same bytes into the same places as one
    * read per segment) so the progress screen can follow; the hooks only
    * draw. (1 MiB pieces cost seconds on hardware.) */
+  stage_mark(JV_STAGE_LOAD_MEMORY);
   progress_load_begin(header.data_size);
   uint32_t done = 0;
   for (uint32_t i = 0; i < header.segs_num; i++) {

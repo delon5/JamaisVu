@@ -1622,8 +1622,10 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     return;
   }
 
+  /* the first frame is watched for from the wake-up on (menu_on_resumed):
+   * armed here it caught a frame from before the sleep (-4028 ms) */
   g_t_first_frame = 0;
-  g_wait_first_frame = 1;
+  g_wait_first_frame = 0;
   unsigned int out;
   ksceKernelWaitEventFlag(g_evf, EVF_RESUMED,
                           SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
@@ -2183,6 +2185,8 @@ static int worker_thread(SceSize args, void *argp) {
 /* ------------------------------------------------------------------------ */
 
 void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
+  g_t_first_frame = 0;
+  g_wait_first_frame = 1; /* timing: first frame after the wake-up */
   memcpy(&g_res_pa, pa, sizeof(g_res_pa));
   g_res_debug = pa->debug_mode;
   g_res_stage = pa->stage;

@@ -58,6 +58,8 @@ const char *jv_stage_name(uint32_t stage) {
     case JV_STAGE_DISP_LCD_OFF:   return "display-lcd-off";
     case JV_STAGE_DISP_PLANE_OFF: return "display-plane-off";
     case JV_STAGE_DISP_OFF:   return "display-link-off";
+    case JV_STAGE_LOAD_SAVEDATA: return "restoring-savedata";
+    case JV_STAGE_LOAD_MEMORY:   return "restoring-memory";
     default:                  return "none";
   }
 }

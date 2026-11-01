@@ -174,6 +174,9 @@ enum JamaisVuModes {
 #define JV_STAGE_DISP_LCD_OFF 20
 #define JV_STAGE_DISP_PLANE_OFF 21
 #define JV_STAGE_DISP_OFF     22
+/* Loads, pass 2: savedata restored to the card, then memory */
+#define JV_STAGE_LOAD_SAVEDATA 23
+#define JV_STAGE_LOAD_MEMORY  24
 
 /* Payload result codes (PayloadArguments.result) */
 #define JV_TEST_DONE            1 /* a diagnostics run finished */
