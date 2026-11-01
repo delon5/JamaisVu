@@ -11,7 +11,7 @@ endif()
 project(JamaisVu_payload C ASM)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu17 -Wl,-q -Wall -O0 -mcpu=cortex-a9 -mthumb-interwork -fno-builtin -Wno-main")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu17 -Wl,-q -Wall -O0 -mcpu=cortex-a9 -mthumb-interwork -mgeneral-regs-only -fno-builtin -Wno-main")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -fno-exceptions")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -T ${CMAKE_CURRENT_SOURCE_DIR}/linker.x -nostartfiles -nodefaultlibs -nostdlib")
 

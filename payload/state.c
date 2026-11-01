@@ -652,11 +652,10 @@ int save_state(FATFS *fs, const char *path) {
     return JV_ERR_ARGS;
 
   /* 1. Locate the pre-allocated slot and lock writes to it. */
-  stage_mark(6);
   res = slot_open(fs, path);
   if (res < 0)
     return res;
-  pargs->stage = JV_STAGE_SLOT_FOUND;
+  stage_mark(JV_STAGE_SLOT_FOUND);
 
   /* 1b. Make sure this is the file the OS created as ux0 (and not a file
    * with the same name on a Memory Card while ux0 is SD2Vita/USB). */
@@ -667,7 +666,6 @@ int save_state(FATFS *fs, const char *path) {
       res = JV_ERR_IO;
       goto out;
     }
-    stage_mark(7);
     if (ms_read_sector(io_buf, card_sec, 1) != 0) {
       pargs->detail = 500;
       res = JV_ERR_IO;
@@ -683,14 +681,14 @@ int save_state(FATFS *fs, const char *path) {
     }
   }
 
-  pargs->stage = JV_STAGE_SLOT_TOKEN;
+  stage_mark(JV_STAGE_SLOT_TOKEN);
 
   /* Diagnostics: stop here, before the first write. */
   if (pargs->debug_mode == JV_TEST_DRYRUN) {
     res = JV_TEST_DONE;
     goto out;
   }
-  pargs->stage = JV_STAGE_WRITING;
+  stage_mark(JV_STAGE_WRITING);
 
   /* 2. Invalidate the header first, so a partial save is never loadable. */
   res = slot_write_sectors(0, zero_sector, 1);

@@ -132,34 +132,43 @@ static void __attribute__((noreturn)) halt_blink(void) {
   }
 }
 
-/* Diagnostics (dry run only): the game card LED shows which step is
- * running, so a hang can be located without any log. Before step n the
- * LED goes off briefly, blinks n times, then stays on during the step.
- * The last count seen before the LED stays on for good is the step that
- * hung. */
+/* Diagnostics: record step n (a JV_STAGE_*) with a timestamp. The plugin
+ * writes the trace to log.txt after resuming. */
 void stage_mark(int n) {
-  if (pargs->debug_mode != JV_TEST_DRYRUN)
-    return;
-  gpio_port_clear(0, GPIO_PORT_GAMECARD_LED);
-  delay_ms(900);
-  for (int i = 0; i < n; i++) {
-    gpio_port_set(0, GPIO_PORT_GAMECARD_LED);
-    delay_ms(250);
-    gpio_port_clear(0, GPIO_PORT_GAMECARD_LED);
-    delay_ms(300);
+  if (n != JV_STAGE_DONE)
+    pargs->stage = n; /* the last real step, reported if a run fails */
+  if (pargs->trace_n < sizeof(pargs->trace_stage)) {
+    pargs->trace_stage[pargs->trace_n] = (uint8_t)n;
+    pargs->trace_ms[pargs->trace_n] = jv_time_us() / 1000;
+    pargs->trace_n++;
   }
-  delay_ms(300);
-  gpio_port_set(0, GPIO_PORT_GAMECARD_LED);
 }
 
-/* Called from the exception vectors in start.S: the payload crashed. It
- * cannot return safely, so blink the LED fast until the user switches
- * off. */
+static uint32_t g_old_vbar;
+static volatile int g_in_exception;
+
+void payload_cleanup(void);
+void __attribute__((noreturn)) jv_recover(void); /* start.S */
+
+/* Called from the exception vectors in start.S: the payload crashed.
+ * Record the fault, then return to the OS like a normal failed run, so the
+ * plugin can log it. Only a load that already changed memory or the card
+ * cannot go back (the image is incomplete): blink the LED fast and wait
+ * for the user to switch off. */
 void __attribute__((noreturn)) jv_exception(uint32_t type, uint32_t far,
                                             uint32_t lr) {
-  pargs->detail = (int32_t)(0xE0000000u | (type << 24) | (far & 0xffffff));
-  (void)lr;
-  guard_deny_all();
+  if (!g_in_exception) {
+    g_in_exception = 1;
+    pargs->fault_type = type;
+    pargs->fault_addr = far;
+    pargs->fault_lr = lr;
+    pargs->result = JV_ERR_CRASH;
+    pargs->detail = (int32_t)type;
+    guard_deny_all();
+    if (!(pargs->mode == JAMAISVU_MODE_LOAD && pargs->applied))
+      jv_recover();
+  }
+
   /* the LED may not be switched on yet if the fault came early */
   if (pargs->stage < JV_STAGE_SYSCON)
     syscon_init();
@@ -192,35 +201,31 @@ static int run(void) {
   FRESULT fres;
   int res;
 
-  stage_mark(2);
   res = msproal_start();
   if (res != 0) {
     pargs->detail = res;
     return JV_ERR_CARD;
   }
-  pargs->stage = JV_STAGE_MC_START;
-  stage_mark(3);
+  stage_mark(JV_STAGE_MC_START);
   res = msproal_mount();
   if (res != 0) {
     pargs->detail = res;
     return JV_ERR_CARD;
   }
-  pargs->stage = JV_STAGE_MC_MOUNT;
-  stage_mark(4);
+  stage_mark(JV_STAGE_MC_MOUNT);
   res = msif_auth(NULL);
   if (res != 0) {
     pargs->detail = res;
     return msif_auth_hw_fault() ? JV_ERR_HW : JV_ERR_CARD;
   }
-  pargs->stage = JV_STAGE_MC_AUTH;
+  stage_mark(JV_STAGE_MC_AUTH);
 
-  stage_mark(5);
   fres = f_mount(&fs, "ux0:", 1);
   if (fres != FR_OK) {
     pargs->detail = fres;
     return JV_ERR_CARD;
   }
-  pargs->stage = JV_STAGE_FS_MOUNT;
+  stage_mark(JV_STAGE_FS_MOUNT);
 
   if (pargs->mode == JAMAISVU_MODE_LOAD)
     res = load_state(&fs, pargs->path);
@@ -246,9 +251,13 @@ static int timer_running(void) {
 static int payload_main(void) {
   pargs->result = JV_ERR_CARD;
   pargs->applied = 0;
-  pargs->stage = JV_STAGE_ENTRY;
   pargs->detail = 0;
   pargs->soc_timer_10ms = 0;
+  pargs->trace_n = 0;
+  pargs->fault_type = 0;
+  pargs->fault_addr = 0;
+  pargs->fault_lr = 0;
+  stage_mark(JV_STAGE_ENTRY);
   pargs->path[sizeof(pargs->path) - 1] = '\0';
 
   /* Diagnostics: hand control straight back, touching no hardware. Tests
@@ -268,23 +277,22 @@ static int payload_main(void) {
   pargs->soc_timer_10ms = measure_soc_timer();
 
   l2_flush();
-  pargs->stage = JV_STAGE_L2_FLUSH;
+  stage_mark(JV_STAGE_L2_FLUSH);
   syscon_init();
   if (syscon_fault()) {
     pargs->detail = syscon_fault();
     pargs->result = JV_ERR_HW;
     return 0;
   }
-  pargs->stage = JV_STAGE_SYSCON;
+  stage_mark(JV_STAGE_SYSCON);
   cdram_enable();
-  pargs->stage = JV_STAGE_CDRAM;
+  stage_mark(JV_STAGE_CDRAM);
 
   // Turn on Game Card LED
   syscon_common_write(0x80 | 0x40, 0x891, 2);
   gpio_set_port_mode(0, GPIO_PORT_GAMECARD_LED, GPIO_PORT_MODE_OUTPUT);
   gpio_port_set(0, GPIO_PORT_GAMECARD_LED);
 
-  stage_mark(1);
   syscon_msif_set_power(1);
   pervasive_reset_enter_msif();
   pervasive_msif_set_clock(4);
@@ -294,13 +302,14 @@ static int payload_main(void) {
     pargs->detail = syscon_fault();
     pargs->result = JV_ERR_HW;
   } else {
-    pargs->stage = JV_STAGE_MC_POWER;
+    stage_mark(JV_STAGE_MC_POWER);
     pargs->result = run();
   }
 
   guard_deny_all();
   pervasive_clock_disable_msif();
   syscon_msif_set_power(0);
+  stage_mark(JV_STAGE_DONE);
 
   if (pargs->mode == JAMAISVU_MODE_LOAD && pargs->applied &&
       pargs->result != JV_OK)
@@ -313,13 +322,28 @@ int main(void) {
   uint32_t old_vbar;
 
   pargs = (PayloadArguments *)PAYLOAD_ARGS_PADDR;
+  g_in_exception = 0;
 
   /* catch faults (see jv_exception) instead of hanging silently */
   old_vbar = vbar_get();
+  g_old_vbar = old_vbar;
   vbar_set((uint32_t)jv_vectors);
   pmu_start();
   payload_main();
   pmu_stop();
   vbar_set(old_vbar);
   return 0;
+}
+
+/* After a crash (jv_recover in start.S, on a fresh stack): undo what
+ * main() set up, then start.S resumes the OS exactly like after main(). */
+void payload_cleanup(void) {
+  guard_deny_all();
+  if (pargs->stage >= JV_STAGE_MC_POWER) {
+    pervasive_clock_disable_msif();
+    syscon_msif_set_power(0);
+  }
+  stage_mark(JV_STAGE_DONE);
+  pmu_stop();
+  vbar_set(g_old_vbar);
 }

@@ -83,6 +83,14 @@ typedef struct {
   uint32_t stage;   /* last JV_STAGE_* reached (diagnostics) */
   int32_t detail;   /* low-level error code behind result (diagnostics) */
   uint32_t soc_timer_10ms; /* SoC timer ticks in 10 ms (diagnostics) */
+  /* Diagnostics: steps reached (JV_STAGE_*) with the time in ms since the
+   * payload started, and the CPU fault if the payload crashed. */
+  uint32_t trace_n;
+  uint8_t trace_stage[24];
+  uint32_t trace_ms[24];
+  uint32_t fault_type; /* 1 undef, 2 svc, 3 prefetch abort, 4 data abort */
+  uint32_t fault_addr; /* DFAR / IFAR */
+  uint32_t fault_lr;   /* return address of the exception */
 } PayloadArguments;
 
 enum JamaisVuModes {
@@ -109,6 +117,7 @@ enum JamaisVuModes {
 #define JV_STAGE_SLOT_FOUND   10
 #define JV_STAGE_SLOT_TOKEN   11
 #define JV_STAGE_WRITING      12
+#define JV_STAGE_DONE         13 /* payload about to return to the OS */
 
 /* Payload result codes (PayloadArguments.result) */
 #define JV_TEST_DONE            1 /* a diagnostics run finished */
@@ -127,6 +136,7 @@ enum JamaisVuModes {
 #define JV_ERR_NOT_MC        (-12) /* ux0 is not the official Memory Card  */
 #define JV_ERR_TIMER         (-13) /* CPU cycle counter is not running     */
 #define JV_ERR_HW            (-14) /* syscon / crypto engine did not answer */
+#define JV_ERR_CRASH         (-15) /* the payload hit a CPU exception      */
 
 typedef struct {
   uint32_t addr; /* physical address (or special value) */

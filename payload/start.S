@@ -89,6 +89,8 @@ _start:
 
   bl main
 
+  .global jv_after_main
+jv_after_main:
 1:
   ldr r1, =g_sync_point
   bl cpus_sync
@@ -151,6 +153,15 @@ jv_exc_stack:
   .space 2048
 jv_exc_stack_top:
   .text
+
+@ Back from a crash: fresh stack, undo main()'s setup, then resume the OS
+@ exactly as after a normal return from main().
+  .global jv_recover
+jv_recover:
+  cpsid aif, #0x1f
+  ldr sp, =STACK_PADDR
+  bl payload_cleanup
+  b jv_after_main
 
   .global cpus_sync
 cpus_sync:

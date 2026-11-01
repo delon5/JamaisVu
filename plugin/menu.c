@@ -68,7 +68,7 @@ static volatile int32_t g_res_result;
 static volatile int g_res_stale;
 static volatile uint32_t g_res_debug, g_res_stage;
 static volatile int32_t g_res_detail;
-static volatile uint32_t g_res_timer;
+static PayloadArguments g_res_pa; /* copy of the last run's results */
 static volatile int g_rearm_input;
 
 static const char *g_status_text;
@@ -144,6 +144,7 @@ static const char *result_text(int32_t res) {
     case JV_ERR_NOT_MC:     return "slot file is not on the official Memory Card";
     case JV_ERR_TIMER:      return "CPU cycle counter not running";
     case JV_ERR_HW:         return "hardware did not respond";
+    case JV_ERR_CRASH:      return "crashed (details in log.txt)";
     case JV_ERR_ARGS:       return "invalid request";
 
     case JV_ERR_SLOT_NO_SPACE: return "not enough free space (704 MB needed)";
@@ -611,6 +612,7 @@ static const char *stage_name(uint32_t stage) {
     case JV_STAGE_SLOT_FOUND: return "slot file found";
     case JV_STAGE_SLOT_TOKEN: return "slot token ok";
     case JV_STAGE_WRITING:    return "writing";
+    case JV_STAGE_DONE:       return "done";
     default:                  return "none";
   }
 }
@@ -618,7 +620,7 @@ static const char *stage_name(uint32_t stage) {
 /* Every save/load/test result is appended to data/JamaisVu/log.txt on the
  * Memory Card (kept below 64 KB), so it can be read later in VitaShell. */
 static void log_result(const char *msg) {
-  static char path[64], line[320];
+  static char path[64], line[1024];
   static const char *const modes[] = {"none", "load", "save"};
   SceDateTime t;
   SceIoStat st;
@@ -643,9 +645,33 @@ static void log_result(const char *msg) {
                    (unsigned)g_res_slot + 1, (int)g_res_result,
                    (unsigned)g_res_stage, stage_name(g_res_stage),
                    (int)g_res_detail, (unsigned)g_res_detail,
-                   (unsigned)g_res_timer, msg);
+                   (unsigned)g_res_pa.soc_timer_10ms, msg);
   if (n <= 0)
     return;
+  if (n >= (int)sizeof(line))
+    n = sizeof(line) - 1;
+
+  /* step trace: "stage@ms" for every step the payload reached */
+  if (g_res_pa.trace_n > 0 && n < (int)sizeof(line) - 1) {
+    uint32_t cnt = g_res_pa.trace_n;
+    if (cnt > sizeof(g_res_pa.trace_stage))
+      cnt = sizeof(g_res_pa.trace_stage);
+    n += snprintf(line + n, sizeof(line) - n, "    steps:");
+    for (uint32_t i = 0; i < cnt && n < (int)sizeof(line) - 40; i++)
+      n += snprintf(line + n, sizeof(line) - n, " %s@%ums",
+                    stage_name(g_res_pa.trace_stage[i]),
+                    (unsigned)g_res_pa.trace_ms[i]);
+    n += snprintf(line + n, sizeof(line) - n, "\r\n");
+  }
+  /* CPU fault inside the payload */
+  if (g_res_pa.fault_type && n < (int)sizeof(line) - 1)
+    n += snprintf(line + n, sizeof(line) - n,
+                  "    crash: %s at address 0x%08X, return address 0x%08X\r\n",
+                  g_res_pa.fault_type == 1 ? "undefined instruction" :
+                  g_res_pa.fault_type == 2 ? "svc" :
+                  g_res_pa.fault_type == 3 ? "prefetch abort" :
+                  g_res_pa.fault_type == 4 ? "data abort" : "exception",
+                  (unsigned)g_res_pa.fault_addr, (unsigned)g_res_pa.fault_lr);
   if (n >= (int)sizeof(line))
     n = sizeof(line) - 1;
 
@@ -1027,17 +1053,14 @@ static int worker_thread(SceSize args, void *argp) {
 
 /* ------------------------------------------------------------------------ */
 
-void menu_on_resumed(uint32_t mode, int32_t result, uint32_t slot,
-                     int stale_open_files, uint32_t debug_mode,
-                     uint32_t stage, int32_t detail,
-                     uint32_t soc_timer_10ms) {
-  g_res_debug = debug_mode;
-  g_res_stage = stage;
-  g_res_detail = detail;
-  g_res_timer = soc_timer_10ms;
-  g_res_mode = mode;
-  g_res_result = result;
-  g_res_slot = slot;
+void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
+  memcpy(&g_res_pa, pa, sizeof(g_res_pa));
+  g_res_debug = pa->debug_mode;
+  g_res_stage = pa->stage;
+  g_res_detail = pa->detail;
+  g_res_mode = pa->mode;
+  g_res_result = pa->result;
+  g_res_slot = pa->slot;
   g_res_stale = stale_open_files;
   g_menu_open = 0;
   g_capture_req = 0;

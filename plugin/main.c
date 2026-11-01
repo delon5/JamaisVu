@@ -240,9 +240,7 @@ static int savestate_system_event(int resume, int eventid,
           fs_set_write_mode(FS_WRITES_ALLOWED);
         }
 
-        menu_on_resumed(pargs.mode, pargs.result, pargs.slot, stale,
-                        pargs.debug_mode, pargs.stage, pargs.detail,
-                        pargs.soc_timer_10ms);
+        menu_on_resumed(&pargs, stale);
         pargs.mode = JAMAISVU_MODE_NONE;
       }
     }

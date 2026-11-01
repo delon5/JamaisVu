@@ -41,6 +41,18 @@ jobs:
           cmake .. -DCMAKE_BUILD_TYPE=Release -DJAMAISVU_TESTING=ON
           make -j"$(nproc)"
 
+      - name: Payload must not use the FPU
+        run: |
+          # The payload runs with the FPU off (it is off on 3.60 at that
+          # point): a single VFP/NEON instruction is an undefined
+          # instruction there. Built with -mgeneral-regs-only; verify.
+          for d in build build-testing; do
+            n=$("$VITASDK/bin/arm-vita-eabi-objdump" -d "$d/payload/JamaisVu_payload" \
+                 | grep -cE '\sv[a-z0-9.]+\s' || true)
+            echo "$d: $n VFP/NEON instructions"
+            [ "$n" -eq 0 ]
+          done
+
       - name: Build jvdump
         run: |
           mkdir -p tools/jvdump/build && cd tools/jvdump/build
@@ -59,6 +71,8 @@ jobs:
           cp build/JamaisVu.skprx out/
           cp build-testing/JamaisVu.skprx out/JamaisVu-testing.skprx
           cp tools/jvdump/build/jvdump.skprx out/
+          # payload ELF with symbols: maps a crash address from log.txt
+          cp build-testing/payload/JamaisVu_payload out/JamaisVu_payload-testing.elf
           sha256sum out/*.skprx | tee out/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
