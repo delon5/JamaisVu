@@ -21,9 +21,15 @@
   ((uint32_t)(r) | ((uint32_t)(g) << 8) | ((uint32_t)(b) << 16) | \
    ((uint32_t)(a) << 24))
 
+/* A canvas may hold only a band of rows of a larger image: px holds
+ * rows y0 .. y0 + h - 1, and drawing is in image coordinates (anything
+ * outside the band is skipped). Rendering an image band by band gives
+ * exactly the same pixels as rendering it at once: every primitive
+ * changes each pixel only from that pixel's own value. */
 typedef struct {
   uint32_t *px;
   int w, h; /* stride == w */
+  int y0;   /* image row of px[0]; 0 for a whole image */
 } Canvas;
 
 typedef enum {

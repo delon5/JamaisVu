@@ -235,14 +235,13 @@ static void draw_logo(Canvas *c, int x, int y) {
 }
 
 static void draw_counter(Canvas *c, const MenuModel *m) {
-  char buf[32] = "SLOT [";
+  char buf[32] = "SLOT ";
   char num[8];
-  u_to_dec(num, m->selected + 1, 3);
+  u_to_dec(num, m->selected + 1, 2); /* "SLOT 01/05" */
   sappend(buf, sizeof(buf), num);
   sappend(buf, sizeof(buf), "/");
-  u_to_dec(num, JV_NUM_SLOTS, 3);
+  u_to_dec(num, JV_NUM_SLOTS, 2);
   sappend(buf, sizeof(buf), num);
-  sappend(buf, sizeof(buf), "]");
   int w = cv_text_width(&font_medium, buf);
   cv_text(c, &font_medium, MENU_W - 24 - w,
           (HEADER_H - font_medium.height) / 2 + 1, buf, C_TEXT);

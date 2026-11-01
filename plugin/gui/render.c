@@ -53,10 +53,19 @@ static inline uint32_t blend(uint32_t dst, uint32_t src, uint32_t cov) {
 }
 
 static inline void put(Canvas *c, int x, int y, uint32_t color, uint32_t cov) {
+  y -= c->y0;
   if ((unsigned)x >= (unsigned)c->w || (unsigned)y >= (unsigned)c->h)
     return;
   uint32_t *p = &c->px[y * c->w + x];
   *p = blend(*p, color, cov);
+}
+
+/* Rows [*j0, *j1) clipped to the canvas band. */
+static inline void clip_rows(const Canvas *c, int *j0, int *j1) {
+  if (*j0 < c->y0)
+    *j0 = c->y0;
+  if (*j1 > c->y0 + c->h)
+    *j1 = c->y0 + c->h;
 }
 
 void cv_clear(Canvas *c, uint32_t color) {
@@ -64,10 +73,13 @@ void cv_clear(Canvas *c, uint32_t color) {
     c->px[i] = color;
 }
 
+static void span(Canvas *c, int x0, int x1, int y, uint32_t color);
+
 void cv_fill(Canvas *c, int x, int y, int w, int h, uint32_t color) {
-  for (int j = y; j < y + h; j++)
-    for (int i = x; i < x + w; i++)
-      put(c, i, j, color, 255);
+  int j0 = y, j1 = y + h;
+  clip_rows(c, &j0, &j1);
+  for (int j = j0; j < j1; j++)
+    span(c, x, x + w, j, color);
 }
 
 /* Coverage (0..255) of pixel (px,py) by a rounded rectangle, using 4x4
@@ -105,20 +117,68 @@ static uint32_t rrect_cov(int px, int py, int x, int y, int w, int h, int r) {
   return hits * 255 / 16;
 }
 
+/* A run of fully covered pixels: an opaque colour is stored directly
+ * (identical to blend() with full coverage), otherwise blended. */
+static void span(Canvas *c, int x0, int x1, int y, uint32_t color) {
+  y -= c->y0;
+  if ((unsigned)y >= (unsigned)c->h)
+    return;
+  if (x0 < 0)
+    x0 = 0;
+  if (x1 > c->w)
+    x1 = c->w;
+  uint32_t *row = &c->px[y * c->w];
+  if ((color >> 24) == 255) {
+    for (int i = x0; i < x1; i++)
+      row[i] = color;
+  } else if (x0 < x1) {
+    /* backgrounds are mostly uniform: reuse the last result while the
+     * destination pixel repeats (exactly what blend() would return) */
+    uint32_t last_dst = row[x0], last = blend(last_dst, color, 255);
+    for (int i = x0; i < x1; i++) {
+      uint32_t d = row[i];
+      if (d != last_dst) {
+        last_dst = d;
+        last = blend(d, color, 255);
+      }
+      row[i] = last;
+    }
+  }
+}
+
+/* Only the corner pixels need anti-aliasing coverage; everything inside
+ * is fully covered. (Was: coverage + blend for every pixel, ~70 % of the
+ * menu's render time - about 200 ms per redraw on the Vita.) */
 void cv_round_rect(Canvas *c, int x, int y, int w, int h, int r,
                    uint32_t color) {
-  for (int j = y; j < y + h; j++)
-    for (int i = x; i < x + w; i++) {
+  int j0 = y, j1 = y + h;
+  clip_rows(c, &j0, &j1);
+  for (int j = j0; j < j1; j++) {
+    if (j >= y + r && j < y + h - r) {
+      span(c, x, x + w, j, color); /* straight edges: whole row covered */
+      continue;
+    }
+    /* corner rows: anti-aliased ends, covered middle */
+    for (int i = x; i < x + r && i < x + w; i++) {
       uint32_t cov = rrect_cov(i, j, x, y, w, h, r);
       if (cov)
         put(c, i, j, color, cov);
     }
+    span(c, x + r, x + w - r, j, color);
+    for (int i = x + w - r > x + r ? x + w - r : x + r; i < x + w; i++) {
+      uint32_t cov = rrect_cov(i, j, x, y, w, h, r);
+      if (cov)
+        put(c, i, j, color, cov);
+    }
+  }
 }
 
 void cv_round_frame(Canvas *c, int x, int y, int w, int h, int r, int t,
                     uint32_t color) {
   int ri = r > t ? r - t : 0;
-  for (int j = y; j < y + h; j++)
+  int j0 = y, j1 = y + h;
+  clip_rows(c, &j0, &j1);
+  for (int j = j0; j < j1; j++)
     for (int i = x; i < x + w; i++) {
       int outer = rrect_cov(i, j, x, y, w, h, r);
       int inner = rrect_cov(i, j, x + t, y + t, w - 2 * t, h - 2 * t, ri);
@@ -129,7 +189,12 @@ void cv_round_frame(Canvas *c, int x, int y, int w, int h, int r, int t,
 }
 
 void cv_image(Canvas *c, int x, int y, const uint32_t *img, int iw, int ih) {
-  for (int j = 0; j < ih; j++)
+  int j0 = 0, j1 = ih;
+  if (j0 < c->y0 - y)
+    j0 = c->y0 - y;
+  if (j1 > c->y0 + c->h - y)
+    j1 = c->y0 + c->h - y;
+  for (int j = j0; j < j1; j++)
     for (int i = 0; i < iw; i++)
       put(c, x + i, y + j, img[j * iw + i] | 0xff000000, 255);
 }
@@ -154,7 +219,12 @@ int cv_text(Canvas *c, const Font *f, int x, int y, const char *s,
   while (*s) {
     const FontGlyph *g = glyph(f, *s++);
     const uint8_t *bm = f->bitmap + g->offset;
-    for (int j = 0; j < g->h; j++)
+    int gy = y + g->y_off, j0 = 0, j1 = g->h;
+    if (j0 < c->y0 - gy)
+      j0 = c->y0 - gy;
+    if (j1 > c->y0 + c->h - gy)
+      j1 = c->y0 + c->h - gy;
+    for (int j = j0; j < j1; j++)
       for (int i = 0; i < g->w; i++) {
         uint32_t cov = bm[j * g->w + i];
         if (cov)
@@ -254,7 +324,9 @@ void cv_icon(Canvas *c, IconType type, int cx, int cy, int size,
   if (lw < 12)
     lw = 12;
 
-  for (int y = cy - size; y <= cy + size; y++)
+  int j0 = cy - size, j1 = cy + size + 1;
+  clip_rows(c, &j0, &j1);
+  for (int y = j0; y < j1; y++)
     for (int x = cx - size; x <= cx + size; x++) {
       int hits = 0;
       for (int sy = 0; sy < 4; sy++)
@@ -289,8 +361,33 @@ void cv_triangle(Canvas *c, int x0, int y0, int x1, int y1, int x2, int y2,
     x2 = tx; y2 = ty;
   }
 
-  for (int py = miny >> 3; py <= (maxy + 7) >> 3; py++)
+  int j0 = miny >> 3, j1 = ((maxy + 7) >> 3) + 1;
+  clip_rows(c, &j0, &j1);
+  for (int py = j0; py < j1; py++)
     for (int px = minx >> 3; px <= (maxx + 7) >> 3; px++) {
+      /* The 16 samples lie in the square spanned by the four corner
+       * samples; the triangle is convex, so: all four corners inside ->
+       * all 16 inside; all four outside one edge -> none inside. Only
+       * pixels on an edge take the full 16-sample test. Same result. */
+      int ax = px * 8 + 1, ay = py * 8 + 1, bx = ax + 6, by = ay + 6;
+      int e0[4] = { edge(x0, y0, x1, y1, ax, ay), edge(x0, y0, x1, y1, bx, ay),
+                    edge(x0, y0, x1, y1, ax, by), edge(x0, y0, x1, y1, bx, by) };
+      int e1[4] = { edge(x1, y1, x2, y2, ax, ay), edge(x1, y1, x2, y2, bx, ay),
+                    edge(x1, y1, x2, y2, ax, by), edge(x1, y1, x2, y2, bx, by) };
+      int e2[4] = { edge(x2, y2, x0, y0, ax, ay), edge(x2, y2, x0, y0, bx, ay),
+                    edge(x2, y2, x0, y0, ax, by), edge(x2, y2, x0, y0, bx, by) };
+      int in = 1, out = 0;
+      for (int k = 0; k < 4; k++)
+        in &= e0[k] >= 0 && e1[k] >= 0 && e2[k] >= 0;
+      if (in) {
+        put(c, px, py, color, 255);
+        continue;
+      }
+      out = (e0[0] < 0 && e0[1] < 0 && e0[2] < 0 && e0[3] < 0) ||
+            (e1[0] < 0 && e1[1] < 0 && e1[2] < 0 && e1[3] < 0) ||
+            (e2[0] < 0 && e2[1] < 0 && e2[2] < 0 && e2[3] < 0);
+      if (out)
+        continue;
       int hits = 0;
       for (int sy = 0; sy < 4; sy++)
         for (int sx = 0; sx < 4; sx++) {

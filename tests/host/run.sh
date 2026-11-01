@@ -98,6 +98,13 @@ for enums in "" "-fshort-enums"; do
 done
 echo
 
+gcc -O2 -Wall -Wextra -fsanitize=address,undefined -I"$ROOT/plugin/gui" \
+  -o "$WORK/test_render" "$ROOT/tests/host/test_render.c" \
+  "$ROOT/plugin/gui/render.c" "$ROOT/plugin/gui/menu_view.c" \
+  "$ROOT/plugin/gui/font_data.c"
+"$WORK/test_render" || rc=1
+echo
+
 for flavour in release testing; do
   def=""
   [ "$flavour" = testing ] && def="-DJAMAISVU_TESTING"

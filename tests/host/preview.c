@@ -39,7 +39,7 @@ static void emit(const char *dir, const char *name) {
 }
 
 static void frame(const char *dir, const char *name, const MenuModel *m) {
-  Canvas c = { panel_px, MENU_W, MENU_H };
+  Canvas c = { panel_px, MENU_W, MENU_H, 0 };
   memcpy(fb, bg, sizeof(fb));
   menu_view_render(&c, m);
   compose(&c, MENU_X, MENU_Y);
@@ -161,7 +161,7 @@ int main(int argc, char **argv) {
   m.slots[3].outdated = 0;
 
   /* toast after resuming */
-  Canvas t = { toast_px, TOAST_W, TOAST_H };
+  Canvas t = { toast_px, TOAST_W, TOAST_H, 0 };
   memcpy(fb, bg, sizeof(fb));
   menu_view_render_toast(&t, "Saved to slot 3", 0);
   compose(&t, TOAST_X, TOAST_Y);

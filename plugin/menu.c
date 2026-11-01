@@ -55,7 +55,19 @@ static SceUID g_ovl_mtx = -1;
 static volatile int g_overlay_ready;
 static volatile int g_overlay_users;
 static volatile uint32_t g_overlay_gen; /* +1 per acquire: buffers are new */
-static uint32_t *g_panel_px, *g_toast_px, *g_rowbuf;
+static uint32_t *g_panel_px, *g_toast_px, *g_rowbuf, *g_band_px;
+
+/* The menu image is drawn by its own low-priority thread, not in the
+ * game's display call: in Trails a redraw took ~200 ms there, and every
+ * ◀/▶ stalled the game for that long. It draws BAND_ROWS rows at a time
+ * into a small buffer and copies each finished band into the panel, so a
+ * frame never shows a half-drawn band (and no second 1 MB panel buffer
+ * is needed). g_panel_seq/g_panel_gen: model and buffers the panel shows
+ * (odd seq = nothing drawn yet). */
+#define BAND_ROWS 20
+static SceUID g_render_sema = -1;
+static int g_render_thread_ok;
+static volatile uint32_t g_panel_seq = 1, g_panel_gen;
 static uint32_t *g_thumbs[JV_NUM_SLOTS + 1];
 static void model_clear_thumbs(void);
 
@@ -234,7 +246,8 @@ static int overlay_acquire(void) {
     ksceKernelLockMutex(g_ovl_mtx, 1, NULL);
   if (!g_overlay_ready) {
     uint32_t size = MENU_W * MENU_H * 4 + TOAST_W * TOAST_H * 4 +
-                    (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_SCREEN_W * 4;
+                    (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_SCREEN_W * 4 +
+                    MENU_W * BAND_ROWS * 4;
     size = (size + 0xfff) & ~0xfff;
     g_mem_blk = ksceKernelAllocMemBlock("JamaisVuMenu",
                                         SCE_KERNEL_MEMBLOCK_TYPE_KERNEL_RW,
@@ -247,7 +260,8 @@ static int overlay_acquire(void) {
         g_thumbs[i] = p;
         p += THUMB_PX;
       }
-      g_rowbuf = p;
+      g_rowbuf = p;    p += JV_SCREEN_W;
+      g_band_px = p;
       g_overlay_gen++;
       __sync_synchronize();
       g_overlay_ready = 1;
@@ -276,7 +290,7 @@ static void overlay_release(void) {
       model_clear_thumbs(); /* the model must not point into freed memory */
       ksceKernelFreeMemBlock(g_mem_blk);
       g_mem_blk = -1;
-      g_panel_px = g_toast_px = g_rowbuf = NULL;
+      g_panel_px = g_toast_px = g_rowbuf = g_band_px = NULL;
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = NULL;
     } else {
@@ -389,26 +403,101 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
   for (int i = 0; i < fw; i++)
     xmap[i] = i * c->w / fw;
 
+  /* time split for log.txt: reading the game's rows, building our rows,
+   * copying them into the frame, the final cache clean */
+  uint32_t t_read = 0, t_build = 0, t_write = 0, t;
   for (int j = 0; j < fh; j++) {
     int sy = j * c->h / fh;
     const uint32_t *src = &c->px[sy * c->w];
     uint32_t *dst = (uint32_t *)p->base + (fy0 + j) * p->pitch + fx0;
+    t = prof_now();
     if (blend_rows[sy]) {
       /* only these few rows read the game's pixels */
       fb_cache_sync(dst, fw * 4);
       if (jv_copy_from_user(g_rowbuf, dst, fw * 4) < 0)
         return;
+      uint32_t t1 = prof_now();
+      t_read += t1 - t;
+      t = t1;
       cv_compose_row(g_rowbuf, src, xmap, fw);
     } else {
       for (int i = 0; i < fw; i++)
         g_rowbuf[i] = 0xff000000u | (src[xmap[i]] & 0x00ffffffu);
     }
+    uint32_t t1 = prof_now();
+    t_build += t1 - t;
     if (jv_copy_to_user(dst, g_rowbuf, fw * 4) < 0)
       return;
+    t_write += prof_now() - t1;
   }
   /* one cache clean for the whole area (was two per row) */
+  t = prof_now();
   uint32_t *first = (uint32_t *)p->base + fy0 * p->pitch + fx0;
   fb_cache_sync(first, ((fh - 1) * p->pitch + fw) * 4);
+  prof_add(PROF_C_SYNC, t);
+  prof_add_us(PROF_C_READ, t_read);
+  prof_add_us(PROF_C_BUILD, t_build);
+  prof_add_us(PROF_C_WRITE, t_write);
+}
+
+/* The render thread: brings the panel up to date with the model. */
+static void render_panel(void) {
+  static MenuModel local;
+  static uint8_t blend[BAND_ROWS];
+
+  __sync_fetch_and_add(&g_overlay_users, 1);
+  __sync_synchronize();
+  for (;;) {
+    if (!g_overlay_ready || !g_menu_open)
+      break;
+    uint32_t gen = g_overlay_gen, s1 = g_model_seq;
+    if (s1 & 1) { /* being written: look again shortly */
+      ksceKernelDelayThread(1000);
+      continue;
+    }
+    if (s1 == g_panel_seq && gen == g_panel_gen)
+      break; /* up to date */
+    __sync_synchronize();
+    memcpy(&local, &g_model, sizeof(local));
+    __sync_synchronize();
+    if (g_model_seq != s1)
+      continue;
+
+    uint32_t t0 = prof_now();
+    int stopped = 0;
+    for (int y0 = 0; y0 < MENU_H; y0 += BAND_ROWS) {
+      if (!g_overlay_ready || !g_menu_open) { /* closing: stop early */
+        stopped = 1;
+        break;
+      }
+      int rows = MENU_H - y0 < BAND_ROWS ? MENU_H - y0 : BAND_ROWS;
+      Canvas b = { g_band_px, MENU_W, rows, y0 };
+      menu_view_render(&b, &local);
+      scan_blend_rows(&b, blend);
+      memcpy(&g_panel_px[y0 * MENU_W], g_band_px, rows * MENU_W * 4);
+      memcpy(&g_panel_blend[y0], blend, rows);
+      __sync_synchronize();
+    }
+    if (stopped)
+      break;
+    prof_add(PROF_RENDER, t0);
+    g_panel_seq = s1;
+    __sync_synchronize();
+    g_panel_gen = gen; /* the panel is complete: it may be shown */
+  }
+  __sync_synchronize();
+  __sync_fetch_and_sub(&g_overlay_users, 1);
+}
+
+static int render_thread(SceSize args, void *argp) {
+  (void)args;
+  (void)argp;
+  for (;;) {
+    if (ksceKernelWaitSema(g_render_sema, 1, NULL) < 0)
+      ksceKernelDelayThread(100000);
+    render_panel();
+  }
+  return 0;
 }
 
 static void draw_overlays(const SceDisplayFrameBuf *p) {
@@ -423,7 +512,17 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     rendered_toast = 0xffffffff;
   }
 
-  if (g_menu_open) {
+  if (g_menu_open && g_render_sema >= 0) {
+    /* drawn by render_thread; here only put on the frame */
+    if (g_panel_seq != g_model_seq || g_panel_gen != g_overlay_gen)
+      ksceKernelSignalSema(g_render_sema, 1);
+    if (g_panel_gen == g_overlay_gen && !(g_panel_seq & 1)) {
+      uint32_t t0 = prof_now();
+      Canvas c = { g_panel_px, MENU_W, MENU_H, 0 };
+      compose(p, &c, g_panel_blend, MENU_X, MENU_Y);
+      prof_add(PROF_COMPOSE, t0);
+    }
+  } else if (g_menu_open) { /* no render thread: draw here */
     uint32_t s1 = g_model_seq;
     if (!(s1 & 1) && s1 != rendered_seq) {
       __sync_synchronize();
@@ -431,7 +530,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       __sync_synchronize();
       if (g_model_seq == s1) {
         uint32_t t0 = prof_now();
-        Canvas c = { g_panel_px, MENU_W, MENU_H };
+        Canvas c = { g_panel_px, MENU_W, MENU_H, 0 };
         menu_view_render(&c, &local);
         scan_blend_rows(&c, g_panel_blend);
         prof_add(PROF_RENDER, t0);
@@ -442,14 +541,14 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     }
     if (!(rendered_seq & 1)) {
       uint32_t t0 = prof_now();
-      Canvas c = { g_panel_px, MENU_W, MENU_H };
+      Canvas c = { g_panel_px, MENU_W, MENU_H, 0 };
       compose(p, &c, g_panel_blend, MENU_X, MENU_Y);
       prof_add(PROF_COMPOSE, t0);
     }
   }
 
   if (now_us() < g_toast_until) {
-    Canvas c = { g_toast_px, TOAST_W, TOAST_H };
+    Canvas c = { g_toast_px, TOAST_W, TOAST_H, 0 };
     if (rendered_toast != g_toast_seq) {
       rendered_toast = g_toast_seq;
       menu_view_render_toast(&c, g_toast_msg, g_toast_err);
@@ -591,15 +690,17 @@ static uint32_t g_perf_since; /* set in menu_init: first report = since boot */
 static void perf_report(void) {
   static JvProfStat last[PROF_N];
   uint32_t last_t = g_perf_since;
-  static char line[320];
+  static char line[448];
   static const char *const names[PROF_N] = {
     "display", "ctrl", "ctrl-incl-original", "syscon", "exfat-write", "input",
-    "render", "compose"
+    "render", "compose", "compose-read", "compose-build", "compose-write",
+    "compose-cacheclean"
   };
   uint32_t now = prof_now();
   uint32_t secs = (now - last_t) / 1000000;
   int n = snprintf(line, sizeof(line), "perf over %u s (calls / ms of "
-                   "JamaisVu's own time):", (unsigned)secs);
+                   "JamaisVu's own time; menu drawn %s):", (unsigned)secs,
+                   g_render_thread_ok ? "in background" : "in display hook");
   for (int i = 0; i < PROF_N && n < (int)sizeof(line) - 48; i++) {
     uint32_t c = g_prof[i].calls - last[i].calls;
     uint32_t us = g_prof[i].us - last[i].us;
@@ -1575,6 +1676,22 @@ int menu_init(const char *status_text) {
     if (thid >= 0)
       ksceKernelStartThread(thid, 0, NULL);
   }
+
+  /* lowest priority (below the game's threads), any of the game cores;
+   * without it the display hook draws the menu itself, as before */
+  g_render_sema = ksceKernelCreateSema("JamaisVuRender", 0, 0, 1, NULL);
+  if (g_render_sema >= 0) {
+    thid = ksceKernelCreateThread("JamaisVuRender", render_thread, 0xBF,
+                                  0x4000, 0, 0x70000, NULL);
+    if (thid < 0)
+      thid = ksceKernelCreateThread("JamaisVuRender", render_thread, 0xBF,
+                                    0x4000, 0, 0x10000, NULL);
+    if (thid < 0 || ksceKernelStartThread(thid, 0, NULL) < 0) {
+      ksceKernelDeleteSema(g_render_sema);
+      g_render_sema = -1;
+    }
+  }
+  g_render_thread_ok = g_render_sema >= 0;
 
   return 0;
 }

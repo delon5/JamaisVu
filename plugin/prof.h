@@ -22,6 +22,10 @@ enum {
   PROF_INPUT,      /* menu input thread, one poll               */
   PROF_RENDER,     /* drawing the menu image (on model change)  */
   PROF_COMPOSE,    /* putting the menu on a game frame          */
+  PROF_C_READ,     /*   of which: reading the game's blend rows */
+  PROF_C_BUILD,    /*   building our rows                       */
+  PROF_C_WRITE,    /*   copying rows into the frame             */
+  PROF_C_SYNC,     /*   final data cache clean                  */
   PROF_N
 };
 
@@ -37,6 +41,12 @@ uint32_t prof_now(void);
 static inline void prof_add(int i, uint32_t t0) {
   __sync_fetch_and_add(&g_prof[i].calls, 1);
   __sync_fetch_and_add(&g_prof[i].us, prof_now() - t0);
+}
+
+/* adds an already measured duration */
+static inline void prof_add_us(int i, uint32_t us) {
+  __sync_fetch_and_add(&g_prof[i].calls, 1);
+  __sync_fetch_and_add(&g_prof[i].us, us);
 }
 
 #endif
