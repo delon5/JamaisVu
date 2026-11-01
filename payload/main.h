@@ -37,6 +37,9 @@ extern PayloadArguments *pargs;
 void kscePervasiveMsifSetClock(int clock);
 uint32_t jv_time_us(void);
 
+/* dry run only: LED blink code for step n (see main.c) */
+void stage_mark(int n);
+
 int get_mediaid_sector(uint32_t *mbr_crc);
 
 #endif

@@ -652,6 +652,7 @@ int save_state(FATFS *fs, const char *path) {
     return JV_ERR_ARGS;
 
   /* 1. Locate the pre-allocated slot and lock writes to it. */
+  stage_mark(6);
   res = slot_open(fs, path);
   if (res < 0)
     return res;
@@ -666,6 +667,7 @@ int save_state(FATFS *fs, const char *path) {
       res = JV_ERR_IO;
       goto out;
     }
+    stage_mark(7);
     if (ms_read_sector(io_buf, card_sec, 1) != 0) {
       pargs->detail = 500;
       res = JV_ERR_IO;

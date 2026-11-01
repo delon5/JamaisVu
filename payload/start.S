@@ -96,6 +96,62 @@ _start:
   ldr lr, =SCE_RESUME_PADDR
   bx lr
 
+@ Exception vectors for core 0 while main() runs (VBAR is pointed here and
+@ restored afterwards). With the MMU off, the OS's own vectors are not
+@ reachable, so a fault used to hang silently; now it ends in
+@ jv_exception(), which blinks the game card LED fast.
+  .align 5
+  .global jv_vectors
+jv_vectors:
+  b jv_exc_reset
+  b jv_exc_undef
+  b jv_exc_swi
+  b jv_exc_pabt
+  b jv_exc_dabt
+  b jv_exc_reset
+  b jv_exc_irq
+  b jv_exc_fiq
+
+jv_exc_reset:
+  mov r0, #0
+  b jv_exc_common
+jv_exc_undef:
+  mov r0, #1
+  b jv_exc_common
+jv_exc_swi:
+  mov r0, #2
+  b jv_exc_common
+jv_exc_pabt:
+  mov r0, #3
+  mrc p15, 0, r1, c6, c0, 2  @ IFAR
+  b jv_exc_common2
+jv_exc_dabt:
+  mov r0, #4
+  mrc p15, 0, r1, c6, c0, 0  @ DFAR
+  b jv_exc_common2
+jv_exc_irq:
+  mov r0, #5
+  b jv_exc_common
+jv_exc_fiq:
+  mov r0, #6
+  b jv_exc_common
+jv_exc_common:
+  mov r1, #0
+jv_exc_common2:
+  mov r2, lr
+  cpsid aif, #0x1f           @ SYS mode, interrupts off
+  ldr sp, =jv_exc_stack_top
+  bl jv_exception            @ never returns
+3:
+  b 3b
+
+  .bss
+  .align 3
+jv_exc_stack:
+  .space 2048
+jv_exc_stack_top:
+  .text
+
   .global cpus_sync
 cpus_sync:
   mrc p15, 0, r0, c0, c0, 5  @ [<] MPIDR (Multiprocessor Affinity Register)

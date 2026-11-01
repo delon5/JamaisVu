@@ -74,23 +74,76 @@ static void __attribute__((noreturn)) halt_blink(void) {
   }
 }
 
+/* Diagnostics (dry run only): the game card LED shows which step is
+ * running, so a hang can be located without any log. Before step n the
+ * LED goes off briefly, blinks n times, then stays on during the step.
+ * The last count seen before the LED stays on for good is the step that
+ * hung. */
+void stage_mark(int n) {
+  if (pargs->debug_mode != JV_TEST_DRYRUN)
+    return;
+  gpio_port_clear(0, GPIO_PORT_GAMECARD_LED);
+  delay_ms(900);
+  for (int i = 0; i < n; i++) {
+    gpio_port_set(0, GPIO_PORT_GAMECARD_LED);
+    delay_ms(250);
+    gpio_port_clear(0, GPIO_PORT_GAMECARD_LED);
+    delay_ms(300);
+  }
+  delay_ms(300);
+  gpio_port_set(0, GPIO_PORT_GAMECARD_LED);
+}
+
+/* Called from the exception vectors in start.S: the payload crashed. It
+ * cannot return safely, so blink the LED fast until the user switches
+ * off. */
+void __attribute__((noreturn)) jv_exception(uint32_t type, uint32_t far,
+                                            uint32_t lr) {
+  pargs->detail = (int32_t)(0xE0000000u | (type << 24) | (far & 0xffffff));
+  (void)lr;
+  guard_deny_all();
+  while (1) {
+    gpio_port_set(0, GPIO_PORT_GAMECARD_LED);
+    for (volatile int i = 0; i < 200000; i++)
+      ;
+    gpio_port_clear(0, GPIO_PORT_GAMECARD_LED);
+    for (volatile int i = 0; i < 200000; i++)
+      ;
+  }
+}
+
+extern char jv_vectors[];
+
+static uint32_t vbar_get(void) {
+  uint32_t v;
+  __asm__ volatile("mrc p15, 0, %0, c12, c0, 0" : "=r"(v));
+  return v;
+}
+
+static void vbar_set(uint32_t v) {
+  __asm__ volatile("mcr p15, 0, %0, c12, c0, 0\n\tisb" :: "r"(v));
+}
+
 static int run(void) {
   static FATFS fs;
   FRESULT fres;
   int res;
 
+  stage_mark(2);
   res = msproal_start();
   if (res != 0) {
     pargs->detail = res;
     return JV_ERR_CARD;
   }
   pargs->stage = JV_STAGE_MC_START;
+  stage_mark(3);
   res = msproal_mount();
   if (res != 0) {
     pargs->detail = res;
     return JV_ERR_CARD;
   }
   pargs->stage = JV_STAGE_MC_MOUNT;
+  stage_mark(4);
   res = msif_auth(NULL);
   if (res != 0) {
     pargs->detail = res;
@@ -98,6 +151,7 @@ static int run(void) {
   }
   pargs->stage = JV_STAGE_MC_AUTH;
 
+  stage_mark(5);
   fres = f_mount(&fs, "ux0:", 1);
   if (fres != FR_OK) {
     pargs->detail = fres;
@@ -126,8 +180,7 @@ static int timer_running(void) {
   return 0;
 }
 
-int main(void) {
-  pargs = (PayloadArguments *)PAYLOAD_ARGS_PADDR;
+static int payload_main(void) {
   pargs->result = JV_ERR_CARD;
   pargs->applied = 0;
   pargs->stage = JV_STAGE_ENTRY;
@@ -166,6 +219,7 @@ int main(void) {
   gpio_set_port_mode(0, GPIO_PORT_GAMECARD_LED, GPIO_PORT_MODE_OUTPUT);
   gpio_port_set(0, GPIO_PORT_GAMECARD_LED);
 
+  stage_mark(1);
   syscon_msif_set_power(1);
   pervasive_reset_enter_msif();
   pervasive_msif_set_clock(4);
@@ -187,5 +241,18 @@ int main(void) {
       pargs->result != JV_OK)
     halt_blink();
 
+  return 0;
+}
+
+int main(void) {
+  uint32_t old_vbar;
+
+  pargs = (PayloadArguments *)PAYLOAD_ARGS_PADDR;
+
+  /* catch faults (see jv_exception) instead of hanging silently */
+  old_vbar = vbar_get();
+  vbar_set((uint32_t)jv_vectors);
+  payload_main();
+  vbar_set(old_vbar);
   return 0;
 }
