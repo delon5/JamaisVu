@@ -42,22 +42,13 @@ set(JamaisVu_payload_sources
   FatFs/ffunicode.c
 )
 
-# Two builds of the same sources (diagnostics A/B on hardware):
-# - JamaisVu_payload: -mgeneral-regs-only (no VFP/NEON instructions)
-# - JamaisVu_payload_fpu: without it, as built up to commit 0fdfd74
+# Not -mgeneral-regs-only: on 3.60 hardware that build never reached the
+# LED (A/B test, build ee965f0), while the default build does, and the FPU
+# is usable at that point (syscon_common_write uses NEON before the LED).
 add_executable(JamaisVu_payload ${JamaisVu_payload_sources})
-target_compile_options(JamaisVu_payload PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-mgeneral-regs-only>)
 target_link_libraries(JamaisVu_payload gcc)
 add_custom_command(TARGET JamaisVu_payload POST_BUILD
   COMMAND ${CMAKE_OBJCOPY} -S -O binary JamaisVu_payload JamaisVu_payload.bin
 )
 
-add_executable(JamaisVu_payload_fpu ${JamaisVu_payload_sources})
-target_link_libraries(JamaisVu_payload_fpu gcc)
-add_custom_command(TARGET JamaisVu_payload_fpu POST_BUILD
-  COMMAND ${CMAKE_OBJCOPY} -S -O binary JamaisVu_payload_fpu JamaisVu_payload_fpu.bin
-)
-
-add_custom_target(JamaisVu_payload_binary
-  DEPENDS JamaisVu_payload JamaisVu_payload_fpu)
+add_custom_target(JamaisVu_payload_binary DEPENDS JamaisVu_payload)

@@ -30,7 +30,6 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 #define EVF_RESUMED 2
 
 enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY,
-       OP_TEST_DRY_FPU,
        OP_PREPARE, OP_PREPARE_ALL };
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
@@ -442,8 +441,6 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_RESET, sel);
       else if (pressed & SCE_CTRL_SQUARE)
         start_op(OP_TEST_DRY, sel);
-      else if (pressed & SCE_CTRL_TRIANGLE)
-        start_op(OP_TEST_DRY_FPU, sel);
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
       break;
@@ -692,8 +689,7 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
            "trace.bin: %s\r\n", mode == JAMAISVU_MODE_LOAD ? "load" : "save",
            debug_mode == JV_TEST_RESET ? " (reset test)" :
            debug_mode == JV_TEST_DRYRUN ? " (dry run)" : "", slot + 1,
-           jv_build_id(),
-           variant == JV_PAYLOAD_FPU ? "B (fpu build)" : "A (general-regs)",
+           jv_build_id(), variant == JV_PAYLOAD_DEFAULT ? "default" : "?",
            why);
   log_append(start);
 
@@ -878,9 +874,7 @@ static void do_test(int dry, int slot, int variant) {
     }
   }
 
-  set_message(MV_BUSY, !dry ? "Reset test..." :
-              variant == JV_PAYLOAD_FPU ? "Dry run B..." : "Dry run A...",
-              -1, 0);
+  set_message(MV_BUSY, dry ? "Dry run..." : "Reset test...", -1, 0);
   slots_sync();
   run_and_wait(JAMAISVU_MODE_SAVE, slot, dry ? nonce : NULL,
                dry ? JV_TEST_DRYRUN : JV_TEST_RESET, variant);
@@ -1005,8 +999,6 @@ static int worker_thread(SceSize args, void *argp) {
       case OP_TEST_DRY:
         do_test(1, g_op_slot, JV_PAYLOAD_DEFAULT);
         break;
-      case OP_TEST_DRY_FPU:
-        do_test(1, g_op_slot, JV_PAYLOAD_FPU);
         break;
       case OP_PREPARE:
         do_prepare(0, g_op_slot);

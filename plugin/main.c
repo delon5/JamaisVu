@@ -47,8 +47,6 @@ extern int resume_function(void);
 
 extern uint8_t _binary_payload_JamaisVu_payload_bin_start;
 extern uint8_t _binary_payload_JamaisVu_payload_bin_size;
-extern uint8_t _binary_payload_JamaisVu_payload_fpu_bin_start;
-extern uint8_t _binary_payload_JamaisVu_payload_fpu_bin_size;
 
 /* The payload resume.S copies to PAYLOAD_PADDR (see jv_request). */
 uint32_t payload_src, payload_len;
@@ -276,15 +274,10 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   if (flag_pa == 0)
     return -1;
 
-  /* Diagnostics A/B: the same payload sources built without
-   * -mgeneral-regs-only (variant 1). resume_memcpy copies whole words. */
-  if (payload_variant == JV_PAYLOAD_FPU) {
-    payload_src = (uint32_t)&_binary_payload_JamaisVu_payload_fpu_bin_start;
-    payload_len = (uint32_t)&_binary_payload_JamaisVu_payload_fpu_bin_size;
-  } else {
-    payload_src = (uint32_t)&_binary_payload_JamaisVu_payload_bin_start;
-    payload_len = (uint32_t)&_binary_payload_JamaisVu_payload_bin_size;
-  }
+  /* resume_memcpy copies whole words until the length reaches 0 */
+  (void)payload_variant;
+  payload_src = (uint32_t)&_binary_payload_JamaisVu_payload_bin_start;
+  payload_len = (uint32_t)&_binary_payload_JamaisVu_payload_bin_size;
   payload_len = (payload_len + 3) & ~3u;
 
   pargs.slot = slot;

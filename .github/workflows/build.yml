@@ -41,16 +41,21 @@ jobs:
           cmake .. -DCMAKE_BUILD_TYPE=Release -DJAMAISVU_TESTING=ON
           make -j"$(nproc)"
 
-      - name: Payload must not use the FPU
+      - name: Payload ARM/Thumb interworking
         run: |
-          # The payload runs with the FPU off (it is off on 3.60 at that
-          # point): a single VFP/NEON instruction is an undefined
-          # instruction there. Built with -mgeneral-regs-only; verify.
+          # The C code is Thumb, start.S is ARM. Calls from C into start.S
+          # must be BLX; a plain BL ran jv_recover's ARM code in Thumb state
+          # (build ee965f0: crash recovery crashed again on hardware).
           for d in build build-testing; do
-            n=$("$VITASDK/bin/arm-vita-eabi-objdump" -d "$d/payload/JamaisVu_payload" \
-                 | grep -cE '\sv[a-z0-9.]+\s' || true)
-            echo "$d: $n VFP/NEON instructions"
-            [ "$n" -eq 0 ]
+            dis=$("$VITASDK/bin/arm-vita-eabi-objdump" -d "$d/payload/JamaisVu_payload")
+            if echo "$dis" | grep -E $'\tbl\t[0-9a-f]+ <jv_recover>'; then
+              echo "$d: plain BL into ARM code"; exit 1
+            fi
+            echo "$dis" | grep -E $'\tblx\t[0-9a-f]+ <jv_recover>' \
+              || { echo "$d: no BLX to jv_recover"; exit 1; }
+            # resume.S jumps to PAYLOAD_PADDR: _start must be first
+            "$VITASDK/bin/arm-vita-eabi-nm" "$d/payload/JamaisVu_payload" \
+              | grep -q '^1c000000 T _start$' || { echo "$d: _start not at 0x1c000000"; exit 1; }
           done
 
       - name: Build jvdump
@@ -73,7 +78,6 @@ jobs:
           cp tools/jvdump/build/jvdump.skprx out/
           # payload ELF with symbols: maps a crash address from log.txt
           cp build-testing/payload/JamaisVu_payload out/JamaisVu_payload-testing.elf
-          cp build-testing/payload/JamaisVu_payload_fpu out/JamaisVu_payload_fpu-testing.elf
           sha256sum out/*.skprx | tee out/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4

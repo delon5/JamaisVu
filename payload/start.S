@@ -14,6 +14,7 @@
   .align 4
 
   .global _start
+  .type _start, %function
 _start:
   cpsid if
   clrex
@@ -90,6 +91,7 @@ _start:
   bl main
 
   .global jv_after_main
+  .type jv_after_main, %function
 jv_after_main:
 1:
   ldr r1, =g_sync_point
@@ -156,7 +158,12 @@ jv_exc_stack_top:
 
 @ Back from a crash: fresh stack, undo main()'s setup, then resume the OS
 @ exactly as after a normal return from main().
+@ It is ARM code called from Thumb C (jv_exception): .type %function makes
+@ the linker use BLX. Without it the call was a plain BL, the CPU ran this
+@ ARM code in Thumb state and crashed again (seen on hardware as the LED
+@ flashing after a crash).
   .global jv_recover
+  .type jv_recover, %function
 jv_recover:
   cpsid aif, #0x1f
   ldr sp, =STACK_PADDR
@@ -164,6 +171,7 @@ jv_recover:
   b jv_after_main
 
   .global cpus_sync
+  .type cpus_sync, %function
 cpus_sync:
   mrc p15, 0, r0, c0, c0, 5  @ [<] MPIDR (Multiprocessor Affinity Register)
   ands r0, #0xf
