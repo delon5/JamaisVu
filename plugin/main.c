@@ -306,15 +306,26 @@ volatile int64_t g_t_fs_done; /* load: ux0 re-read (0 = not done) */
  * phases) with its time, to see where request -> sleep goes (3.9 s). */
 volatile uint32_t g_ev_n;
 uint32_t g_ev_id[JV_EV_MAX];   /* event id, bit 31 = resume phase */
-int64_t g_ev_t[JV_EV_MAX];
+int64_t g_ev_t[JV_EV_MAX];     /* first time of a run of the same event */
+int64_t g_ev_last[JV_EV_MAX];  /* last time of that run */
+uint32_t g_ev_cnt[JV_EV_MAX];  /* how often in a row (0x401 repeats every
+                                * 10 ms: ac9acfb filled the list at 280 ms) */
 
 static int savestate_system_event(int resume, int eventid,
                                   void *args, void *opt) {
-  if (pargs.mode != JAMAISVU_MODE_NONE && g_ev_n < JV_EV_MAX) {
+  if (pargs.mode != JAMAISVU_MODE_NONE) {
+    uint32_t id = (uint32_t)eventid | (resume ? 0x80000000u : 0);
+    int64_t now = ksceKernelGetSystemTimeWide();
     uint32_t n = g_ev_n;
-    g_ev_id[n] = (uint32_t)eventid | (resume ? 0x80000000u : 0);
-    g_ev_t[n] = ksceKernelGetSystemTimeWide();
-    g_ev_n = n + 1;
+    if (n && g_ev_id[n - 1] == id) {
+      g_ev_cnt[n - 1]++;
+      g_ev_last[n - 1] = now;
+    } else if (n < JV_EV_MAX) {
+      g_ev_id[n] = id;
+      g_ev_t[n] = g_ev_last[n] = now;
+      g_ev_cnt[n] = 1;
+      g_ev_n = n + 1;
+    }
   }
   if (pargs.mode != JAMAISVU_MODE_NONE) {
     if (!resume) {

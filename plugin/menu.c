@@ -1668,7 +1668,7 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   g_wait_first_frame = 0;
   g_wait_first_any = 0;
   {
-    static char tl[384];
+    static char tl[768];
     int64_t now = ksceKernelGetSystemTimeWide();
     int n = 0;
     if (g_res_mode == JAMAISVU_MODE_SAVE)
@@ -1718,6 +1718,10 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
         m += snprintf(tl + m, sizeof(tl) - m, " %s%X@%d", r ? "R" : "S",
                       (unsigned)(id & 0x7FFFFFFFu),
                       base ? (int)((g_ev_t[i] - base) / 1000) : -1);
+        if (g_ev_cnt[i] > 1 && m < (int)sizeof(tl) - 24)
+          m += snprintf(tl + m, sizeof(tl) - m, "..%d(x%u)",
+                        base ? (int)((g_ev_last[i] - base) / 1000) : -1,
+                        (unsigned)g_ev_cnt[i]);
       }
       snprintf(tl + m, sizeof(tl) - m, "\r\n");
       log_append(tl);

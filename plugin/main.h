@@ -39,7 +39,8 @@ extern volatile int64_t g_t_fs_done;
 #define JV_EV_MAX 32
 extern volatile uint32_t g_ev_n;
 extern uint32_t g_ev_id[JV_EV_MAX];
-extern int64_t g_ev_t[JV_EV_MAX];
+extern int64_t g_ev_t[JV_EV_MAX], g_ev_last[JV_EV_MAX];
+extern uint32_t g_ev_cnt[JV_EV_MAX];
 /* loads: the snapshot's own frame (slotN.jvf), drawn into once the memory
  * restore starts; 0 = none */
 void jv_set_display_frame2(uint32_t paddr, uint32_t pitch);
