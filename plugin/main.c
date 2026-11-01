@@ -35,6 +35,56 @@
 #define JV_BUILD_ID "unknown"
 #endif
 
+/* Clock speeds (MHz) when a save/load was requested: CPU, bus, GPU,
+ * GPU crossbar. They live in the plugin's memory, so they are part of a
+ * snapshot: after a load, the plugin inside the restored image still has
+ * the snapshot's values and puts the hardware back to them (the payload
+ * restores memory only, not clock registers). */
+static int g_clocks[4];
+static int g_clocks_valid;
+
+static void clocks_read(int c[4]) {
+  c[0] = kscePowerGetArmClockFrequency();
+  c[1] = kscePowerGetBusClockFrequency();
+  c[2] = kscePowerGetGpuClockFrequency();
+  c[3] = kscePowerGetGpuXbarClockFrequency();
+}
+
+static void clocks_fmt(char *out, int len, const int c[4]) {
+  snprintf(out, len, "cpu %d bus %d gpu %d xbar %d", c[0], c[1], c[2], c[3]);
+}
+
+void jv_clocks_remember(char *out, int len) {
+  clocks_read(g_clocks);
+  g_clocks_valid = 1;
+  clocks_fmt(out, len, g_clocks);
+}
+
+void jv_clocks_restore(char *out, int len) {
+  static char a[64], b[64], c[64];
+  int now[4], after[4];
+
+  clocks_read(now);
+  clocks_fmt(a, sizeof(a), now);
+  if (!g_clocks_valid) {
+    snprintf(out, len, "clocks now %s (none recorded)", a);
+    return;
+  }
+  if (now[0] != g_clocks[0] && g_clocks[0] > 0)
+    kscePowerSetArmClockFrequency(g_clocks[0]);
+  if (now[1] != g_clocks[1] && g_clocks[1] > 0)
+    kscePowerSetBusClockFrequency(g_clocks[1]);
+  if (now[2] != g_clocks[2] && g_clocks[2] > 0)
+    kscePowerSetGpuClockFrequency(g_clocks[2]);
+  if (now[3] != g_clocks[3] && g_clocks[3] > 0)
+    kscePowerSetGpuXbarClockFrequency(g_clocks[3]);
+  clocks_read(after);
+  clocks_fmt(b, sizeof(b), g_clocks);
+  clocks_fmt(c, sizeof(c), after);
+  snprintf(out, len, "clocks at request: %s; after resume: %s; now: %s", b,
+           a, c);
+}
+
 const char *jv_build_id(void) {
 #if defined(JAMAISVU_TESTING)
   return JV_BUILD_ID "-testing";

@@ -635,6 +635,11 @@ static void refresh_slots(void) {
     slot_policy(slot_free_space(), exists, locked, JV_NUM_SLOTS);
   }
 
+  /* current plugin configuration, read once for all slots */
+  static uint8_t cfg_state[JV_CFG_FILES];
+  static uint8_t cfg_md5[JV_CFG_FILES][16];
+  config_fingerprint(cfg_state, cfg_md5);
+
   int prepare_count = 0;
   for (int i = 0; i < JV_NUM_SLOTS; i++)
     if (!exists[i] && !locked[i])
@@ -664,7 +669,7 @@ static void refresh_slots(void) {
                          sizeof(s->installed_ver)) < 0)
         s->installed_ver[0] = '\0';
       s->outdated = !app_versions_match(s->app_ver, s->installed_ver);
-      s->config_changed = !config_matches(&info, NULL);
+      s->config_changed = !config_matches_fp(&info, cfg_state, cfg_md5, NULL);
     }
     model_end();
   }
@@ -733,6 +738,15 @@ static void report(const char *msg, int is_error) {
 static void after_resume(void) {
   static char msg[128];
 
+  /* put the clocks back to the snapshot's (or, after a save, to what they
+   * were before) and record it */
+  {
+    static char clk[192], line[224];
+    jv_clocks_restore(clk, sizeof(clk));
+    snprintf(line, sizeof(line), "    %s\r\n", clk);
+    log_append(line);
+  }
+
   if (g_res_debug != JV_TEST_NONE) {
     /* diagnostics: report and never touch the slot info */
     if (g_res_result == JV_TEST_DONE)
@@ -795,6 +809,12 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
            jv_build_id(), variant == JV_PAYLOAD_DEFAULT ? "default" : "?",
            why);
   log_append(start);
+  {
+    static char clk[96], line[128];
+    jv_clocks_remember(clk, sizeof(clk));
+    snprintf(line, sizeof(line), "    clocks before: %s\r\n", clk);
+    log_append(line);
+  }
 
   if (jv_request(mode, slot, nonce, debug_mode, trel,
                  tok ? tnonce : NULL, variant) < 0) {

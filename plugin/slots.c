@@ -527,6 +527,12 @@ int config_matches(const SlotInfo *info, int *which) {
   uint8_t md5[JV_CFG_FILES][16];
 
   config_fingerprint(state, md5);
+  return config_matches_fp(info, state, md5, which);
+}
+
+int config_matches_fp(const SlotInfo *info,
+                      const uint8_t state[JV_CFG_FILES],
+                      const uint8_t md5[JV_CFG_FILES][16], int *which) {
   for (int i = 0; i < JV_CFG_FILES; i++) {
     /* snapshot older than the check: nothing to compare */
     if (info->cfg_state[i] == JV_CFG_UNKNOWN)

@@ -126,6 +126,11 @@ void config_fingerprint(uint8_t state[JV_CFG_FILES],
 /* 1 if the current configuration equals the one stored in info; else 0
  * and *which is the index of the first file that differs. */
 int config_matches(const SlotInfo *info, int *which);
+/* the same against an already computed fingerprint (one read for many
+ * slots) */
+int config_matches_fp(const SlotInfo *info,
+                      const uint8_t state[JV_CFG_FILES],
+                      const uint8_t md5[JV_CFG_FILES][16], int *which);
 
 int slots_mkdirs(void);    /* data/JamaisVu on the Memory Card */
 
