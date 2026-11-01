@@ -11,5 +11,10 @@ repository owner's decision to keep it in private builds only. It must be
 removed (or permission obtained from xerpi) before this repository or its
 builds are made public.
 
-It is only used by the Diagnostics "Display test"; normal saves and loads
-do not call it.
+It drives the progress screen shown during saves and loads (PCH-2000)
+and the Diagnostics "Display test". Without it the screen stays black
+while the payload runs; saving and loading themselves do not depend on it.
+
+Status (2026-11-01): the repository still has no licence (GitHub reports
+none). Asking xerpi for one (e.g. MIT, like JamaisVu) is the clean way to
+make public builds possible.
