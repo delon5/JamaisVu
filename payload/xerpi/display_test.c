@@ -297,16 +297,27 @@ static void draw_bar(void) {
 		              P_ACCENT);
 }
 
-static void draw_progress(void) {
+/* Everything but the logo: quick enough to draw before the panel lights
+ * up (the logo took most of the 1.3 s the first picture needed). */
+static void draw_quick(void) {
 	Canvas c = canvas();
 	cv_clear(&c, P_BG);
-	int lw = logo_draw(NULL, 0, 0, LOGO_SCALE);
-	logo_draw(&c, (g_w - lw) / 2, 110, LOGO_SCALE);
 	cv_text_centered(&c, &font_large, g_w / 2, 236, g_title, P_TEXT, g_w - 80);
 	cv_text_centered(&c, &font_small, g_w / 2, 420,
 	                 "Do not turn off the system", P_DIM, g_w - 80);
 	draw_line();
 	draw_bar();
+}
+
+static void draw_logo_now(void) {
+	Canvas c = canvas();
+	int lw = logo_draw(NULL, 0, 0, LOGO_SCALE);
+	logo_draw(&c, (g_w - lw) / 2, 110, LOGO_SCALE);
+}
+
+static void draw_progress(void) {
+	draw_quick();
+	draw_logo_now();
 }
 
 int jv_screen_begin(const JvDisplayArgs *a, void (*markfn)(int step),
@@ -318,7 +329,10 @@ int jv_screen_begin(const JvDisplayArgs *a, void (*markfn)(int step),
 	g_line = "";
 	g_pct = 0;
 	g_args = *a;
-	hw_on(a, draw_progress);
+	/* panel on as soon as the plain screen is drawn; the logo follows
+	 * while it is already showing */
+	hw_on(a, draw_quick);
+	draw_logo_now();
 	g_screen_on = 1;
 	return 0;
 }

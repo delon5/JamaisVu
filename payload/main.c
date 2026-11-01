@@ -608,9 +608,10 @@ static int payload_main(void) {
   syscon_common_write(0x80 | 0x40, 0x891, 2);
   gpio_set_port_mode(0, GPIO_PORT_GAMECARD_LED, GPIO_PORT_MODE_OUTPUT);
   gpio_port_set(0, GPIO_PORT_GAMECARD_LED);
-  /* Diagnostics: the LED stays on until trace.bin is recording (after card
-   * authentication) or the run ends; hold it long enough to be seen. */
-  delay_ms(1500);
+  /* The LED stays on until trace.bin is recording (after card
+   * authentication) or the run ends. (It used to be held 1.5 s so it could
+   * be counted during the 3.60 bring-up; trace.bin records every step now,
+   * and the hold kept the screen black that much longer.) */
 
   syscon_msif_set_power(1);
   pervasive_reset_enter_msif();
