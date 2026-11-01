@@ -36,9 +36,13 @@ resume_function:
   ldr r2, [r2]
   bl resume_memcpy
 
+  @ payload_src / payload_len: chosen by jv_request (main.c); the length
+  @ is a multiple of 4 (resume_memcpy copies words until it reaches 0)
   ldr r0, =PAYLOAD_PADDR
-  ldr r1, =_binary_payload_JamaisVu_payload_bin_start
-  ldr r2, =_binary_payload_JamaisVu_payload_bin_size
+  ldr r1, =payload_src
+  ldr r1, [r1]
+  ldr r2, =payload_len
+  ldr r2, [r2]
   bl resume_memcpy
 
   dsb

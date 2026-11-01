@@ -47,6 +47,11 @@ extern int resume_function(void);
 
 extern uint8_t _binary_payload_JamaisVu_payload_bin_start;
 extern uint8_t _binary_payload_JamaisVu_payload_bin_size;
+extern uint8_t _binary_payload_JamaisVu_payload_fpu_bin_start;
+extern uint8_t _binary_payload_JamaisVu_payload_fpu_bin_size;
+
+/* The payload resume.S copies to PAYLOAD_PADDR (see jv_request). */
+uint32_t payload_src, payload_len;
 
 int (* _ksceKernelFindClassByName)(const char *name, SceClass **cls);
 int (* _ksceGUIDGetUIDVectorByClass)(SceClass *cls, int vis_level,
@@ -260,7 +265,8 @@ static int savestate_system_event(int resume, int eventid,
 /* Starts a save or load of a slot: fills in the payload arguments and
  * requests the soft reset during which the payload runs. */
 int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
-               uint32_t trace_rel_lba, const uint8_t *trace_nonce) {
+               uint32_t trace_rel_lba, const uint8_t *trace_nonce,
+               int payload_variant) {
   uint32_t flag_pa;
 
   if (!g_armed || slot < 0 || slot >= JV_NUM_SLOTS)
@@ -269,6 +275,17 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   flag_pa = va2pa(fs_write_mode_addr());
   if (flag_pa == 0)
     return -1;
+
+  /* Diagnostics A/B: the same payload sources built without
+   * -mgeneral-regs-only (variant 1). resume_memcpy copies whole words. */
+  if (payload_variant == JV_PAYLOAD_FPU) {
+    payload_src = (uint32_t)&_binary_payload_JamaisVu_payload_fpu_bin_start;
+    payload_len = (uint32_t)&_binary_payload_JamaisVu_payload_fpu_bin_size;
+  } else {
+    payload_src = (uint32_t)&_binary_payload_JamaisVu_payload_bin_start;
+    payload_len = (uint32_t)&_binary_payload_JamaisVu_payload_bin_size;
+  }
+  payload_len = (payload_len + 3) & ~3u;
 
   pargs.slot = slot;
   slot_payload_path(pargs.path, sizeof(pargs.path), slot);

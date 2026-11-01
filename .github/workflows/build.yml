@@ -73,6 +73,7 @@ jobs:
           cp tools/jvdump/build/jvdump.skprx out/
           # payload ELF with symbols: maps a crash address from log.txt
           cp build-testing/payload/JamaisVu_payload out/JamaisVu_payload-testing.elf
+          cp build-testing/payload/JamaisVu_payload_fpu out/JamaisVu_payload_fpu-testing.elf
           sha256sum out/*.skprx | tee out/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4

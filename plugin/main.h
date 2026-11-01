@@ -23,8 +23,11 @@ int jv_armed(void);
 int jv_armed_untested(void);
 const char *jv_disabled_reason(void);
 const char *jv_build_id(void);
+#define JV_PAYLOAD_DEFAULT 0 /* built with -mgeneral-regs-only */
+#define JV_PAYLOAD_FPU     1 /* same sources without it (diagnostics) */
 int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
-               uint32_t trace_rel_lba, const uint8_t *trace_nonce);
+               uint32_t trace_rel_lba, const uint8_t *trace_nonce,
+               int payload_variant);
 
 extern int (* _ksceKernelFindClassByName)(const char *name, SceClass **cls);
 extern int (* _ksceGUIDGetUIDVectorByClass)(SceClass *cls, int vis_level,

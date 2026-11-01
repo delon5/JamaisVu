@@ -30,6 +30,7 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 #define EVF_RESUMED 2
 
 enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY,
+       OP_TEST_DRY_FPU,
        OP_PREPARE, OP_PREPARE_ALL };
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
@@ -441,6 +442,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_RESET, sel);
       else if (pressed & SCE_CTRL_SQUARE)
         start_op(OP_TEST_DRY, sel);
+      else if (pressed & SCE_CTRL_TRIANGLE)
+        start_op(OP_TEST_DRY_FPU, sel);
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
       break;
@@ -676,7 +679,7 @@ static void after_resume(void) {
 }
 
 static void run_and_wait(int mode, int slot, const uint8_t *nonce,
-                         int debug_mode) {
+                         int debug_mode, int variant) {
   ksceKernelClearEventFlag(g_evf, ~EVF_RESUMED);
   close_menu();
 
@@ -685,15 +688,17 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   uint32_t trel = 0;
   const char *why = "";
   int tok = trace_prepare(&trel, tnonce, &why) == 0;
-  snprintf(start, sizeof(start), "starting %s%s slot=%d build=%s; trace.bin: "
-           "%s\r\n", mode == JAMAISVU_MODE_LOAD ? "load" : "save",
+  snprintf(start, sizeof(start), "starting %s%s slot=%d build=%s payload=%s; "
+           "trace.bin: %s\r\n", mode == JAMAISVU_MODE_LOAD ? "load" : "save",
            debug_mode == JV_TEST_RESET ? " (reset test)" :
            debug_mode == JV_TEST_DRYRUN ? " (dry run)" : "", slot + 1,
-           jv_build_id(), why);
+           jv_build_id(),
+           variant == JV_PAYLOAD_FPU ? "B (fpu build)" : "A (general-regs)",
+           why);
   log_append(start);
 
   if (jv_request(mode, slot, nonce, debug_mode, trel,
-                 tok ? tnonce : NULL) < 0) {
+                 tok ? tnonce : NULL, variant) < 0) {
     toast("Could not start - the system refused to reset", 1);
     return;
   }
@@ -793,7 +798,8 @@ static void do_save(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
 
-  run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce, JV_TEST_NONE);
+  run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce, JV_TEST_NONE,
+               JV_PAYLOAD_DEFAULT);
 }
 
 static void do_load(int slot) {
@@ -831,7 +837,8 @@ static void do_load(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
 
-  run_and_wait(JAMAISVU_MODE_LOAD, slot, NULL, JV_TEST_NONE);
+  run_and_wait(JAMAISVU_MODE_LOAD, slot, NULL, JV_TEST_NONE,
+               JV_PAYLOAD_DEFAULT);
 }
 
 /* status.txt lives on the Memory Card like everything else JamaisVu
@@ -840,7 +847,7 @@ static void do_load(int slot) {
  * the payload before touching any hardware, the dry run stops right before
  * the first write (the slot file is only created/stamped, like before a
  * save, and the selected slot must be empty). */
-static void do_test(int dry, int slot) {
+static void do_test(int dry, int slot, int variant) {
   static uint8_t nonce[16];
 
   if (!jv_armed()) {
@@ -871,10 +878,12 @@ static void do_test(int dry, int slot) {
     }
   }
 
-  set_message(MV_BUSY, dry ? "Dry run..." : "Reset test...", -1, 0);
+  set_message(MV_BUSY, !dry ? "Reset test..." :
+              variant == JV_PAYLOAD_FPU ? "Dry run B..." : "Dry run A...",
+              -1, 0);
   slots_sync();
   run_and_wait(JAMAISVU_MODE_SAVE, slot, dry ? nonce : NULL,
-               dry ? JV_TEST_DRYRUN : JV_TEST_RESET);
+               dry ? JV_TEST_DRYRUN : JV_TEST_RESET, variant);
 }
 
 /* Creates slot files ahead of time (from the LiveArea), so that a save
@@ -991,10 +1000,13 @@ static int worker_thread(SceSize args, void *argp) {
         do_load(g_op_slot);
         break;
       case OP_TEST_RESET:
-        do_test(0, g_op_slot);
+        do_test(0, g_op_slot, JV_PAYLOAD_DEFAULT);
         break;
       case OP_TEST_DRY:
-        do_test(1, g_op_slot);
+        do_test(1, g_op_slot, JV_PAYLOAD_DEFAULT);
+        break;
+      case OP_TEST_DRY_FPU:
+        do_test(1, g_op_slot, JV_PAYLOAD_FPU);
         break;
       case OP_PREPARE:
         do_prepare(0, g_op_slot);

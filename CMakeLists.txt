@@ -22,6 +22,12 @@ add_custom_command(OUTPUT ${JamaisVu_payload_object}
   DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/payload/JamaisVu_payload.bin
   COMMENT "Building payload object"
 )
+set(JamaisVu_payload_fpu_object "${CMAKE_CURRENT_BINARY_DIR}/payload/JamaisVu_payload_fpu.bin.o")
+add_custom_command(OUTPUT ${JamaisVu_payload_fpu_object}
+  COMMAND ${CMAKE_LINKER} -r -b binary -o ${JamaisVu_payload_fpu_object} payload/JamaisVu_payload_fpu.bin
+  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/payload/JamaisVu_payload_fpu.bin
+  COMMENT "Building payload object (FPU variant)"
+)
 
 add_executable(JamaisVu
   plugin/main.c
@@ -38,6 +44,7 @@ add_executable(JamaisVu
   payload/crc32.c
   plugin/resume.S
   ${JamaisVu_payload_object}
+  ${JamaisVu_payload_fpu_object}
 )
 
 # Set -DJAMAISVU_ALLOW_UNVERIFIED_FW=ON to arm on firmware whose offsets
