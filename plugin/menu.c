@@ -1696,7 +1696,11 @@ static void do_test(int kind, int slot, int variant) {
     static char why[128];
     uint32_t hw = jv_hw_info();
     why[0] = '\0';
-    if ((hw & 0xFF0000) != 0x800000)
+    /* PCH-2000 (LCD): hardware info 0x80xxxx and up - e.g. 0x822238 on
+     * the user's console (libbaremetal's model check only knew 0x80xxxx,
+     * but its LCD backlight code handles boards up to 0x90xxxx). PCH-1000
+     * (OLED) and PS TV report lower values. */
+    if ((hw & 0xFF0000) < 0x800000)
       snprintf(why, sizeof(why), "Display test: PCH-2000 only for now "
                "(hardware 0x%08X)", (unsigned)hw);
     else if (!g_fb_rec)
