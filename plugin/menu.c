@@ -507,15 +507,17 @@ static void start_op(int op, int slot) {
 
 /* Diagnostics: counts and own time of everything JamaisVu runs during
  * gameplay, since the previous report; written when the menu opens. */
+static uint32_t g_perf_since; /* set in menu_init: first report = since boot */
+
 static void perf_report(void) {
   static JvProfStat last[PROF_N];
-  static uint32_t last_t;
+  uint32_t last_t = g_perf_since;
   static char line[320];
   static const char *const names[PROF_N] = {
     "display", "ctrl", "ctrl-incl-original", "syscon", "exfat-write", "input"
   };
   uint32_t now = prof_now();
-  uint32_t secs = last_t ? (now - last_t) / 1000000 : 0;
+  uint32_t secs = (now - last_t) / 1000000;
   int n = snprintf(line, sizeof(line), "perf over %u s (calls / ms of "
                    "JamaisVu's own time):", (unsigned)secs);
   for (int i = 0; i < PROF_N && n < (int)sizeof(line) - 48; i++) {
@@ -527,7 +529,7 @@ static void perf_report(void) {
     last[i].us = g_prof[i].us;
   }
   snprintf(line + n, sizeof(line) - n, "\r\n");
-  last_t = now;
+  g_perf_since = now;
   log_append(line);
 }
 
@@ -1389,6 +1391,7 @@ int menu_init(const char *status_text) {
   SceUID thid;
 
   g_status_text = status_text;
+  g_perf_since = prof_now();
 
   if (module_get_export_func(KERNEL_PID, "SceSysmem", 0x40ECDB0E, 0x364E68A4,
                              (uintptr_t *)&g_dcache_clean_inv) < 0)
