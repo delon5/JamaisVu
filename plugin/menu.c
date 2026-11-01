@@ -35,7 +35,7 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 #define EVF_RESUMED 2
 
 enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY,
-       OP_PREPARE, OP_PREPARE_ALL };
+       OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY };
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
 #define PENDING  JV_NUM_SLOTS /* thumbnail index of the live capture */
@@ -224,6 +224,45 @@ static int fb_cache_sync(void *addr, unsigned int size) {
   uintptr_t a = (uintptr_t)addr & ~(uintptr_t)63;
   uintptr_t e = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
   return g_dcache_clean_inv((void *)a, e - a);
+}
+
+/* Display test: where the frame on screen is in physical memory. The
+ * display hook runs in the game's thread, so its addresses translate
+ * with the CPU (privileged read translation, like main.c's va2pa). The
+ * payload draws there with the MMU off, so the whole frame must be one
+ * physically contiguous block - checked page by page. */
+static volatile int g_fb_rec; /* recorded for this menu session */
+static volatile uint32_t g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h;
+
+static uint32_t user_va2pa(uintptr_t va) {
+  uint32_t par;
+  __asm__ volatile("mcr p15, 0, %1, c7, c8, 0\n\t"
+                   "isb\n\t"
+                   "mrc p15, 0, %0, c7, c4, 0\n\t"
+                   : "=r"(par) : "r"(va));
+  if (par & 1)
+    return 0;
+  return (par & 0xfffff000) | (va & 0xfff);
+}
+
+static void record_frame(const SceDisplayFrameBuf *p) {
+  uintptr_t base = (uintptr_t)p->base;
+  uint32_t size = p->pitch * p->height * 4;
+  uint32_t pa0 = user_va2pa(base);
+  g_fb_pa = 0;
+  if (pa0 != 0) {
+    uint32_t off;
+    for (off = 4096 - (base & 0xfff); off < size; off += 4096)
+      if (user_va2pa(base + off) != pa0 + off)
+        break;
+    if (off >= size)
+      g_fb_pa = pa0;
+  }
+  g_fb_pitch = p->pitch;
+  g_fb_w = p->width;
+  g_fb_h = p->height;
+  __sync_synchronize();
+  g_fb_rec = 1;
 }
 
 static void fbd_frame(const SceDisplayFrameBuf *p, int sync) {
@@ -679,8 +718,11 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
       if (g_capture_req)
         capture(p);
       if (g_menu_open || now_us() < g_toast_until) {
-        if (g_menu_open)
+        if (g_menu_open) {
           fbd_frame(p, sync);
+          if (!g_fb_rec)
+            record_frame(p);
+        }
         draw_overlays(p);
       }
     }
@@ -842,6 +884,7 @@ static int open_menu(void) {
     return -1;
   }
   g_capture_ok = 0;
+  g_fb_rec = 0;
   g_swap_ox = g_system_circle_enter; /* until a game frame is captured */
   g_swap_tid[0] = '\0';
   g_capture_req = 1;
@@ -994,6 +1037,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_RESET, sel);
       else if (pressed & SCE_CTRL_SQUARE)
         start_op(OP_TEST_DRY, sel);
+      else if (pressed & SCE_CTRL_TRIANGLE)
+        start_op(OP_TEST_DISPLAY, sel);
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
       break;
@@ -1367,7 +1412,8 @@ static void after_resume(void) {
     /* diagnostics: report and never touch the slot info */
     if (g_res_result == JV_TEST_DONE)
       snprintf(msg, sizeof(msg), "%s passed - reached stage %u (%s)",
-               g_res_debug == JV_TEST_RESET ? "Reset test" : "Dry run",
+               g_res_debug == JV_TEST_RESET ? "Reset test" :
+               g_res_debug == JV_TEST_DISPLAY ? "Display test" : "Dry run",
                (unsigned)g_res_stage, stage_name(g_res_stage));
     else
       /* codes first: the end of a long message is cut off on screen */
@@ -1421,7 +1467,8 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   snprintf(start, sizeof(start), "starting %s%s slot=%d build=%s payload=%s; "
            "trace.bin: %s\r\n", mode == JAMAISVU_MODE_LOAD ? "load" : "save",
            debug_mode == JV_TEST_RESET ? " (reset test)" :
-           debug_mode == JV_TEST_DRYRUN ? " (dry run)" : "", slot + 1,
+           debug_mode == JV_TEST_DRYRUN ? " (dry run)" :
+           debug_mode == JV_TEST_DISPLAY ? " (display test)" : "", slot + 1,
            jv_build_id(), variant == JV_PAYLOAD_DEFAULT ? "default" : "?",
            why);
   log_append(start);
@@ -1630,8 +1677,10 @@ static void do_load(int slot) {
  * the payload before touching any hardware, the dry run stops right before
  * the first write (the slot file is only created/stamped, like before a
  * save, and the selected slot must be empty). */
-static void do_test(int dry, int slot, int variant) {
+/* kind: 0 reset test, 1 dry run, 2 display test */
+static void do_test(int kind, int slot, int variant) {
   static uint8_t nonce[16];
+  int dry = kind == 1;
 
   if (!jv_armed()) {
     set_message(MV_MESSAGE, "Tests need an armed build", -1, 1);
@@ -1641,6 +1690,39 @@ static void do_test(int dry, int slot, int variant) {
   if (storage_problem()) {
     set_message(MV_MESSAGE, storage_problem(), -1, 1);
     return;
+  }
+
+  if (kind == 2) {
+    static char why[128];
+    uint32_t hw = jv_hw_info();
+    why[0] = '\0';
+    if ((hw & 0xFF0000) != 0x800000)
+      snprintf(why, sizeof(why), "Display test: PCH-2000 only for now "
+               "(hardware 0x%08X)", (unsigned)hw);
+    else if (!g_fb_rec)
+      snprintf(why, sizeof(why), "Display test: no frame seen yet - "
+               "try again");
+    else if (g_fb_w != 960 || g_fb_h != 544 || g_fb_pitch < 960 ||
+             g_fb_pitch > 1024)
+      snprintf(why, sizeof(why), "Display test: frame %ux%u pitch %u is not "
+               "supported yet", (unsigned)g_fb_w, (unsigned)g_fb_h,
+               (unsigned)g_fb_pitch);
+    else if (g_fb_pa < 0x20000000u || g_fb_pa >= 0x60000000u ||
+             (g_fb_pa & 0xfff))
+      snprintf(why, sizeof(why), "Display test: frame not in one piece of "
+               "memory (0x%08X)", (unsigned)g_fb_pa);
+    if (why[0]) {
+      log_append(why);
+      log_append("\r\n");
+      set_message(MV_MESSAGE, why, -1, 1);
+      return;
+    }
+    static char line[160];
+    snprintf(line, sizeof(line), "display test: frame at 0x%08X, %ux%u pitch "
+             "%u, hardware 0x%08X\r\n", (unsigned)g_fb_pa, (unsigned)g_fb_w,
+             (unsigned)g_fb_h, (unsigned)g_fb_pitch, (unsigned)hw);
+    log_append(line);
+    jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h);
   }
 
   if (dry) {
@@ -1662,9 +1744,11 @@ static void do_test(int dry, int slot, int variant) {
     }
   }
 
-  set_message(MV_BUSY, dry ? "Dry run..." : "Reset test...", -1, 0);
+  set_message(MV_BUSY, kind == 2 ? "Display test..." :
+              dry ? "Dry run..." : "Reset test...", -1, 0);
   slots_sync();
   run_and_wait(JAMAISVU_MODE_SAVE, slot, dry ? nonce : NULL,
+               kind == 2 ? JV_TEST_DISPLAY :
                dry ? JV_TEST_DRYRUN : JV_TEST_RESET, variant);
 }
 
@@ -1798,6 +1882,9 @@ static int worker_thread(SceSize args, void *argp) {
         break;
       case OP_TEST_DRY:
         do_test(1, g_op_slot, JV_PAYLOAD_DEFAULT);
+        break;
+      case OP_TEST_DISPLAY:
+        do_test(2, g_op_slot, JV_PAYLOAD_DEFAULT);
         break;
         break;
       case OP_PREPARE:

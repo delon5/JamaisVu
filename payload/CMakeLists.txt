@@ -45,6 +45,16 @@ set(JamaisVu_payload_sources
   FatFs/ff.c
   FatFs/ffsystem.c
   FatFs/ffunicode.c
+  # Diagnostics "Display test" only; from xerpi's vita-libbaremetal (no
+  # licence: private builds only, see xerpi/NOTICE.md)
+  xerpi/display_test.c
+  xerpi/pervasive_display.c
+  xerpi/dsi.c
+  xerpi/iftu.c
+  xerpi/lcd.c
+  xerpi/i2c.c
+  xerpi/utils.c
+  xerpi/font_data.c
 )
 
 # Not -mgeneral-regs-only: on 3.60 hardware that build never reached the

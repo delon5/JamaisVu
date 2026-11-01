@@ -50,7 +50,7 @@ Press **START + UP** to open the slot menu; **START + UP** or **START + DOWN** c
 | ○ | Close |
 | ✕ (LiveArea, empty slot) | Prepare the selected slot now |
 | △ (LiveArea) | Prepare all empty slots there is space for |
-| SELECT | Diagnostics (reset test / dry run) |
+| SELECT | Diagnostics (reset test / dry run / display test) |
 
 **✕ and ○ follow the running game.** Japanese and Asian games (title IDs `PCSG`, `PCSC`, `VLJM`, `VLJS`, `PCSH`, `PCSD`, `VCAS`, `VLAS`) confirm with ○, so in them the menu does too, and ✕ goes back; the hints show the right icons. If ✕/○ are swapped for the game in **PSV-Shell-Plus** or **reVita**, the menu follows that as well (their profiles are only read). In the LiveArea the console's own ✕/○ setting applies. `log.txt` records which button was chosen and why.
 

@@ -364,6 +364,7 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
     case MV_DIAG:
       labels[n] = "Reset test"; icons[n] = ok_icon(m); n++;
       labels[n] = "Dry run";    icons[n] = ICON_SQUARE; n++;
+      labels[n] = "Display test"; icons[n] = ICON_TRIANGLE; n++;
       labels[n] = "Back";       icons[n] = back_icon(m); n++;
       break;
     case MV_BUSY:

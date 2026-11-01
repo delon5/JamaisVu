@@ -20,6 +20,7 @@
 #include "msif/ms.h"
 #include "msif/msif.h"
 #include "msif/msif_auth.h"
+#include "xerpi/display_test.h"
 
 #include "ff.h"
 
@@ -258,6 +259,23 @@ static void vbar_set(uint32_t v) {
   __asm__ volatile("mcr p15, 0, %0, c12, c0, 0\n\tisb" :: "r"(v));
 }
 
+static void display_mark(int step) {
+  stage_mark(JV_STAGE_DISP_I2C + step);
+}
+
+static int display_test(void) {
+  JvDisplayArgs a;
+  a.fb_paddr = pargs->disp_fb_paddr;
+  a.pitch = pargs->disp_fb_pitch;
+  a.width = pargs->disp_fb_width;
+  a.height = pargs->disp_fb_height;
+  a.hw_info = pargs->disp_hw_info;
+  a.hw_flags0 = pargs->disp_hw_flags0;
+  if (jv_display_test(&a, display_mark, jv_time_us) < 0)
+    return JV_ERR_ARGS;
+  return JV_TEST_DONE;
+}
+
 static int run(void) {
   static FATFS fs;
   FRESULT fres;
@@ -287,6 +305,12 @@ static int run(void) {
     gpio_port_clear(0, GPIO_PORT_GAMECARD_LED); /* "trace is recording" */
     trace_flush();
   }
+
+  /* Diagnostics: the display test runs once trace.bin records every step
+   * (if the display code hangs, the log still shows how far it got). It
+   * needs no filesystem and writes nothing else. */
+  if (pargs->debug_mode == JV_TEST_DISPLAY)
+    return display_test();
 
   fres = f_mount(&fs, "ux0:", 1);
   if (fres != FR_OK) {

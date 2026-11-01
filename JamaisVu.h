@@ -96,6 +96,12 @@ typedef struct {
    * random signature the plugin wrote there. 0 = not available. */
   uint32_t trace_rel_lba;
   uint8_t trace_nonce[16];
+  /* Diagnostics "Display test" (JV_TEST_DISPLAY): the frame the game was
+   * showing (physical address, physically contiguous) and the hardware
+   * info the LCD backlight setup needs. Appended: the layout above stays. */
+  uint32_t disp_fb_paddr;
+  uint32_t disp_fb_pitch, disp_fb_width, disp_fb_height;
+  uint32_t disp_hw_info, disp_hw_flags0;
 } PayloadArguments;
 
 /* First sector of data/JamaisVu/trace.bin on the Memory Card. The plugin
@@ -132,6 +138,7 @@ enum JamaisVuModes {
 #define JV_TEST_NONE   0
 #define JV_TEST_RESET  1 /* payload returns immediately: soft reset only */
 #define JV_TEST_DRYRUN 2 /* runs a save up to (not including) the first write */
+#define JV_TEST_DISPLAY 3 /* switches the screen on, test picture, off again */
 
 /* Payload progress (PayloadArguments.stage) */
 #define JV_STAGE_ENTRY        1
@@ -147,6 +154,14 @@ enum JamaisVuModes {
 #define JV_STAGE_SLOT_TOKEN   11
 #define JV_STAGE_WRITING      12
 #define JV_STAGE_DONE         13 /* payload about to return to the OS */
+/* Display test steps (JV_TEST_DISPLAY), in order */
+#define JV_STAGE_DISP_I2C     14
+#define JV_STAGE_DISP_DSI     15
+#define JV_STAGE_DISP_DRAWN   16
+#define JV_STAGE_DISP_LCD     17
+#define JV_STAGE_DISP_PLANE   18
+#define JV_STAGE_DISP_SHOWN   19
+#define JV_STAGE_DISP_OFF     20
 
 /* Payload result codes (PayloadArguments.result) */
 #define JV_TEST_DONE            1 /* a diagnostics run finished */

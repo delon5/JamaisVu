@@ -49,6 +49,13 @@ const char *jv_stage_name(uint32_t stage) {
     case JV_STAGE_SLOT_TOKEN: return "slot-token-ok";
     case JV_STAGE_WRITING:    return "writing";
     case JV_STAGE_DONE:       return "returning-to-system";
+    case JV_STAGE_DISP_I2C:   return "display-i2c";
+    case JV_STAGE_DISP_DSI:   return "display-link";
+    case JV_STAGE_DISP_DRAWN: return "display-drawn";
+    case JV_STAGE_DISP_LCD:   return "display-lcd-on";
+    case JV_STAGE_DISP_PLANE: return "display-showing";
+    case JV_STAGE_DISP_SHOWN: return "display-6s-done";
+    case JV_STAGE_DISP_OFF:   return "display-off";
     default:                  return "none";
   }
 }

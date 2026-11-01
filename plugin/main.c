@@ -10,6 +10,7 @@
 #include <psp2kern/kernel/modulemgr.h>
 #include <psp2kern/kernel/suspend.h>
 #include <psp2kern/kernel/sysmem.h>
+#include <psp2kern/kernel/sysroot.h>
 #include <psp2kern/kernel/threadmgr.h>
 #include <psp2kern/io/fcntl.h>
 #include <psp2kern/io/dirent.h>
@@ -345,6 +346,19 @@ static int savestate_system_event(int resume, int eventid,
   return 0;
 }
 
+/* Display test: the frame the game showed (see menu.c, record_frame) */
+void jv_set_display_frame(uint32_t paddr, uint32_t pitch, uint32_t width,
+                          uint32_t height) {
+  pargs.disp_fb_paddr = paddr;
+  pargs.disp_fb_pitch = pitch;
+  pargs.disp_fb_width = width;
+  pargs.disp_fb_height = height;
+}
+
+uint32_t jv_hw_info(void) {
+  return ksceSysrootGetHardwareInfo();
+}
+
 /* Starts a save or load of a slot: fills in the payload arguments and
  * requests the soft reset during which the payload runs. */
 int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
@@ -386,6 +400,15 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   pargs.soc_timer_10ms = 0;
   pargs.trace_n = 0;
   pargs.fault_type = pargs.fault_addr = pargs.fault_lr = 0;
+  if (debug_mode == JV_TEST_DISPLAY) {
+    uint8_t flags[16];
+    memset(flags, 0, sizeof(flags));
+    ksceSysrootGetHardwareFlags(flags);
+    pargs.disp_hw_info = ksceSysrootGetHardwareInfo();
+    pargs.disp_hw_flags0 = flags[0];
+  } else {
+    pargs.disp_fb_paddr = 0; /* only the display test draws */
+  }
   pargs.trace_rel_lba = trace_nonce ? trace_rel_lba : 0;
   if (trace_nonce)
     memcpy(pargs.trace_nonce, trace_nonce, sizeof(pargs.trace_nonce));

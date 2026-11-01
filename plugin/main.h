@@ -27,6 +27,11 @@ const char *jv_build_id(void);
 void jv_clocks_remember(char *out, int len);
 void jv_clocks_restore(char *out, int len);
 #define JV_PAYLOAD_DEFAULT 0 /* the only payload (variants were for A/B tests) */
+/* Display test (Diagnostics): the frame to draw into; the hardware info
+ * word (PCH-2000: (info & 0xFF0000) == 0x800000) */
+void jv_set_display_frame(uint32_t paddr, uint32_t pitch, uint32_t width,
+                          uint32_t height);
+uint32_t jv_hw_info(void);
 int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
                uint32_t trace_rel_lba, const uint8_t *trace_nonce,
                int payload_variant);
