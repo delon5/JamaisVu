@@ -8,6 +8,7 @@ typedef struct {
   uint32_t fb_paddr; /* the frame the game showed (physically contiguous) */
   uint32_t pitch, width, height; /* pixels */
   uint32_t hw_info, hw_flags0;   /* for the LCD backlight setup */
+  uint32_t vic;                  /* display timing: 0 (A) or 0x20 (B) */
 } JvDisplayArgs;
 
 /* Switches the PCH-2000 LCD on, shows a test screen with a moving progress

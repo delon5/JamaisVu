@@ -51,6 +51,7 @@ static const struct iftu_csc_params csc1 = {
 #define RGB(r, g, b) (0xFF000000u | ((b) << 16) | ((g) << 8) | (r))
 
 static volatile uint32_t *g_fb;
+static uint32_t g_vic;
 static int g_pitch, g_w, g_h;
 
 static void fill(int x, int y, int w, int h, uint32_t c) {
@@ -87,11 +88,15 @@ static int text_w(const char *s, int scale) {
 static void draw_screen(void) {
 	static const char *const l1 = "JamaisVu";
 	static const char *const l2 = "Display test - nothing is written";
+	static const char *const ta = "Timing A";
+	static const char *const tb = "Timing B";
 	static const char *const l3 = "If you can read this, the screen works.";
 	fill(0, 0, g_w, g_h, RGB(16, 20, 28));
 	text((g_w - text_w(l1, 5)) / 2, 120, 5, RGB(34, 178, 226), l1);
 	text((g_w - text_w(l2, 3)) / 2, 200, 3, RGB(240, 240, 240), l2);
 	text((g_w - text_w(l3, 2)) / 2, 250, 2, RGB(170, 180, 195), l3);
+	text((g_w - text_w(ta, 3)) / 2, 470, 3, RGB(240, 240, 240),
+	     g_vic == 0x20 ? tb : ta);
 	fill(BAR_X - 4, BAR_Y - 4, BAR_W + 8, BAR_H + 8, RGB(90, 100, 115));
 	fill(BAR_X, BAR_Y, BAR_W, BAR_H, RGB(16, 20, 28));
 	/* colour check: red, green, blue, white */
@@ -130,6 +135,7 @@ static void plane_setup(uint32_t paddr) {
 int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
                     uint32_t (*now_us)(void)) {
 	uint32_t pixelclock = 0;
+	uint32_t vic = a->vic == 0x20 ? 0x20 : 0; /* nothing else */
 
 	/* only what the test was written for: a 960x544 frame in CDRAM or
 	 * main memory, as the plugin checked */
@@ -149,6 +155,7 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 	g_pitch = a->width;
 	g_w = a->width;
 	g_h = a->height;
+	g_vic = vic;
 	g_disp_hw_info = a->hw_info;
 	g_disp_hw_flags0 = a->hw_flags0;
 
@@ -159,13 +166,13 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 	mark(JV_DISP_STEP_I2C);
 
 	/* display link, 960x544 (as libbaremetal's display_init_lcd) */
-	dsi_get_pixelclock_for_vic(0, 24, &pixelclock);
+	dsi_get_pixelclock_for_vic(vic, 24, &pixelclock);
 	pervasive_dsi_set_pixelclock(0, pixelclock);
 	pervasive_clock_enable_dsi(0, 0xF);
 	pervasive_reset_exit_dsi(0, 7);
 	dsi_init();
-	dsi_start_master(DSI_BUS_OLED_LCD, 0);
-	dsi_start_display(DSI_BUS_OLED_LCD, 0, 1);
+	dsi_start_master(DSI_BUS_OLED_LCD, vic);
+	dsi_start_display(DSI_BUS_OLED_LCD, vic, 1);
 	mark(JV_DISP_STEP_DSI);
 
 	draw_screen(); /* before the panel lights up: no stale picture */

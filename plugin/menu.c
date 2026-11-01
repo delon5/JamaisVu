@@ -237,6 +237,7 @@ static volatile uint32_t g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h;
  * offset where the translation failed or stopped being contiguous */
 static volatile uint32_t g_fb_va, g_fb_pa0, g_fb_bad_off;
 static volatile int g_fb_game; /* recorded from a game's frame */
+static volatile uint32_t g_disp_vic; /* display test timing, see input */
 
 /* Four ways to translate a game address, tried in order; the log shows
  * each one's raw result (on hardware the CPU translation alone failed for
@@ -1132,8 +1133,11 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_RESET, sel);
       else if (pressed & SCE_CTRL_SQUARE)
         start_op(OP_TEST_DRY, sel);
-      else if (pressed & SCE_CTRL_TRIANGLE)
+      else if (pressed & SCE_CTRL_TRIANGLE) {
+        /* L held: display timing B (A/B test of the screen edges) */
+        g_disp_vic = (held & SCE_CTRL_LTRIGGER) ? 0x20 : 0;
         start_op(OP_TEST_DISPLAY, sel);
+      }
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
       break;
@@ -1842,7 +1846,10 @@ static void do_test(int kind, int slot, int variant) {
              (unsigned)g_fb_w, (unsigned)g_fb_h, (unsigned)g_fb_pitch,
              g_fb_game ? "game" : "LiveArea", (unsigned)hw);
     log_append(line);
-    jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h);
+    snprintf(line, sizeof(line), "display test: timing %s (vic 0x%X)\r\n",
+             g_disp_vic == 0x20 ? "B" : "A", (unsigned)g_disp_vic);
+    log_append(line);
+    jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h, g_disp_vic);
   }
 
   if (dry) {

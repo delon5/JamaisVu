@@ -70,6 +70,7 @@ JV_PIN(trace_rel_lba, 2064);
 JV_PIN(trace_nonce, 2068);
 JV_PIN(disp_fb_paddr, 2084);
 JV_PIN(disp_hw_flags0, 2104);
+JV_PIN(disp_vic, 2108);
 _Static_assert(sizeof(PayloadArguments) >= 2084,
                "PayloadArguments shrank: old snapshots would break");
 

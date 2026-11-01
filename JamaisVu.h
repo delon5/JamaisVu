@@ -102,6 +102,9 @@ typedef struct {
   uint32_t disp_fb_paddr;
   uint32_t disp_fb_pitch, disp_fb_width, disp_fb_height;
   uint32_t disp_hw_info, disp_hw_flags0;
+  /* display timing (DSI "vic"): 0 = A (libbaremetal's choice for the
+   * LCD), 0x20 = B (the other 960x544 timing) - A/B test of the edges */
+  uint32_t disp_vic;
 } PayloadArguments;
 
 /* First sector of data/JamaisVu/trace.bin on the Memory Card. The plugin

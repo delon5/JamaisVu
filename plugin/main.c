@@ -347,7 +347,8 @@ static int savestate_system_event(int resume, int eventid,
 
 /* Display test: the frame the game showed (see menu.c, record_frame) */
 void jv_set_display_frame(uint32_t paddr, uint32_t pitch, uint32_t width,
-                          uint32_t height) {
+                          uint32_t height, uint32_t vic) {
+  pargs.disp_vic = vic;
   pargs.disp_fb_paddr = paddr;
   pargs.disp_fb_pitch = pitch;
   pargs.disp_fb_width = width;
