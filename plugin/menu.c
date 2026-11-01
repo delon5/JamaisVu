@@ -85,6 +85,31 @@ static volatile int g_swap_ox;
 static char g_swap_tid[16]; /* title the current g_swap_ox was decided for */
 static void log_append(const char *text);
 
+/* The input thread never touches the Memory Card: in heavy games (Trails)
+ * a log write + sync could block it for seconds, and the menu did not
+ * react. Its log lines go into this queue, and the "JamaisVuIo" thread
+ * writes them; it also reads the remap plugins' profiles (decide_buttons).
+ * Entries are NUL-separated strings. */
+#define IOEV_LOG    1
+#define IOEV_DECIDE 2
+static SceUID g_io_evf = -1, g_logq_mtx = -1, g_log_mtx = -1;
+static char g_logq[4096];
+static int g_logq_len;
+static char g_decide_tid[16];
+
+static void log_queue(const char *text) {
+  int n = (int)strlen(text) + 1;
+  if (g_logq_mtx < 0 || g_io_evf < 0)
+    return;
+  ksceKernelLockMutex(g_logq_mtx, 1, NULL);
+  if (g_logq_len + n <= (int)sizeof(g_logq)) {
+    memcpy(g_logq + g_logq_len, text, n);
+    g_logq_len += n;
+  }
+  ksceKernelUnlockMutex(g_logq_mtx, 1);
+  ksceKernelSetEventFlag(g_io_evf, IOEV_LOG);
+}
+
 static int read_small(const char *path, void *buf, int cap) {
   SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
   if (fd < 0)
@@ -119,10 +144,12 @@ static int revita_swap_for(const char *tid) {
 static void decide_buttons(const char *tid) {
   static char line[192];
   int psvs = psvs_swap_for(tid), revita = revita_swap_for(tid);
-  g_swap_ox = menu_swap_ox(tid, psvs, revita);
+  int swap = menu_swap_ox(tid, psvs, revita);
+  if (strncmp(g_swap_tid, tid, sizeof(g_swap_tid)) == 0)
+    g_swap_ox = swap; /* still the same game: refine the quick guess */
   snprintf(line, sizeof(line), "menu buttons for %s: confirm with %s "
            "(%s game, PSV-Shell swap %s, reVita swap %s)\r\n", tid,
-           g_swap_ox ? "O" : "X",
+           swap ? "O" : "X",
            title_confirms_with_circle(tid) ? "O-confirm" : "X-confirm",
            psvs < 0 ? "n/a" : psvs ? "on" : "off",
            revita < 0 ? "n/a" : revita ? "on" : "off");
@@ -530,7 +557,7 @@ static void perf_report(void) {
   }
   snprintf(line + n, sizeof(line) - n, "\r\n");
   g_perf_since = now;
-  log_append(line);
+  log_queue(line);
 }
 
 static int open_menu(void) {
@@ -541,7 +568,7 @@ static int open_menu(void) {
      * system needs; noted once per boot */
     if (!warned) {
       warned = 1;
-      log_append("menu not opened: not enough free kernel memory for the "
+      log_queue("menu not opened: not enough free kernel memory for the "
                  "overlay (~1.5 MB)\r\n");
     }
     return -1;
@@ -611,7 +638,14 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
    * Everything below is written for ✕ = confirm, ○ = back. */
   if (g_capture_ok && strncmp(g_swap_tid, g_capture_tid, sizeof(g_swap_tid))) {
     strncpy(g_swap_tid, g_capture_tid, sizeof(g_swap_tid) - 1);
-    decide_buttons(g_swap_tid);
+    /* instant, no file access: the game's region; the io thread then
+     * checks PSV-Shell-Plus / reVita and corrects it if they swap */
+    g_swap_ox = title_confirms_with_circle(g_swap_tid);
+    ksceKernelLockMutex(g_logq_mtx, 1, NULL);
+    strncpy(g_decide_tid, g_swap_tid, sizeof(g_decide_tid) - 1);
+    ksceKernelUnlockMutex(g_logq_mtx, 1);
+    if (g_io_evf >= 0)
+      ksceKernelSetEventFlag(g_io_evf, IOEV_DECIDE);
   }
   if (g_swap_ox) {
     uint32_t ox = pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE);
@@ -866,7 +900,18 @@ static const char *storage_problem(void) {
  * result with the payload's step trace when the system is back. If the
  * system never came back, the next boot recovers the trace from trace.bin
  * (see trace.c). */
+static void log_append_locked(const char *text);
+
+/* worker and io thread only (never the input thread) */
 static void log_append(const char *text) {
+  if (g_log_mtx >= 0)
+    ksceKernelLockMutex(g_log_mtx, 1, NULL);
+  log_append_locked(text);
+  if (g_log_mtx >= 0)
+    ksceKernelUnlockMutex(g_log_mtx, 1);
+}
+
+static void log_append_locked(const char *text) {
   static char path[64], line[160];
   SceDateTime t;
   SceIoStat st;
@@ -1383,6 +1428,39 @@ void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
     ksceKernelSetEventFlag(g_evf, EVF_RESUMED);
 }
 
+static int io_thread(SceSize args, void *argp) {
+  static char batch[sizeof(g_logq)];
+  static char tid[16];
+
+  while (1) {
+    unsigned int out = 0;
+    if (ksceKernelWaitEventFlag(g_io_evf, IOEV_LOG | IOEV_DECIDE,
+                                SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
+                                &out, NULL) < 0)
+      continue;
+
+    if (out & IOEV_DECIDE) {
+      ksceKernelLockMutex(g_logq_mtx, 1, NULL);
+      memcpy(tid, g_decide_tid, sizeof(tid));
+      tid[sizeof(tid) - 1] = '\0';
+      ksceKernelUnlockMutex(g_logq_mtx, 1);
+      if (tid[0])
+        decide_buttons(tid);
+    }
+
+    ksceKernelLockMutex(g_logq_mtx, 1, NULL);
+    int n = g_logq_len;
+    memcpy(batch, g_logq, n);
+    g_logq_len = 0;
+    ksceKernelUnlockMutex(g_logq_mtx, 1);
+    for (int i = 0; i < n;) {
+      log_append(batch + i);
+      i += (int)strlen(batch + i) + 1;
+    }
+  }
+  return 0;
+}
+
 int menu_init(const char *status_text) {
   int assign = 1;
   /* /CONFIG/SYSTEM/button_assign: 0 = ○ confirms (Japan), 1 = ✕ confirms */
@@ -1400,6 +1478,9 @@ int menu_init(const char *status_text) {
   /* overlay memory is reserved on demand (overlay_acquire) */
   g_ovl_mtx = ksceKernelCreateMutex("JamaisVuOverlay", 0, 0, NULL);
 
+  g_io_evf = ksceKernelCreateEventFlag("JamaisVuIoEvf", 0, 0, NULL);
+  g_logq_mtx = ksceKernelCreateMutex("JamaisVuLogQ", 0, 0, NULL);
+  g_log_mtx = ksceKernelCreateMutex("JamaisVuLog", 0, 0, NULL);
   g_evf = ksceKernelCreateEventFlag("JamaisVuEvf", 0, 0, NULL);
   g_mtx = ksceKernelCreateMutex("JamaisVuMenu", 0, 0, NULL);
   if (g_evf < 0 || g_mtx < 0)
@@ -1425,6 +1506,13 @@ int menu_init(const char *status_text) {
                                 0x4000, 0, 0x10000, NULL);
   if (thid >= 0)
     ksceKernelStartThread(thid, 0, NULL);
+
+  if (g_io_evf >= 0 && g_logq_mtx >= 0 && g_log_mtx >= 0) {
+    thid = ksceKernelCreateThread("JamaisVuIo", io_thread, 0x70, 0x4000, 0,
+                                  0x10000, NULL);
+    if (thid >= 0)
+      ksceKernelStartThread(thid, 0, NULL);
+  }
 
   return 0;
 }
