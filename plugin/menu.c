@@ -44,9 +44,19 @@ static volatile int g_busy;
 static volatile int g_cancel_req; /* ○ while preparing a slot */
 
 /* Memory for the overlay: panel, toast, thumbnails, one framebuffer row */
+/* Overlay buffers (menu panel, message banner, thumbnails, one row) are
+ * only reserved while the menu or a message is shown, like reVita does:
+ * during gameplay JamaisVu holds none of this memory. The display hook
+ * counts itself in g_overlay_users, so the memory is only freed once no
+ * frame is being drawn with it. */
 static SceUID g_mem_blk = -1;
+static SceUID g_ovl_mtx = -1;
+static volatile int g_overlay_ready;
+static volatile int g_overlay_users;
+static volatile uint32_t g_overlay_gen; /* +1 per acquire: buffers are new */
 static uint32_t *g_panel_px, *g_toast_px, *g_rowbuf;
 static uint32_t *g_thumbs[JV_NUM_SLOTS + 1];
+static void model_clear_thumbs(void);
 
 /* Menu model: written by the input and worker threads under g_mtx,
  * read lock-free by the display hook (seqlock: odd = being written). */
@@ -97,7 +107,7 @@ static int psvs_swap_for(const char *tid) {
 /* read-only: ur0:data/reVita/Profile/<TITLEID>.INI, else GLOBAL.INI */
 static int revita_swap_for(const char *tid) {
   static char path[96];
-  static char buf[16384];
+  static char buf[8192]; /* reVita's own profile buffer is ~4 KB */
   snprintf(path, sizeof(path), "ur0:data/reVita/Profile/%s.INI", tid);
   int n = read_small(path, buf, sizeof(buf));
   if (n < 0)
@@ -164,6 +174,13 @@ static void model_end(void) {
   ksceKernelUnlockMutex(g_mtx, 1);
 }
 
+static void model_clear_thumbs(void) {
+  model_begin();
+  for (int i = 0; i < JV_NUM_SLOTS; i++)
+    g_model.slots[i].thumb = NULL;
+  model_end();
+}
+
 static void set_message(MenuMode mode, const char *msg, int progress,
                         int is_error) {
   model_begin();
@@ -175,7 +192,70 @@ static void set_message(MenuMode mode, const char *msg, int progress,
   model_end();
 }
 
+static int overlay_acquire(void) {
+  int res = 0;
+  void *base;
+
+  if (g_ovl_mtx >= 0)
+    ksceKernelLockMutex(g_ovl_mtx, 1, NULL);
+  if (!g_overlay_ready) {
+    uint32_t size = MENU_W * MENU_H * 4 + TOAST_W * TOAST_H * 4 +
+                    (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_SCREEN_W * 4;
+    size = (size + 0xfff) & ~0xfff;
+    g_mem_blk = ksceKernelAllocMemBlock("JamaisVuMenu",
+                                        SCE_KERNEL_MEMBLOCK_TYPE_KERNEL_RW,
+                                        size, NULL);
+    if (g_mem_blk >= 0 && ksceKernelGetMemBlockBase(g_mem_blk, &base) >= 0) {
+      uint32_t *p = base;
+      g_panel_px = p;  p += MENU_W * MENU_H;
+      g_toast_px = p;  p += TOAST_W * TOAST_H;
+      for (int i = 0; i <= JV_NUM_SLOTS; i++) {
+        g_thumbs[i] = p;
+        p += THUMB_PX;
+      }
+      g_rowbuf = p;
+      g_overlay_gen++;
+      __sync_synchronize();
+      g_overlay_ready = 1;
+    } else {
+      if (g_mem_blk >= 0)
+        ksceKernelFreeMemBlock(g_mem_blk);
+      g_mem_blk = -1;
+      res = -1;
+    }
+  }
+  if (g_ovl_mtx >= 0)
+    ksceKernelUnlockMutex(g_ovl_mtx, 1);
+  return res;
+}
+
+static void overlay_release(void) {
+  if (g_ovl_mtx >= 0)
+    ksceKernelLockMutex(g_ovl_mtx, 1, NULL);
+  if (g_overlay_ready) {
+    g_overlay_ready = 0;
+    __sync_synchronize();
+    /* wait for a frame that is still drawing with the buffers */
+    for (int i = 0; i < 500 && g_overlay_users; i++)
+      ksceKernelDelayThread(1000);
+    if (g_overlay_users == 0) {
+      model_clear_thumbs(); /* the model must not point into freed memory */
+      ksceKernelFreeMemBlock(g_mem_blk);
+      g_mem_blk = -1;
+      g_panel_px = g_toast_px = g_rowbuf = NULL;
+      for (int i = 0; i <= JV_NUM_SLOTS; i++)
+        g_thumbs[i] = NULL;
+    } else {
+      g_overlay_ready = 1; /* still in use: try again later */
+    }
+  }
+  if (g_ovl_mtx >= 0)
+    ksceKernelUnlockMutex(g_ovl_mtx, 1);
+}
+
 static void toast(const char *msg, int is_error) {
+  if (overlay_acquire() < 0)
+    return; /* no memory for the banner; log.txt still has the result */
   strncpy(g_toast_msg, msg, sizeof(g_toast_msg) - 1);
   g_toast_msg[sizeof(g_toast_msg) - 1] = '\0';
   g_toast_err = is_error;
@@ -273,6 +353,13 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
   static MenuModel local;
   static uint32_t rendered_seq = 1; /* odd: nothing rendered yet */
   static uint32_t rendered_toast = 0xffffffff;
+  static uint32_t gen = 0;
+
+  if (gen != g_overlay_gen) { /* fresh buffers: nothing rendered in them */
+    gen = g_overlay_gen;
+    rendered_seq = 1;
+    rendered_toast = 0xffffffff;
+  }
 
   if (g_menu_open) {
     uint32_t s1 = g_model_seq;
@@ -305,13 +392,18 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
 
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
-  if (g_mem_blk >= 0 && p && p->base && p->pixelformat == 0 &&
+  if (g_overlay_ready && p && p->base && p->pixelformat == 0 &&
       p->width >= 480 && p->width <= 960 && p->height >= 272 &&
       p->height <= 544 && p->pitch >= p->width) {
-    if (g_capture_req)
-      capture(p);
-    if (g_menu_open || now_us() < g_toast_until)
-      draw_overlays(p);
+    __sync_fetch_and_add(&g_overlay_users, 1);
+    __sync_synchronize();
+    if (g_overlay_ready) { /* re-check: a release may have started */
+      if (g_capture_req)
+        capture(p);
+      if (g_menu_open || now_us() < g_toast_until)
+        draw_overlays(p);
+    }
+    __sync_fetch_and_sub(&g_overlay_users, 1);
   }
 
   return TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
@@ -386,7 +478,18 @@ static void start_op(int op, int slot) {
   ksceKernelSetEventFlag(g_evf, EVF_WORK);
 }
 
-static void open_menu(void) {
+static int open_menu(void) {
+  static int warned;
+  if (overlay_acquire() < 0) {
+    /* like reVita's "Buy more RAM": refuse rather than take memory the
+     * system needs; noted once per boot */
+    if (!warned) {
+      warned = 1;
+      log_append("menu not opened: not enough free kernel memory for the "
+                 "overlay (~1.5 MB)\r\n");
+    }
+    return -1;
+  }
   g_capture_ok = 0;
   g_swap_ox = g_system_circle_enter; /* until a game frame is captured */
   g_swap_tid[0] = '\0';
@@ -399,6 +502,7 @@ static void open_menu(void) {
   model_end();
   g_menu_open = 1;
   start_op(OP_REFRESH, 0);
+  return 0;
 }
 
 static void close_menu(void) {
@@ -432,8 +536,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
       return;
     /* On firmware without verified offsets the menu still opens (preview
      * mode: browse, thumbnails, input), but save/load are refused. */
-    if (!g_busy)
-      open_menu();
+    if (g_busy || open_menu() < 0)
+      return;
     if (!jv_armed()) {
       static char msg[128];
       snprintf(msg, sizeof(msg), "Preview only - save/load disabled: %s",
@@ -579,6 +683,11 @@ static int input_thread(SceSize args, void *argp) {
       g_model.can_save = 1;
       model_end();
     }
+
+    /* nothing shown and nothing running: give the overlay memory back */
+    if (g_overlay_ready && !g_menu_open && !g_busy && !g_capture_req &&
+        now_us() >= g_toast_until)
+      overlay_release();
 
     uint32_t pressed = pad.buttons & ~prev;
     prev = pad.buttons;
@@ -1201,7 +1310,6 @@ int menu_init(const char *status_text) {
   if (ksceRegMgrGetKeyInt("/CONFIG/SYSTEM", "button_assign", &assign) >= 0)
     g_system_circle_enter = (assign == 0);
   SceUID thid;
-  void *base;
 
   g_status_text = status_text;
 
@@ -1209,25 +1317,8 @@ int menu_init(const char *status_text) {
                              (uintptr_t *)&g_dcache_clean_inv) < 0)
     g_dcache_clean_inv = NULL;
 
-  uint32_t size = MENU_W * MENU_H * 4 + TOAST_W * TOAST_H * 4 +
-                  (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_SCREEN_W * 4;
-  size = (size + 0xfff) & ~0xfff;
-
-  g_mem_blk = ksceKernelAllocMemBlock("JamaisVuMenu",
-                                      SCE_KERNEL_MEMBLOCK_TYPE_KERNEL_RW,
-                                      size, NULL);
-  if (g_mem_blk >= 0 && ksceKernelGetMemBlockBase(g_mem_blk, &base) >= 0) {
-    uint32_t *p = base;
-    g_panel_px = p;  p += MENU_W * MENU_H;
-    g_toast_px = p;  p += TOAST_W * TOAST_H;
-    for (int i = 0; i <= JV_NUM_SLOTS; i++) {
-      g_thumbs[i] = p;
-      p += THUMB_PX;
-    }
-    g_rowbuf = p;
-  } else {
-    g_mem_blk = -1; /* no overlay, but save/load still work */
-  }
+  /* overlay memory is reserved on demand (overlay_acquire) */
+  g_ovl_mtx = ksceKernelCreateMutex("JamaisVuOverlay", 0, 0, NULL);
 
   g_evf = ksceKernelCreateEventFlag("JamaisVuEvf", 0, 0, NULL);
   g_mtx = ksceKernelCreateMutex("JamaisVuMenu", 0, 0, NULL);

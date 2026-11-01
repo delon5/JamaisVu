@@ -239,6 +239,26 @@ int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
   return res;
 }
 
+/* Reads the thumbnail that follows the slot info into thumb, or, if thumb
+ * is NULL, only through the CRC in small chunks (no 56 KB buffer). */
+static int read_thumb(SceUID fd, uint32_t *thumb, uint32_t *crc) {
+  static uint8_t chunk[4096];
+  if (thumb) {
+    if (ksceIoRead(fd, thumb, THUMB_BYTES) != THUMB_BYTES)
+      return -1;
+    *crc = crc32_update(*crc, thumb, THUMB_BYTES);
+    return 0;
+  }
+  for (uint32_t left = THUMB_BYTES; left > 0;) {
+    uint32_t n = left < sizeof(chunk) ? left : sizeof(chunk);
+    if (ksceIoRead(fd, chunk, n) != (int)n)
+      return -1;
+    *crc = crc32_update(*crc, chunk, n);
+    left -= n;
+  }
+  return 0;
+}
+
 /* Version 2 (before the config.txt check): converted to the current
  * layout; its plugin configuration is unknown (JV_CFG_UNKNOWN). */
 static int slot_info_read_v2(SceUID fd, SlotInfo *info, uint32_t *thumb) {
@@ -249,11 +269,9 @@ static int slot_info_read_v2(SceUID fd, SlotInfo *info, uint32_t *thumb) {
       ksceIoRead(fd, &v2, sizeof(v2)) != sizeof(v2) ||
       v2.thumb_w != JV_THUMB_W || v2.thumb_h != JV_THUMB_H)
     return JV_ERR_SLOT_IO;
-  if (v2.has_thumb && ksceIoRead(fd, thumb, THUMB_BYTES) != THUMB_BYTES)
-    return JV_ERR_SLOT_IO;
   crc = crc32_update(0, &v2, offsetof(SlotInfoV2, crc));
-  if (v2.has_thumb)
-    crc = crc32_update(crc, thumb, THUMB_BYTES);
+  if (v2.has_thumb && read_thumb(fd, thumb, &crc) < 0)
+    return JV_ERR_SLOT_IO;
   if (crc != v2.crc)
     return JV_ERR_SLOT_IO;
 
@@ -298,10 +316,10 @@ int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb) {
              info->thumb_w != JV_THUMB_W || info->thumb_h != JV_THUMB_H) {
     res = JV_ERR_SLOT_IO;
   } else {
-    if (info->has_thumb &&
-        ksceIoRead(fd, thumb, THUMB_BYTES) != THUMB_BYTES)
+    uint32_t crc = crc32_update(0, info, offsetof(SlotInfo, crc));
+    if (info->has_thumb && read_thumb(fd, thumb, &crc) < 0)
       res = JV_ERR_SLOT_IO;
-    if (res == 0 && info_crc(info, thumb) != info->crc)
+    if (res == 0 && crc != info->crc)
       res = JV_ERR_SLOT_IO;
   }
 
@@ -335,8 +353,7 @@ int slot_file_exists(int slot) {
 
 int slot_is_loadable(int slot) {
   static SlotInfo info;
-  static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
-  return slot_file_exists(slot) && slot_info_read(slot, &info, thumb) == 0;
+  return slot_file_exists(slot) && slot_info_read(slot, &info, NULL) == 0;
 }
 
 
@@ -395,10 +412,13 @@ static int sfo_read(const char *path, uint8_t *buf, int size) {
   return n;
 }
 
+/* one buffer for all param.sfo reads (all on the worker thread) */
+static uint8_t g_sfo_buf[0x4000];
+
 static int sfo_get_title(const char *path, char *out, int len) {
-  static uint8_t buf[0x4000];
+  uint8_t *buf = g_sfo_buf;
   uint32_t vlen;
-  int n = sfo_read(path, buf, sizeof(buf));
+  int n = sfo_read(path, buf, sizeof(g_sfo_buf));
   const uint8_t *p = sfo_find(buf, n, "TITLE", &vlen);
   if (!p)
     return -1;
@@ -453,14 +473,14 @@ void lookup_title(const char *titleid, char *out, int len) {
 }
 
 int lookup_app_ver(const char *titleid, char *out, int len) {
-  static uint8_t buf[0x4000];
+  uint8_t *buf = g_sfo_buf;
   static char path[96];
 
   for (size_t i = 0; i < sizeof(k_sfo_roots) / sizeof(k_sfo_roots[0]); i++) {
     uint32_t vlen;
     snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", k_sfo_roots[i],
              titleid);
-    int n = sfo_read(path, buf, sizeof(buf));
+    int n = sfo_read(path, buf, sizeof(g_sfo_buf));
     const uint8_t *v = n > 0 ? sfo_find(buf, n, "APP_VER", &vlen) : NULL;
     if (!v)
       continue;

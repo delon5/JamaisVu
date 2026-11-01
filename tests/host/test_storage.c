@@ -354,6 +354,7 @@ static void test_slot_info_v2(void) {
   ksceIoWrite(fd, thumb, sizeof(thumb));
   ksceIoClose(fd);
   CHECK(slot_info_read(1, &info, back_thumb) < 0, "damaged v2 info rejected");
+  CHECK(!slot_is_loadable(1), "damaged thumbnail caught by the chunked CRC");
 }
 
 static void test_versions(void) {
