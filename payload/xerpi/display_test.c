@@ -179,6 +179,10 @@ static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
  * recorded on its own (on hardware the link stop never confirmed: its
  * bounded wait gives up after ~1 s) */
 static void hw_off(void) {
+	/* black first, kept for a couple of frames, so whatever happens while
+	 * the panel shuts down shows nothing */
+	fill(0, 0, g_w, g_h, RGB(0, 0, 0));
+	delay(6000);
 	lcd_off();
 	mark(JV_DISP_STEP_LCD_OFF);
 	iftu_plane_config_set_enabled(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0, false);

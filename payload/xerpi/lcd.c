@@ -418,6 +418,17 @@ int lcd_init(void)
  * low - the state the system left the LCD in before the test. */
 void lcd_off(void)
 {
+	/* backlight PWM to 0 first (lcd_bl_set_brightness(0) only sends the
+	 * panel "display off", leaving the backlight lit over an undefined
+	 * picture: a broken-looking moment on hardware) */
+	struct lcd_i2c_bl_cmd cmd;
+	cmd.reg = 5;
+	cmd.data = 0;
+	lcd_i2c_bl_write_cmd(&cmd);
+	cmd.reg = 0xE;
+	cmd.data = 0;
+	lcd_i2c_bl_write_cmd(&cmd);
+	delay(2000);
 	lcd_bl_set_brightness(0);
 	gpio_port_clear(1, 7);
 	gpio_port_clear(0, GPIO_PORT_OLED_LCD);

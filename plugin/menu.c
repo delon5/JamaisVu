@@ -1610,6 +1610,8 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   after_resume();
 }
 
+static int display_frame_check(char *why, int len);
+
 static void do_save(int slot) {
   static char msg[64];
   int res;
@@ -1718,6 +1720,15 @@ static void do_save(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
 
+  /* progress screen during the save (PCH-2000): the game's frame, if it
+   * passes the same checks as the display test; otherwise no screen */
+  {
+    static char why[160];
+    if (display_frame_check(why, sizeof(why)))
+      jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h, 0x20);
+    else
+      jv_set_display_frame(0, 0, 0, 0, 0);
+  }
   run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce, JV_TEST_NONE,
                JV_PAYLOAD_DEFAULT);
 }
@@ -1768,6 +1779,7 @@ static void do_load(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
 
+  jv_set_display_frame(0, 0, 0, 0, 0); /* loads: not yet (step 3) */
   run_and_wait(JAMAISVU_MODE_LOAD, slot, NULL, JV_TEST_NONE,
                JV_PAYLOAD_DEFAULT);
 }

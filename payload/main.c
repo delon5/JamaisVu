@@ -277,8 +277,78 @@ static void display_args(JvDisplayArgs *a) {
   a->vic = pargs->disp_vic;
 }
 
+/* Progress screen during a save: the bar follows the slot file position
+ * (5..99 %), the line says how much memory is written. Called after every
+ * chunk written, so it only draws when something visible changes. */
+static uint32_t g_prog_total, g_prog_shown_mb = 0xffffffff;
+static int g_prog_shown_pct = -1;
+
+void progress_total(uint32_t total) {
+  g_prog_total = total;
+}
+
+static char *put_u(char *p, uint32_t v) {
+  char tmp[11];
+  int n = 0;
+  do {
+    tmp[n++] = (char)('0' + v % 10);
+    v /= 10;
+  } while (v);
+  while (n)
+    *p++ = tmp[--n];
+  return p;
+}
+
+void progress_at(uint32_t pos) {
+  if (!jv_screen_is_on() || g_prog_total == 0)
+    return;
+  if (pos > g_prog_total)
+    pos = g_prog_total;
+  int pct = 5 + (int)((uint64_t)pos * 94 / g_prog_total);
+  uint32_t mb = pos >> 20;
+  if (pct == g_prog_shown_pct && mb == g_prog_shown_mb)
+    return;
+  static char line[64];
+  char *p = line;
+  const char *w = "Writing memory: ";
+  while (*w)
+    *p++ = *w++;
+  p = put_u(p, mb);
+  *p++ = ' ';
+  *p++ = '/';
+  *p++ = ' ';
+  p = put_u(p, g_prog_total >> 20);
+  w = " MB";
+  while (*w)
+    *p++ = *w++;
+  *p = '\0';
+  jv_screen_status(mb != g_prog_shown_mb ? line : NULL,
+                   pct != g_prog_shown_pct ? pct : -1);
+  g_prog_shown_pct = pct;
+  g_prog_shown_mb = mb;
+}
+
 /* Progress screen: what each step means on screen, and how far along */
+static int g_screen_save; /* a real save (not a dry run) */
+
 static void screen_step(int n) {
+  if (g_screen_save) {
+    switch (n) {
+      case JV_STAGE_FS_MOUNT:
+        jv_screen_status("Reading the Memory Card", 2);
+        break;
+      case JV_STAGE_SLOT_FOUND:
+        jv_screen_status("Slot file found", 3);
+        break;
+      case JV_STAGE_SLOT_TOKEN:
+        jv_screen_status("Slot file checked", 4);
+        break;
+      case JV_STAGE_WRITING:
+        jv_screen_status("Writing savedata", 5);
+        break;
+    }
+    return;
+  }
   switch (n) {
     case JV_STAGE_FS_MOUNT:
       jv_screen_status("Reading the Memory Card", 45);
@@ -296,8 +366,12 @@ static void screen_step(int n) {
 static void screen_finish(int result) {
   if (!jv_screen_is_on())
     return;
-  jv_screen_status(result == JV_TEST_DONE ? "Dry run passed - nothing was "
-                   "written" : "Stopped - details in log.txt", 100);
+  const char *msg = "Stopped - details in log.txt";
+  if (result == JV_TEST_DONE)
+    msg = "Dry run passed - nothing was written";
+  else if (result == JV_OK && g_screen_save)
+    msg = "Saved";
+  jv_screen_status(msg, result >= 0 ? 100 : -1);
   uint32_t t0 = jv_time_us();
   while (jv_time_us() - t0 < 2000000)
     ;
@@ -354,11 +428,17 @@ static int run(void) {
   /* Progress screen (step 1: dry runs only) - from here on, so every
    * display step is in trace.bin too. If the frame is unusable it stays
    * off and the run goes on exactly as without it. */
-  if (pargs->debug_mode == JV_TEST_DRYRUN && pargs->disp_fb_paddr) {
+  if (pargs->disp_fb_paddr && pargs->mode == JAMAISVU_MODE_SAVE &&
+      (pargs->debug_mode == JV_TEST_DRYRUN ||
+       pargs->debug_mode == JV_TEST_NONE)) {
+    static char title[] = "Saving slot ?";
     JvDisplayArgs a;
     display_args(&a);
-    if (jv_screen_begin(&a, display_mark, "Dry run - nothing is written") == 0)
-      jv_screen_status("Memory Card ready", 30);
+    g_screen_save = pargs->debug_mode == JV_TEST_NONE;
+    title[sizeof(title) - 2] = (char)('1' + (pargs->slot % 9));
+    if (jv_screen_begin(&a, display_mark, g_screen_save ? title :
+                        "Dry run - nothing is written") == 0)
+      jv_screen_status("Memory Card ready", g_screen_save ? 1 : 30);
   }
 
   fres = f_mount(&fs, "ux0:", 1);

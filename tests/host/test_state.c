@@ -107,6 +107,8 @@ int ms_write_sector(const void *buf, int sector, int count) {
 
 uint64_t ksceKernelGetSystemTimeWide(void) { return 0; }
 void stage_mark(int n) { (void)n; }
+void progress_total(uint32_t total) { (void)total; }
+void progress_at(uint32_t pos) { (void)pos; }
 void kscePervasiveMsifSetClock(int clock) { (void)clock; }
 
 DWORD get_fattime(void) {

@@ -39,6 +39,10 @@ uint32_t jv_time_us(void);
 
 /* records step n (JV_STAGE_*) in the diagnostics trace */
 void stage_mark(int n);
+/* Progress screen: total bytes of the slot file being written, and the
+ * position reached (only draws; see main.c) */
+void progress_total(uint32_t total);
+void progress_at(uint32_t pos);
 
 int get_mediaid_sector(uint32_t *mbr_crc);
 

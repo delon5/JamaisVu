@@ -360,6 +360,7 @@ static int slot_write_sectors(uint32_t fsec, const void *buf, uint32_t n) {
     p += c * SECTOR_SIZE;
     fsec += c;
     n -= c;
+    progress_at(fsec * SECTOR_SIZE); /* progress screen: draws only */
   }
 
   return 0;
@@ -776,6 +777,7 @@ int save_state(FATFS *fs, const char *path) {
     res = JV_ERR_TOO_BIG;
     goto out;
   }
+  progress_total(header.data_offset + (uint32_t)data_size);
 
   res = slot_write(segments, header.segtab_size);
   if (res < 0)

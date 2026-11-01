@@ -417,7 +417,8 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   pargs.soc_timer_10ms = 0;
   pargs.trace_n = 0;
   pargs.fault_type = pargs.fault_addr = pargs.fault_lr = 0;
-  if (debug_mode == JV_TEST_DISPLAY || debug_mode == JV_TEST_DRYRUN) {
+  if (debug_mode == JV_TEST_DISPLAY || debug_mode == JV_TEST_DRYRUN ||
+      (debug_mode == JV_TEST_NONE && mode == JAMAISVU_MODE_SAVE)) {
     uint8_t flags[16];
     memset(flags, 0, sizeof(flags));
     resolve_hw_fns();
@@ -426,7 +427,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
     pargs.disp_hw_info = jv_hw_info();
     pargs.disp_hw_flags0 = flags[0];
   } else {
-    pargs.disp_fb_paddr = 0; /* only the display test draws */
+    pargs.disp_fb_paddr = 0; /* progress screen: not for loads yet */
   }
   pargs.trace_rel_lba = trace_nonce ? trace_rel_lba : 0;
   if (trace_nonce)
