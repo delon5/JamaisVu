@@ -32,8 +32,10 @@ PY
 
 gcc -O2 -Wall -I"$ROOT/plugin/gui" -o "$WORK/preview" \
   "$ROOT/tests/host/preview.c" "$ROOT/plugin/gui/render.c" \
-  "$ROOT/plugin/gui/menu_view.c" "$ROOT/plugin/gui/font_data.c"
-"$WORK/preview" "$WORK/bg.rgba" "$WORK/thumbs.rgba" "$WORK"
+  "$ROOT/plugin/gui/menu_view.c" "$ROOT/plugin/gui/font_data.c" \
+  "$ROOT/plugin/gui/jpfont.c"
+"$WORK/preview" "$WORK/bg.rgba" "$WORK/thumbs.rgba" "$WORK" \
+  ${JPFONT:-"$ROOT/plugin/gui/jpfont.bin"}
 
 python3 - "$WORK" "$OUT" <<'PY'
 import sys, glob, os

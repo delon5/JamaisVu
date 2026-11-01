@@ -4,9 +4,10 @@
  * (plugin/gui) over a 960x544 background and writes raw RGBA frames.
  * tests/host/preview.sh turns them into PNGs.
  *
- * usage: preview bg.rgba thumbs.rgba outdir
+ * usage: preview bg.rgba thumbs.rgba outdir [jpfont.bin]
  *   bg.rgba     960*544*4 bytes
  *   thumbs.rgba JV_NUM_SLOTS * 160*90*4 bytes
+ *   jpfont.bin  Japanese glyphs (tools/gen_jpfont.py): adds frames 18-19
  */
 
 #include <stdio.h>
@@ -20,6 +21,15 @@ static uint32_t fb[JV_SCREEN_W * JV_SCREEN_H];
 static uint32_t panel_px[MENU_W * MENU_H];
 static uint32_t toast_px[TOAST_W * TOAST_H];
 static uint32_t thumbs[JV_NUM_SLOTS][JV_THUMB_W * JV_THUMB_H];
+
+static ExtGlyphs ext;
+
+static int file_read(void *ctx, uint32_t off, void *buf, uint32_t len) {
+  FILE *f = ctx;
+  if (fseek(f, off, SEEK_SET) != 0)
+    return -1;
+  return (int)fread(buf, 1, len, f);
+}
 
 static void compose(const Canvas *c, int x0, int y0) {
   static int xmap[JV_SCREEN_W];
@@ -159,6 +169,33 @@ int main(int argc, char **argv) {
   m.selected = 3;
   frame(argv[3], "11_outdated_slot", &m);
   m.slots[3].outdated = 0;
+
+  /* Japanese game names (glyphs read from jpfont.bin, as on the Vita) */
+  if (argc > 4) {
+    FILE *jf = fopen(argv[4], "rb");
+    static const char *jp[] = {
+      "\xe3\x82\xad\xe3\x83\xa3\xe3\x82\xb5\xe3\x83\xaa\xe3\x83\xb3"
+      "\xe3\x83\xbb\xef\xbc\xa6\xef\xbc\xa2", /* Catherine FB */
+      "\xe8\x8b\xb1\xe9\x9b\x84\xe4\xbc\x9d\xe8\xaa\xac "
+      "\xe7\xa9\xba\xe3\x81\xae\xe8\xbb\x8c\xe8\xb7\xa1 the 3rd Evolution",
+      "\xe9\x9b\xb6\xe3\x81\xae\xe8\xbb\x8c\xe8\xb7\xa1 Evolution",
+    };
+    if (!jf || jpfont_load(file_read, jf, jp, 3, &ext) < 0) {
+      fprintf(stderr, "jpfont.bin not usable\n");
+      return 1;
+    }
+    fclose(jf);
+    m.ext = &ext;
+    strcpy(m.slots[0].title, jp[0]);
+    strcpy(m.slots[0].titleid, "PCSG01179");
+    strcpy(m.slots[1].title, jp[1]);
+    strcpy(m.slots[1].titleid, "PCSG00490");
+    m.selected = 0;
+    frame(argv[3], "18_japanese_name", &m);
+    m.selected = 1;
+    frame(argv[3], "19_japanese_latin_name", &m);
+    m.ext = NULL;
+  }
 
   /* toast after resuming */
   Canvas t = { toast_px, TOAST_W, TOAST_H, 0 };

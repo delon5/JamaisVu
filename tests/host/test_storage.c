@@ -433,6 +433,31 @@ static void test_versions(void) {
   lookup_title("PCSE00123", title, sizeof(title));
   CHECK(!strcmp(title, "Test Game"), "title %s", title);
 
+  /* Japanese names: kept as UTF-8 for the menu (ASCII copy: title ID) */
+  write_sfo("ux0:app/PCSG01179/sce_sys/param.sfo",
+            "\xe3\x82\xad\xe3\x83\xa3\xe3\x82\xb5\xe3\x83\xaa\xe3\x83\xb3"
+            "\xe3\x83\xbb\xef\xbc\xa6\xef\xbc\xa2", "01.03");
+  lookup_title("PCSG01179", title, sizeof(title));
+  CHECK(!strcmp(title, "PCSG01179"), "Latin-only name falls back to ID: %s",
+        title);
+  CHECK(lookup_title_utf8("PCSG01179", title, sizeof(title)) == 0 &&
+        !strcmp(title, "\xe3\x82\xad\xe3\x83\xa3\xe3\x82\xb5\xe3\x83\xaa"
+                "\xe3\x83\xb3\xe3\x83\xbb\xef\xbc\xa6\xef\xbc\xa2"),
+        "UTF-8 name kept");
+  {
+    char small[8]; /* 7 bytes: 2 whole characters fit, the 3rd is cut */
+    CHECK(lookup_title_utf8("PCSG01179", small, sizeof(small)) == 0 &&
+          strlen(small) == 6, "UTF-8 name cut at a character (%d bytes)",
+          (int)strlen(small));
+  }
+  write_sfo("ux0:app/PCSG00490/sce_sys/param.sfo",
+            "\xe8\x8b\xb1\xe9\x9b\x84\nthe 3rd  Evolution ", "01.01");
+  CHECK(lookup_title_utf8("PCSG00490", title, sizeof(title)) == 0 &&
+        !strcmp(title, "\xe8\x8b\xb1\xe9\x9b\x84 the 3rd Evolution"),
+        "line break -> space, spaces collapsed, trimmed: %s", title);
+  CHECK(lookup_title_utf8("PCSE00000", title, sizeof(title)) < 0,
+        "not installed -> no name");
+
   write_sfo("ux0:patch/PCSE00123/sce_sys/param.sfo", "Test Game", "01.02");
   CHECK(lookup_app_ver("PCSE00123", ver, sizeof(ver)) == 0 &&
         !strcmp(ver, "01.02"), "installed update wins: %s", ver);

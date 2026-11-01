@@ -33,7 +33,10 @@ On any firmware without a verified offset table, the plugin installs no filesyst
    ux0:tai/JamaisVu.skprx
    ```
 
-3. Reboot.
+3. Optional, for Japanese game names: copy `jpfont.bin` to `ux0:data/JamaisVu/jpfont.bin`.
+4. Reboot.
+
+**After loading a slot, the JamaisVu that runs is the one that was in memory when the slot was saved** (a snapshot contains the whole system, plugins included). So after updating the plugin, reboot and save new slots to get the new version's fixes in those sessions; loading an older slot brings the older JamaisVu back until the next reboot.
 
 ## Usage
 
@@ -54,6 +57,10 @@ Press **START + UP** to open the slot menu; **START + UP** or **START + DOWN** c
 Preparing slots can be cancelled with the back button; slots already finished are kept.
 
 Each slot shows a thumbnail of the game screen at the moment you saved, the game's name, its title ID, its version and the date.
+
+**Japanese game names** (kana and kanji, e.g. キャサリン・ＦＢ) need `jpfont.bin` (from the release, ~1.7 MB) in `ux0:data/JamaisVu/`. It stays on the Memory Card: when the menu opens, only the characters the five names need are read (at most ~70 KB, and only while the menu is shown). Without the file, such names show only their Latin letters, or the title ID.
+
+![Japanese name](docs/menu-preview/18_japanese_name.png)
 
 **A snapshot only loads into the exact game version it was taken with.** The version (`APP_VER` from the game's `param.sfo`, or from its installed update) is stored with the slot. If the game has been updated (e.g. 01.01 → 01.02) or downgraded since, the slot is marked and cannot be loaded.
 
@@ -150,3 +157,4 @@ The plugin hooks the soft reset (`kscePowerRequestSoftReset`) so that, while eve
 - Lock screen skip uses the SceShell locations found by TheFloW for NoLockScreen ([VitaTweaks](https://github.com/TheOfficialFloW/VitaTweaks)).
 - Thanks to Dark_AleX for pspstates, which inspired the original project.
 - Menu font: [Inter](https://github.com/rsms/inter) (SIL Open Font License, see `plugin/gui/FONT_LICENSE.txt`).
+- Japanese glyphs: [Noto Sans JP](https://fonts.google.com/noto/specimen/Noto+Sans+JP) (SIL Open Font License, see `plugin/gui/FONT_LICENSE_JP.txt`), rasterised by `tools/gen_jpfont.py`.

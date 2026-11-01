@@ -115,6 +115,10 @@ int64_t slot_free_space(void);
 /* Game name from param.sfo (ASCII only; falls back to the title ID). */
 void lookup_title(const char *titleid, char *out, int len);
 
+/* The game's name as written in its param.sfo (UTF-8, e.g. Japanese),
+ * cleaned of control characters. Returns -1 if not installed/readable. */
+int lookup_title_utf8(const char *titleid, char *out, int len);
+
 /* Installed game version (param.sfo APP_VER of the update if one is
  * installed, else of the game). 0 on success, < 0 if it cannot be read. */
 int lookup_app_ver(const char *titleid, char *out, int len);

@@ -38,6 +38,7 @@ add_executable(JamaisVu
   plugin/gui/render.c
   plugin/gui/menu_view.c
   plugin/gui/font_data.c
+  plugin/gui/jpfont.c
   payload/crc32.c
   plugin/resume.S
   ${JamaisVu_payload_object}

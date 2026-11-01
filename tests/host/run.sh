@@ -101,8 +101,8 @@ echo
 gcc -O2 -Wall -Wextra -fsanitize=address,undefined -I"$ROOT/plugin/gui" \
   -o "$WORK/test_render" "$ROOT/tests/host/test_render.c" \
   "$ROOT/plugin/gui/render.c" "$ROOT/plugin/gui/menu_view.c" \
-  "$ROOT/plugin/gui/font_data.c"
-"$WORK/test_render" || rc=1
+  "$ROOT/plugin/gui/font_data.c" "$ROOT/plugin/gui/jpfont.c"
+"$WORK/test_render" "$ROOT/plugin/gui/jpfont.bin" || rc=1
 echo
 
 for flavour in release testing; do

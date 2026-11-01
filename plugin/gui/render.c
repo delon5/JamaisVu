@@ -265,6 +265,103 @@ void cv_text_centered(Canvas *c, const Font *f, int cx, int y, const char *s,
   cv_text(c, f, cx - cv_text_width(f, buf) / 2, y, buf, color);
 }
 
+/* --- UTF-8 text (game names) ------------------------------------------ */
+
+static const FontGlyph *glyph_utf8(const Font *f, const ExtGlyphs *ext,
+                                   uint32_t cp, const uint8_t **bitmap) {
+  if (cp < 0x80) {
+    if (cp < (uint32_t)f->first || cp > (uint32_t)f->last)
+      return NULL;
+    *bitmap = f->bitmap;
+    return &f->glyphs[cp - f->first];
+  }
+  const FontGlyph *g = ext_glyph(ext, cp);
+  if (g)
+    *bitmap = ext->bitmap;
+  return g;
+}
+
+static void draw_glyph(Canvas *c, const FontGlyph *g, const uint8_t *bitmap,
+                       int pen, int y, uint32_t color) {
+  const uint8_t *bm = bitmap + g->offset;
+  int gy = y + g->y_off, j0 = 0, j1 = g->h;
+  if (j0 < c->y0 - gy)
+    j0 = c->y0 - gy;
+  if (j1 > c->y0 + c->h - gy)
+    j1 = c->y0 + c->h - gy;
+  for (int j = j0; j < j1; j++)
+    for (int i = 0; i < g->w; i++) {
+      uint32_t cov = bm[j * g->w + i];
+      if (cov)
+        put(c, pen + g->x_off + i, gy + j, color, cov);
+    }
+}
+
+int cv_text_width_utf8(const Font *f, const ExtGlyphs *ext, const char *s) {
+  const uint8_t *bm;
+  uint32_t cp;
+  int w = 0;
+  while ((cp = utf8_next(&s)) != 0) {
+    const FontGlyph *g = glyph_utf8(f, ext, cp, &bm);
+    if (g)
+      w += g->advance;
+  }
+  return w;
+}
+
+int cv_text_utf8(Canvas *c, const Font *f, const ExtGlyphs *ext, int x, int y,
+                 const char *s, uint32_t color) {
+  const uint8_t *bm;
+  uint32_t cp;
+  int pen = x;
+  while ((cp = utf8_next(&s)) != 0) {
+    const FontGlyph *g = glyph_utf8(f, ext, cp, &bm);
+    if (!g)
+      continue;
+    draw_glyph(c, g, bm, pen, y, color);
+    pen += g->advance;
+  }
+  return pen - x;
+}
+
+void cv_text_centered_utf8(Canvas *c, const Font *f, const ExtGlyphs *ext,
+                           int cx, int y, const char *s, uint32_t color,
+                           int max_w) {
+  char buf[160];
+  int n = 0;
+
+  while (s[n] && n < (int)sizeof(buf) - 4) {
+    buf[n] = s[n];
+    n++;
+  }
+  /* cut short: never in the middle of a character */
+  while (n > 0 && ((unsigned char)s[n] & 0xc0) == 0x80)
+    n--;
+  buf[n] = '\0';
+
+  if (cv_text_width_utf8(f, ext, buf) > max_w) {
+    int dots = cv_text_width(f, "...");
+    while (n > 0) {
+      /* drop one whole character */
+      do
+        n--;
+      while (n > 0 && ((unsigned char)buf[n] & 0xc0) == 0x80);
+      buf[n] = '\0';
+      if (cv_text_width_utf8(f, ext, buf) + dots <= max_w)
+        break;
+    }
+    while (n > 0 && buf[n - 1] == ' ')
+      buf[--n] = '\0';
+    buf[n] = '.';
+    buf[n + 1] = '.';
+    buf[n + 2] = '.';
+    buf[n + 3] = '\0';
+  }
+
+  cv_text_utf8(c, f, ext, cx - cv_text_width_utf8(f, ext, buf) / 2, y, buf,
+               color);
+}
+
 /* --- PlayStation button icons ------------------------------------------ */
 /* Each shape is evaluated with 4x4 supersampling in 1/8 pixel units. */
 

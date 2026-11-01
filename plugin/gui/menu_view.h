@@ -36,7 +36,7 @@ typedef struct {
   int locked;             /* not enough free space to create this slot */
   int prepared;           /* slot file exists: saving starts right away */
   char titleid[16];
-  char title[128];
+  char title[128];         /* UTF-8 */
   char date[32];          /* preformatted, e.g. "2026-10-31  21:40" */
   char app_ver[8];        /* game version of the snapshot, e.g. "01.02" */
   char installed_ver[8];  /* game version installed now ("" = unknown) */
@@ -69,6 +69,7 @@ typedef struct {
   int can_save;       /* 0 in the LiveArea: no game on screen to save */
   int prepare_count;  /* slots that could be prepared now */
   int prepare_all;    /* CONFIRM_PREPARE: all of them, not just the selected */
+  const ExtGlyphs *ext; /* glyphs for non-ASCII game names, or NULL */
   int savedata_rolls_back; /* 0 when slots are on uma0: ux0 savedata is
                               not part of the snapshot */
 } MenuModel;

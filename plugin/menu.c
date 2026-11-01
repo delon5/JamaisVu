@@ -72,6 +72,14 @@ static volatile uint32_t g_panel_seq = 1, g_panel_gen;
 static uint32_t *g_thumbs[JV_NUM_SLOTS + 1];
 static void model_clear_thumbs(void);
 
+/* Glyphs for Japanese (non-ASCII) game names, read from jpfont.bin on
+ * the Memory Card when the slot list is read; part of the overlay memory.
+ * Drawing counts itself in g_ext_users, so the set is only changed while
+ * nothing draws with it. */
+static ExtGlyphs *g_ext;
+static uint32_t g_ext_gen;
+static volatile int g_ext_users;
+
 /* Menu model: written by the input and worker threads under g_mtx,
  * read lock-free by the display hook (seqlock: odd = being written). */
 static MenuModel g_model;
@@ -224,6 +232,7 @@ static void model_end(void) {
 
 static void model_clear_thumbs(void) {
   model_begin();
+  g_model.ext = NULL;
   for (int i = 0; i < JV_NUM_SLOTS; i++)
     g_model.slots[i].thumb = NULL;
   model_end();
@@ -249,7 +258,7 @@ static int overlay_acquire(void) {
   if (!g_overlay_ready) {
     uint32_t size = MENU_W * MENU_H * 4 + TOAST_W * TOAST_H * 4 +
                     (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_SCREEN_W * 4 +
-                    MENU_W * BAND_ROWS * 4;
+                    MENU_W * BAND_ROWS * 4 + ((sizeof(ExtGlyphs) + 3) & ~3u);
     size = (size + 0xfff) & ~0xfff;
     g_mem_blk = ksceKernelAllocMemBlock("JamaisVuMenu",
                                         SCE_KERNEL_MEMBLOCK_TYPE_KERNEL_RW,
@@ -263,7 +272,10 @@ static int overlay_acquire(void) {
         p += THUMB_PX;
       }
       g_rowbuf = p;    p += JV_SCREEN_W;
-      g_band_px = p;
+      g_band_px = p;   p += MENU_W * BAND_ROWS;
+      g_ext = (ExtGlyphs *)p;
+      g_ext->n = 0;
+      g_ext->used = 0;
       g_overlay_gen++;
       __sync_synchronize();
       g_overlay_ready = 1;
@@ -293,6 +305,7 @@ static void overlay_release(void) {
       ksceKernelFreeMemBlock(g_mem_blk);
       g_mem_blk = -1;
       g_panel_px = g_toast_px = g_rowbuf = g_band_px = NULL;
+      g_ext = NULL;
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = NULL;
     } else {
@@ -459,11 +472,14 @@ static void render_panel(void) {
     }
     if (s1 == g_panel_seq && gen == g_panel_gen)
       break; /* up to date */
+    __sync_fetch_and_add(&g_ext_users, 1);
     __sync_synchronize();
     memcpy(&local, &g_model, sizeof(local));
     __sync_synchronize();
-    if (g_model_seq != s1)
+    if (g_model_seq != s1) {
+      __sync_fetch_and_sub(&g_ext_users, 1);
       continue;
+    }
 
     uint32_t t0 = prof_now();
     int stopped = 0;
@@ -480,6 +496,7 @@ static void render_panel(void) {
       memcpy(&g_panel_blend[y0], blend, rows);
       __sync_synchronize();
     }
+    __sync_fetch_and_sub(&g_ext_users, 1);
     if (stopped)
       break;
     prof_add(PROF_RENDER, t0);
@@ -527,6 +544,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
   } else if (g_menu_open) { /* no render thread: draw here */
     uint32_t s1 = g_model_seq;
     if (!(s1 & 1) && s1 != rendered_seq) {
+      __sync_fetch_and_add(&g_ext_users, 1);
       __sync_synchronize();
       memcpy(&local, &g_model, sizeof(local));
       __sync_synchronize();
@@ -540,6 +558,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
          * model changed meanwhile, the next frame renders again */
         rendered_seq = s1;
       }
+      __sync_fetch_and_sub(&g_ext_users, 1);
     }
     if (!(rendered_seq & 1)) {
       uint32_t t0 = prof_now();
@@ -985,6 +1004,88 @@ static void prepare_done(void) {
   model_end();
 }
 
+static int jf_read(void *ctx, uint32_t off, void *buf, uint32_t len) {
+  SceUID fd = *(SceUID *)ctx;
+  if (ksceIoLseek(fd, off, SCE_SEEK_SET) != (SceOff)off)
+    return -1;
+  return ksceIoRead(fd, buf, len);
+}
+
+/* characters of s that can be drawn: ASCII letters/digits, or in ext */
+static int drawable_chars(const char *s, const ExtGlyphs *ext) {
+  int n = 0;
+  uint32_t cp;
+  while ((cp = utf8_next(&s)) != 0) {
+    if (cp < 0x80)
+      n += (cp | 0x20) - 'a' < 26u || cp - '0' < 10u;
+    else
+      n += ext_glyph(ext, cp) != NULL;
+  }
+  return n;
+}
+
+/* Game names as the games write them (Japanese included): for installed
+ * games with a non-ASCII name, the glyphs are read from jpfont.bin and the
+ * slot shows that name. Without the file the slot keeps the stored name
+ * (letters only, or the title ID), as before. Worker thread (file I/O). */
+static const ExtGlyphs *load_name_glyphs(MenuSlot *fresh) {
+  static char names[JV_NUM_SLOTS][sizeof(fresh[0].title)];
+  static char path[96];
+  static int warned;
+  const char *strs[JV_NUM_SLOTS];
+  int has[JV_NUM_SLOTS], n = 0;
+
+  if (!g_ext)
+    return NULL;
+  for (int i = 0; i < JV_NUM_SLOTS; i++) {
+    has[i] = 0;
+    if (!fresh[i].used ||
+        lookup_title_utf8(fresh[i].titleid, names[i], sizeof(names[i])) < 0)
+      continue;
+    for (const char *c = names[i]; *c; c++)
+      if ((uint8_t)*c >= 0x80)
+        has[i] = 1;
+    if (has[i])
+      strs[n++] = names[i];
+  }
+  if (n == 0)
+    return NULL;
+
+  /* nothing may draw with the set while it changes */
+  model_begin();
+  g_model.ext = NULL;
+  model_end();
+  for (int i = 0; i < 500 && g_ext_users; i++)
+    ksceKernelDelayThread(1000);
+  if (g_ext_users)
+    return NULL; /* try again with the next refresh */
+  if (g_ext_gen != g_overlay_gen || g_ext->n > EXT_MAX_GLYPHS - 64) {
+    g_ext->n = 0;
+    g_ext->used = 0;
+    g_ext_gen = g_overlay_gen;
+  }
+
+  jv_file_path(path, sizeof(path), "jpfont.bin");
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  int r = -1;
+  if (fd >= 0) {
+    r = jpfont_load(jf_read, &fd, strs, n, g_ext);
+    ksceIoClose(fd);
+  }
+  if (r < 0) {
+    if (!warned) {
+      warned = 1;
+      log_queue("Japanese game names: data/JamaisVu/jpfont.bin missing or "
+                "unreadable - names shown without those characters\r\n");
+    }
+    return NULL;
+  }
+  for (int i = 0; i < JV_NUM_SLOTS; i++)
+    if (has[i] && drawable_chars(names[i], g_ext) >= 2)
+      memcpy(fresh[i].title, names[i], sizeof(fresh[i].title));
+  return g_ext;
+}
+
 static void refresh_slots(void) {
   static SlotInfo info;
   int exists[JV_NUM_SLOTS], locked[JV_NUM_SLOTS];
@@ -1047,9 +1148,12 @@ static void refresh_slots(void) {
     }
   }
 
+  const ExtGlyphs *ext = load_name_glyphs(fresh);
+
   /* then one short update under the lock */
   model_begin();
   memcpy(g_model.slots, fresh, sizeof(fresh));
+  g_model.ext = ext;
   g_model.refreshing = 0;
   model_end();
 }

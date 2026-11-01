@@ -69,6 +69,8 @@ jobs:
           mkdir -p out
           cp build/JamaisVu.skprx out/
           cp tools/jvdump/build/jvdump.skprx out/
+          # Japanese game names (copy to ux0:data/JamaisVu/)
+          cp plugin/gui/jpfont.bin out/
           # payload ELF with symbols: maps a crash address from log.txt
           cp build/payload/JamaisVu_payload out/JamaisVu_payload.elf
           sha256sum out/*.skprx | tee out/SHA256SUMS.txt

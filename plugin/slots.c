@@ -522,6 +522,44 @@ void lookup_title(const char *titleid, char *out, int len) {
   out[len - 1] = '\0';
 }
 
+int lookup_title_utf8(const char *titleid, char *out, int len) {
+  static char path[96];
+  uint32_t vlen;
+
+  for (size_t i = 0; i < sizeof(k_sfo_roots) / sizeof(k_sfo_roots[0]); i++) {
+    snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", k_sfo_roots[i],
+             titleid);
+    int n = sfo_read(path, g_sfo_buf, sizeof(g_sfo_buf));
+    const uint8_t *p = sfo_find(g_sfo_buf, n, "TITLE", &vlen);
+    if (!p)
+      continue;
+    /* control characters (line breaks) become spaces, runs of spaces
+     * one; the end is cut at a character, never inside one */
+    int o = 0;
+    uint32_t k = 0;
+    for (; k < vlen && p[k] && o < len - 1; k++) {
+      char ch = (char)p[k];
+      if ((uint8_t)ch < 0x20)
+        ch = ' ';
+      if (ch == ' ' && (o == 0 || out[o - 1] == ' '))
+        continue;
+      out[o++] = ch;
+    }
+    /* cut short inside a character: drop its first bytes too (bytes
+     * >= 0x80 are copied one to one, so out[o] mirrors p[k]) */
+    while (o > 0 && k < vlen && (p[k] & 0xc0) == 0x80) {
+      o--;
+      k--;
+    }
+    while (o > 0 && out[o - 1] == ' ')
+      o--;
+    out[o] = '\0';
+    if (o > 0)
+      return 0;
+  }
+  return -1;
+}
+
 int lookup_app_ver(const char *titleid, char *out, int len) {
   uint8_t *buf = g_sfo_buf;
   static char path[96];

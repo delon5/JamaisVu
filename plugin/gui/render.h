@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 #include "font.h"
+#include "jpfont.h"
 
 /* Pixels are 0xAABBGGRR, i.e. the byte order R,G,B,A of the Vita's
  * SCE_DISPLAY_PIXELFORMAT_A8B8G8R8 framebuffers. Straight (non
@@ -52,6 +53,16 @@ int cv_text(Canvas *c, const Font *f, int x, int y, const char *s,
 int cv_text_width(const Font *f, const char *s);
 void cv_text_centered(Canvas *c, const Font *f, int cx, int y, const char *s,
                       uint32_t color, int max_w);
+/* UTF-8 text: ASCII from f, other characters from ext (may be NULL);
+ * characters in neither are left out. Centred text that is too wide is
+ * cut at a character and ends in "...". */
+int cv_text_utf8(Canvas *c, const Font *f, const ExtGlyphs *ext, int x, int y,
+                 const char *s, uint32_t color);
+int cv_text_width_utf8(const Font *f, const ExtGlyphs *ext, const char *s);
+void cv_text_centered_utf8(Canvas *c, const Font *f, const ExtGlyphs *ext,
+                           int cx, int y, const char *s, uint32_t color,
+                           int max_w);
+
 void cv_icon(Canvas *c, IconType type, int cx, int cy, int size,
              uint32_t color);
 
