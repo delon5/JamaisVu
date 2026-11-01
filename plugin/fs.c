@@ -76,8 +76,32 @@ static void invalidate_file_caches(void) {
 /* Returns < 0 if the file no longer exists, FNODE_UNUSED for empty slots */
 #define FNODE_UNUSED 1
 
-static int update_fnode(void *fnode) {
+/* Which fnodes update_vnodes() has already looked up again: update_fnodes()
+ * skips them instead of repeating the same lookup on the card (3.60 log,
+ * build 3ddc43d: 1024 vnodes 2091 ms, then 559 fnodes 1906 ms, while the
+ * game waits for the wake-up to finish). Indices beyond the bitmap are
+ * simply looked up twice, as before. */
+#define FNODE_DONE_MAX 4096
+static uint32_t g_fnode_done[FNODE_DONE_MAX / 32];
+
+static int fnode_index(const void *fnode) {
+  uintptr_t base = (uintptr_t)g_shared_resource + g_off->sr_fnodes;
+  uintptr_t p = (uintptr_t)fnode;
+  if (p < base || (p - base) % g_off->fnode_size)
+    return -1;
+  uint32_t i = (p - base) / g_off->fnode_size;
+  int num = *(int *)(g_shared_resource + g_off->sr_num_fnodes);
+  if (num < 0 || i >= (uint32_t)num || i >= FNODE_DONE_MAX)
+    return -1;
+  return (int)i;
+}
+
+/* *looked_up = 1 once the file was searched on the card again and its
+ * cluster caches were reset (not if the drive lock failed). */
+static int update_fnode(void *fnode, int *looked_up) {
   int res;
+
+  *looked_up = 0;
 
   void *fileSystem = *(uintptr_t **)(fnode + 0x20c);
   if (!fileSystem)
@@ -108,18 +132,26 @@ static int update_fnode(void *fnode) {
   *(uint32_t *)(fnode + 0x28c) = 0;
 
   ksceKernelUnlockFastMutex(drive + 0x1e0);
+  *looked_up = 1;
 
   return res;
 }
 
-/* returns how many fnodes were in use (looked up again on the card) */
-static uint32_t update_fnodes(void) {
+/* returns how many fnodes were looked up again on the card; *skipped:
+ * how many update_vnodes() had already done */
+static uint32_t update_fnodes(uint32_t *skipped) {
   uint32_t used = 0;
+  int looked_up;
   int num = *(int *)(g_shared_resource + g_off->sr_num_fnodes);
+  *skipped = 0;
   for (int i = 0; i < num; i++) {
+    if (i < FNODE_DONE_MAX && (g_fnode_done[i / 32] & (1u << (i % 32)))) {
+      (*skipped)++;
+      continue;
+    }
     void *fnode = (void *)(g_shared_resource + g_off->sr_fnodes +
                            i * g_off->fnode_size);
-    if (update_fnode(fnode) != FNODE_UNUSED)
+    if (update_fnode(fnode, &looked_up) != FNODE_UNUSED)
       used++;
   }
   return used;
@@ -138,7 +170,11 @@ static int update_vnodes(void) {
     void *fnode = *(uintptr_t **)(vp + 0x60);
 
     if (fnode && fnode == nodeData) {
-      int res = update_fnode(fnode);
+      int looked_up;
+      int res = update_fnode(fnode, &looked_up);
+      int idx = fnode_index(fnode);
+      if (looked_up && idx >= 0)
+        g_fnode_done[idx / 32] |= 1u << (idx % 32);
       if (res < 0) {
         if (refCount == 0) {
           void *nc = *(uintptr_t **)(vp + 0x70);
@@ -239,6 +275,7 @@ int update_filesystem(void) {
   int64_t t = ksceKernelGetSystemTimeWide();
   memset(tm, 0, sizeof(*tm));
   tm->vnodes = (uint32_t)*g_num_vnodes;
+  memset(g_fnode_done, 0, sizeof(g_fnode_done));
   invalidate_buff_caches();
   tm->ms[0] = fs_ms_since(&t);
   invalidate_file_caches();
@@ -252,7 +289,7 @@ int update_filesystem(void) {
   tm->ms[2] = fs_ms_since(&t);
   int stale_open = update_vnodes();
   tm->ms[3] = fs_ms_since(&t);
-  tm->fnodes = update_fnodes();
+  tm->fnodes = update_fnodes(&tm->fnodes_skipped);
   tm->ms[4] = fs_ms_since(&t);
   return stale_open;
 }

@@ -1710,12 +1710,12 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
       snprintf(tl, sizeof(tl), "    timing ux0 re-read after the load: "
                "%d -> %d ms after the wake-up; buffer caches %u ms, file "
                "caches %u ms, remount %u ms, open files %u ms (%u vnodes), "
-               "file entries %u ms (%u in use)\r\n",
+               "file entries %u ms (%u looked up, %u already done)\r\n",
                (int)((g_t_resumed - g_t_resume) / 1000),
                (int)((g_t_fs_done - g_t_resume) / 1000),
                (unsigned)f->ms[0], (unsigned)f->ms[1], (unsigned)f->ms[2],
                (unsigned)f->ms[3], (unsigned)f->vnodes, (unsigned)f->ms[4],
-               (unsigned)f->fnodes);
+               (unsigned)f->fnodes, (unsigned)f->fnodes_skipped);
       log_append(tl);
     }
   }

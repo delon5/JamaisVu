@@ -58,7 +58,7 @@ int update_filesystem(void);
  * vnodes/fnodes it went through. */
 typedef struct {
   uint32_t ms[5];
-  uint32_t vnodes, fnodes;
+  uint32_t vnodes, fnodes, fnodes_skipped;
 } FsUpdateTiming;
 extern FsUpdateTiming g_fs_update_timing;
 
