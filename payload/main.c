@@ -299,11 +299,27 @@ static char *put_u(char *p, uint32_t v) {
   return p;
 }
 
+/* At most one progress update per second: the screen is drawn with the
+ * menu's renderer, uncached (MMU off), and updating every MB made saves
+ * ~10 s and loads ~13 s slower on hardware (log.txt, build bcac666). */
+static int progress_due(void) {
+  static uint32_t last;
+  static int started;
+  uint32_t now = jv_time_us();
+  if (started && now - last < 1000000)
+    return 0;
+  started = 1;
+  last = now;
+  return 1;
+}
+
 void progress_at(uint32_t pos) {
   if (!jv_screen_is_on() || g_prog_total == 0)
     return;
   if (pos > g_prog_total)
     pos = g_prog_total;
+  if (pos < g_prog_total && !progress_due())
+    return;
   int pct = 5 + (int)((uint64_t)pos * 94 / g_prog_total);
   uint32_t mb = pos >> 20;
   if (pct == g_prog_shown_pct && mb == g_prog_shown_mb)
@@ -372,7 +388,7 @@ void progress_load_at(uint32_t paddr_end, uint32_t done) {
     shown_mb = 0xffffffff;
   }
   uint32_t mb = done >> 20;
-  if (mb == shown_mb)
+  if (mb == shown_mb || (done < g_load_total && !progress_due()))
     return;
   shown_mb = mb;
   static char line[64];
