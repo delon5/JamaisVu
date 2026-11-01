@@ -140,7 +140,13 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 		return -1;
 
 	g_fb = (volatile uint32_t *)(uintptr_t)a->fb_paddr;
-	g_pitch = a->pitch;
+	/* The display controller reads rows exactly as wide as the picture
+	 * (libbaremetal's iftu.c: "TODO: Properly use pitch instead of
+	 * width"), but games may use a wider pitch (1001 Spikes: 1024 -
+	 * diagonal stripes on hardware). This screen covers the whole frame
+	 * anyway, so lay it out with rows of 960; the frame is big enough
+	 * (pitch >= width). */
+	g_pitch = a->width;
 	g_w = a->width;
 	g_h = a->height;
 	g_disp_hw_info = a->hw_info;
