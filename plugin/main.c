@@ -31,6 +31,9 @@
 #include "storage.h"
 
 #define JV_VERSION "2.0-dev"
+#ifndef JV_BUILD_ID
+#define JV_BUILD_ID "unknown"
+#endif
 
 extern int resume_function(void);
 
@@ -409,7 +412,7 @@ int module_start(SceSize args, void *argp) {
            "JamaisVu " JV_VERSION "\n"
            "status: %s\n"
            "firmware table: %s (verification level %d of 2)\n"
-           "build: %s\n"
+           "build: %s, " JV_BUILD_ID "\n"
            "SceIofilemgr NID: 0x%08X\n"
            "SceExfatfs NID:   0x%08X\n"
            "SceRtc NID:       0x%08X\n"

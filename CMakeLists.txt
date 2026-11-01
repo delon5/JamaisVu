@@ -49,6 +49,19 @@ endif()
 # Set -DJAMAISVU_TESTING=ON to also arm on firmware whose offsets were
 # checked against a module dump but not yet tested on hardware (3.60).
 option(JAMAISVU_TESTING "Arm on dump-verified firmware (testing build)" OFF)
+
+# Short commit id, shown in status.txt so a report names the exact build
+execute_process(COMMAND git rev-parse --short=7 HEAD
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                OUTPUT_VARIABLE JV_BUILD_ID
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT JV_BUILD_ID AND DEFINED ENV{GITHUB_SHA})
+  string(SUBSTRING "$ENV{GITHUB_SHA}" 0 7 JV_BUILD_ID)
+endif()
+if(NOT JV_BUILD_ID)
+  set(JV_BUILD_ID "unknown")
+endif()
+target_compile_definitions(JamaisVu PRIVATE JV_BUILD_ID="${JV_BUILD_ID}")
 if(JAMAISVU_TESTING)
   target_compile_definitions(JamaisVu PRIVATE JAMAISVU_TESTING)
 endif()
