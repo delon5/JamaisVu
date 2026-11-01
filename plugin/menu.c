@@ -435,8 +435,9 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
         menu_view_render(&c, &local);
         scan_blend_rows(&c, g_panel_blend);
         prof_add(PROF_RENDER, t0);
-        /* thumbnails may have changed while rendering: redo next frame */
-        rendered_seq = (g_model_seq == s1) ? s1 : 1;
+        /* the render is complete (of the model at s1): show it now; if the
+         * model changed meanwhile, the next frame renders again */
+        rendered_seq = s1;
       }
     }
     if (!(rendered_seq & 1)) {
@@ -458,24 +459,20 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
   }
 }
 
-/* Which frames get the overlay (as PSV-Shell-Plus does it): only the
- * primary display; a game's frames on layer 0; the LiveArea (SceShell)
- * on its layer 1, and not while a game is drawing (the shell's layer
- * would keep a stale copy over the game). Drawing on the LiveArea's
- * layer 0 made the menu flicker, hidden by layer 1. */
-static volatile int64_t g_game_frame_us;
+/* Which frames get the overlay, decided by what is in the foreground (as
+ * reVita does), not by which process submitted the frame: only the
+ * primary display; with a game running (an exclusive process) its layer
+ * 0, otherwise (LiveArea) the shell's layer 1. Deciding by the caller
+ * made the menu flicker in the LiveArea: some layer-0 frames there do not
+ * come from SceShell's process. */
+int ksceAppMgrIsExclusiveProcessRunning(void);
 
 static int overlay_target(int head, int index) {
   if (head != ksceDisplayGetPrimaryHead())
     return 0;
-  int64_t now = now_us();
-  if (ksceKernelGetProcessId() != ksceKernelSysrootGetShellPid()) {
-    if (index != 0)
-      return 0;
-    g_game_frame_us = now;
-    return 1;
-  }
-  return index == 1 && now - g_game_frame_us > 500000;
+  if (ksceAppMgrIsExclusiveProcessRunning())
+    return index == 0;
+  return index == 1;
 }
 
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
