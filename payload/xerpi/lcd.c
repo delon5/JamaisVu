@@ -156,8 +156,7 @@ static void lcd_spi_write_cmd(const struct lcd_spi_cmd *cmd)
 
 	pervasive_clock_enable_spi(2);
 
-	while (spi_regs[0xA])
-		spi_regs[0];
+	JV_WAIT_WHILE(spi_regs[0xA] && (spi_regs[0], 1)); /* JamaisVu: bounded, drains */
 
 	spi_regs[2] = 0x30001;
 	spi_regs[4] = 1;
@@ -166,8 +165,7 @@ static void lcd_spi_write_cmd(const struct lcd_spi_cmd *cmd)
 	tmpbuff_size += 9;
 
 	while (tmpbuff_size > 15) {
-		while (spi_regs[0xB] == 0x7F)
-			;
+		JV_WAIT_WHILE(spi_regs[0xB] == 0x7F); /* JamaisVu: bounded */
 
 		spi_regs[1] = tmpbuff;
 
@@ -182,8 +180,7 @@ static void lcd_spi_write_cmd(const struct lcd_spi_cmd *cmd)
 		tmpbuff_size += 9;
 
 		while (tmpbuff_size > 15) {
-			while (spi_regs[0xB] == 0x7F)
-				;
+			JV_WAIT_WHILE(spi_regs[0xB] == 0x7F); /* JamaisVu: bounded */
 
 			spi_regs[1] = tmpbuff;
 
@@ -197,8 +194,7 @@ static void lcd_spi_write_cmd(const struct lcd_spi_cmd *cmd)
 		tmpbuff_size += 9;
 
 		while (tmpbuff_size > 15) {
-			while (spi_regs[0xB] == 0x7F)
-				;
+			JV_WAIT_WHILE(spi_regs[0xB] == 0x7F); /* JamaisVu: bounded */
 
 			spi_regs[1] = tmpbuff;
 
@@ -209,13 +205,11 @@ static void lcd_spi_write_cmd(const struct lcd_spi_cmd *cmd)
 
 	spi_regs[4] = 1;
 
-	while (spi_regs[0xB])
-		;
+	JV_WAIT_WHILE(spi_regs[0xB]); /* JamaisVu: bounded */
 
 	spi_regs[4] = 0;
 
-	while (spi_regs[4] & 1)
-		;
+	JV_WAIT_WHILE(spi_regs[4] & 1); /* JamaisVu: bounded */
 	dsb();
 
 	pervasive_clock_disable_spi(2);
@@ -231,8 +225,7 @@ static void lcd_spi_read(uint8_t *buffer, uint32_t size, int header_bits)
 	pervasive_clock_enable_spi(2);
 
 	while (readcnt < size) {
-		while (spi_regs[0xA] == 0)
-			;
+		JV_WAIT_WHILE(spi_regs[0xA] == 0); /* JamaisVu: bounded */
 
 		tmp = tmp | (spi_regs[0] << tmp_bits);
 		tmp_bits = tmp_bits + 16;

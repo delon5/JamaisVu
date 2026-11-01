@@ -8,8 +8,7 @@
 
 static inline void i2c_wait_busy(volatile uint32_t *i2c_regs)
 {
-	while (i2c_regs[7])
-		;
+	JV_WAIT_WHILE(i2c_regs[7]); /* JamaisVu: bounded */
 }
 
 void i2c_init_bus(int bus)

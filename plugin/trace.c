@@ -55,7 +55,9 @@ const char *jv_stage_name(uint32_t stage) {
     case JV_STAGE_DISP_LCD:   return "display-lcd-on";
     case JV_STAGE_DISP_PLANE: return "display-showing";
     case JV_STAGE_DISP_SHOWN: return "display-6s-done";
-    case JV_STAGE_DISP_OFF:   return "display-off";
+    case JV_STAGE_DISP_LCD_OFF:   return "display-lcd-off";
+    case JV_STAGE_DISP_PLANE_OFF: return "display-plane-off";
+    case JV_STAGE_DISP_OFF:   return "display-link-off";
     default:                  return "none";
   }
 }

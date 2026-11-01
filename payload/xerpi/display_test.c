@@ -190,13 +190,21 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 	fill(BAR_X, BAR_Y, BAR_W, BAR_H, RGB(34, 178, 226));
 	mark(JV_DISP_STEP_SHOWN);
 
-	/* back to how it was: panel and backlight off, link stopped */
+	/* back to how it was: panel and backlight off, link stopped - each
+	 * step recorded on its own (on hardware the screen stayed on and the
+	 * system hung after the picture had been shown) */
 	lcd_off();
+	mark(JV_DISP_STEP_LCD_OFF);
 	iftu_plane_config_set_enabled(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0, false);
 	iftu_plane_config_set_enabled(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1, false);
+	mark(JV_DISP_STEP_PLANE_OFF);
 	dsi_stop_master(DSI_BUS_OLED_LCD);
 	pervasive_reset_enter_dsi(0, 7);
 	pervasive_clock_disable_dsi(0, 0xF);
 	mark(JV_DISP_STEP_OFF);
 	return 0;
+}
+
+uint32_t jv_display_wait_timeouts(void) {
+	return g_jv_wait_timeouts;
 }

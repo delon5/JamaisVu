@@ -87,6 +87,20 @@ static inline uint32_t smc(uint32_t cmd, uint32_t arg1,
 }
 
 void delay(uint32_t n);
+
+/* JamaisVu: every busy-wait on the hardware gives up after JV_WAIT_MAX
+ * polls (a fraction of a second) and is counted, so a device that never
+ * answers cannot hang the payload with the screen on (seen on hardware). */
+#define JV_WAIT_MAX 2000000u
+extern volatile uint32_t g_jv_wait_timeouts;
+#define JV_WAIT_WHILE(cond)                                   \
+	do {                                                  \
+		uint32_t jv_n_ = 0;                           \
+		while ((cond) && ++jv_n_ < JV_WAIT_MAX)       \
+			;                                     \
+		if (jv_n_ >= JV_WAIT_MAX)                     \
+			g_jv_wait_timeouts++;                 \
+	} while (0)
 uint32_t get_cpu_id(void);
 
 #endif

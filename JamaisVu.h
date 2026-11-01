@@ -161,7 +161,9 @@ enum JamaisVuModes {
 #define JV_STAGE_DISP_LCD     17
 #define JV_STAGE_DISP_PLANE   18
 #define JV_STAGE_DISP_SHOWN   19
-#define JV_STAGE_DISP_OFF     20
+#define JV_STAGE_DISP_LCD_OFF 20
+#define JV_STAGE_DISP_PLANE_OFF 21
+#define JV_STAGE_DISP_OFF     22
 
 /* Payload result codes (PayloadArguments.result) */
 #define JV_TEST_DONE            1 /* a diagnostics run finished */

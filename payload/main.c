@@ -271,7 +271,10 @@ static int display_test(void) {
   a.height = pargs->disp_fb_height;
   a.hw_info = pargs->disp_hw_info;
   a.hw_flags0 = pargs->disp_hw_flags0;
-  if (jv_display_test(&a, display_mark, jv_time_us) < 0)
+  int r = jv_display_test(&a, display_mark, jv_time_us);
+  /* detail: hardware waits that timed out (0 = every device answered) */
+  pargs->detail = (int32_t)jv_display_wait_timeouts();
+  if (r < 0)
     return JV_ERR_ARGS;
   return JV_TEST_DONE;
 }

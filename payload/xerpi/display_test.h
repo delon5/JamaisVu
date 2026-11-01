@@ -23,6 +23,11 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 #define JV_DISP_STEP_LCD   3
 #define JV_DISP_STEP_PLANE 4
 #define JV_DISP_STEP_SHOWN 5
-#define JV_DISP_STEP_OFF   6
+#define JV_DISP_STEP_LCD_OFF   6
+#define JV_DISP_STEP_PLANE_OFF 7
+#define JV_DISP_STEP_OFF   8 /* display link stopped: all done */
+
+/* hardware waits that gave up (see JV_WAIT_WHILE in utils.h) */
+uint32_t jv_display_wait_timeouts(void);
 
 #endif

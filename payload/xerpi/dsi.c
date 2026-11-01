@@ -544,8 +544,7 @@ void dsi_stop_master(enum dsi_bus bus)
 	volatile uint32_t *dsi_regs = DSI_REGS(bus);
 	int lanes = dsi_lanes_for_bus[bus];
 
-	while ((dsi_regs[0x12] & 0xF) != 0)
-		;
+	JV_WAIT_WHILE((dsi_regs[0x12] & 0xF) != 0); /* JamaisVu: bounded */
 
 	dsi_regs[0x145] = 0xffffffff;
 	dsi_regs[0x250] = 1;
