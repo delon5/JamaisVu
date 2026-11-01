@@ -6,13 +6,13 @@
 
 ## Status
 
-> **Untested on hardware.** Everything in this branch compiles, and the save/load logic passes an automated test suite against a real exFAT image (see [Testing](#testing)), but none of it has run on a Vita yet. Back up your Memory Card before trying it.
+> **Tested on a 3.60 PCH-2000** with an official Memory Card as ux0: dry run, save and load passed on hardware. It is still young software, so back up your Memory Card (at least `ux0:user/00/savedata` and `ux0:data/JamaisVu`) before relying on it.
 
 | Firmware | Status |
 | --- | --- |
 | 3.65 | Supported (the only firmware the original plugin was tested on) |
 | 3.67, 3.68, 3.69–3.73 | Offsets present but **unverified**. Disabled unless built with `-DJAMAISVU_ALLOW_UNVERIFIED_FW=ON` |
-| 3.60 | **Testing build only** (`JamaisVu-testing.skprx`): offsets checked against a dump of a retail 3.60 console ([details](docs/porting-3.60.md)), not yet tested on hardware |
+| 3.60 | **Supported**: offsets checked against a dump of a retail 3.60 console ([details](docs/porting-3.60.md)); save and load tested on a PCH-2000 |
 
 On any firmware without a verified offset table, the plugin installs no filesystem hooks and changes nothing. START + UP still opens the menu in **preview mode**, so the interface can be tried, but Save and Load explain why they are unavailable. `ux0:data/JamaisVu/status.txt` records the reason and the module NIDs it found. To help add 3.60, run the read-only [jvdump](tools/jvdump/README.md) plugin once and share its output.
 
@@ -102,7 +102,7 @@ A corrupted or tampered state is rejected with nothing changed.
 
 No software can promise "100 %". These are the remaining risks:
 
-- **Hardware testing.** See *Status* above.
+- **Hardware coverage.** Tested on one console model and firmware (3.60, PCH-2000, Memory Card as ux0). See *Status* above.
 - **Load is inherently invasive.** It replaces the entire OS memory. The ux0 remount (`plugin/fs.c`, inherited from the original) refreshes the exFAT driver's caches, but it is reverse-engineered code. JamaisVu's protections make an inconsistency fail safe (read-only) rather than silently corrupt, but it can't rule out every bug in that path.
 - **A card I/O error in the middle of a load.** The payload stops (the LED blinks) instead of resuming a half-restored system. Savedata of the loaded game may be partially restored, as after a power cut.
 

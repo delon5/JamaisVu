@@ -29,16 +29,10 @@ jobs:
           ls "$VITASDK/arm-vita-eabi/lib/" | grep -i taihen
           ls "$VITASDK/arm-vita-eabi/include/taihen.h"
 
-      - name: Build JamaisVu (plugin + payload)
+      - name: Build JamaisVu (plugin + payload; arms on 3.60 and 3.65)
         run: |
           mkdir -p build && cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release
-          make -j"$(nproc)"
-
-      - name: Build JamaisVu testing build (also arms on 3.60)
-        run: |
-          mkdir -p build-testing && cd build-testing
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DJAMAISVU_TESTING=ON
           make -j"$(nproc)"
 
       - name: Payload ARM/Thumb interworking
@@ -46,7 +40,7 @@ jobs:
           # The C code is Thumb, start.S is ARM. Calls from C into start.S
           # must be BLX; a plain BL ran jv_recover's ARM code in Thumb state
           # (build ee965f0: crash recovery crashed again on hardware).
-          for d in build build-testing; do
+          for d in build; do
             dis=$("$VITASDK/bin/arm-vita-eabi-objdump" -d "$d/payload/JamaisVu_payload")
             if echo "$dis" | grep -E $'\tbl\t[0-9a-f]+ <jv_recover>'; then
               echo "$d: plain BL into ARM code"; exit 1
@@ -74,10 +68,9 @@ jobs:
         run: |
           mkdir -p out
           cp build/JamaisVu.skprx out/
-          cp build-testing/JamaisVu.skprx out/JamaisVu-testing.skprx
           cp tools/jvdump/build/jvdump.skprx out/
           # payload ELF with symbols: maps a crash address from log.txt
-          cp build-testing/payload/JamaisVu_payload out/JamaisVu_payload-testing.elf
+          cp build/payload/JamaisVu_payload out/JamaisVu_payload.elf
           sha256sum out/*.skprx | tee out/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4

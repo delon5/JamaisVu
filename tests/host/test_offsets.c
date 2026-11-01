@@ -25,7 +25,9 @@ int main(void) {
   const int testing = 0;
   printf("offset table, release build\n");
 #endif
-  expect("3.60 with the dumped SceExfatfs", 0x9642948C, 0x23AA294A, testing);
+  (void)testing;
+  /* hardware-verified (PCH-2000 save + load): arms in every build */
+  expect("3.60 with the dumped SceExfatfs", 0x9642948C, 0x23AA294A, 1);
   expect("3.60 with a different SceExfatfs", 0x9642948C, 0x12345678, 0);
   expect("3.65", 0xA96ACE9D, 0, 1);
   expect("3.68 (never checked)", 0x90DA33DE, 0, 0);

@@ -49,11 +49,14 @@ static const FwOffsets g_table[] = {
      *   bytes, fileSystems every 0x430 bytes).
      * - SceIofilemgr 0x9642948C: the vnode loop at text+0xcf04 reads count
      *   data+0x24, array data+0x19dc, size data+0x19e0.
-     * - SceRtc: data segment is exactly the 0x1c0-byte RTC context. */
+     * - SceRtc: data segment is exactly the 0x1c0-byte RTC context.
+     * Hardware: dry run, save and load (incl. the ux0 remount) passed on
+     * a PCH-2000 with an official Memory Card as ux0 (build 945b234,
+     * 2026-11-01; log.txt in the issue history). */
     .name = "3.60",
     .iofilemgr_nids = { 0x9642948C, 0 },
     .exfat_nid = 0x23AA294A,
-    .verified = VERIFIED_DUMP,
+    .verified = VERIFIED_HARDWARE,
     .iofilemgr_clear_ncache = 0x5a39,
     .iofilemgr_invalidate_buff_cache = 0x126f9,
     .iofilemgr_find_mount_point = 0x138c1, /* dump: loops over 32 mount

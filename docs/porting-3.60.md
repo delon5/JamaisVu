@@ -1,6 +1,8 @@
 # Why JamaisVu works on 3.65 but not 3.60, and how to port it
 
-> **Status (dump received from a retail 3.60 console):** the 3.60 offset table is complete and every offset was checked against that dump (details below). It is enabled in the **testing build** (`JamaisVu-testing.skprx`, `-DJAMAISVU_TESTING=ON`) and only arms if SceExfatfs is module NID `0x23AA294A`. The release build will enable 3.60 once save and load have been tested on hardware.
+> **Status: supported and hardware-tested.** The 3.60 offset table is complete, every offset was checked against a dump of a retail 3.60 console (details below), and a dry run, a save and a load (including the ux0 remount) passed on a PCH-2000 with an official Memory Card as ux0. 3.60 is enabled in the normal build (`JamaisVu.skprx`); it only arms if SceExfatfs is module NID `0x23AA294A`.
+>
+> Getting there on hardware took three payload fixes, each found from logs: crash recovery called ARM code from Thumb with a plain `BL`; `-mgeneral-regs-only` (added on a wrong theory) kept the payload from even reaching the LED; and with the MMU off every misaligned access faults, so the payload is built with `-mno-unaligned-access` (GCC had used word loads for the packed MBR partition table and merged FatFs byte loads).
 >
 > | Module (3.60) | NID | Result |
 > | --- | --- | --- |

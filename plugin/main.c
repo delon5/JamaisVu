@@ -37,9 +37,9 @@
 
 const char *jv_build_id(void) {
 #if defined(JAMAISVU_TESTING)
-  return "testing-" JV_BUILD_ID;
+  return JV_BUILD_ID "-testing";
 #else
-  return "release-" JV_BUILD_ID;
+  return JV_BUILD_ID;
 #endif
 }
 
@@ -438,7 +438,7 @@ int module_start(SceSize args, void *argp) {
            "JamaisVu " JV_VERSION "\n"
            "status: %s\n"
            "firmware table: %s (verification level %d of 2)\n"
-           "build: %s, " JV_BUILD_ID "\n"
+           "build: %s\n"
            "SceIofilemgr NID: 0x%08X\n"
            "SceExfatfs NID:   0x%08X\n"
            "SceRtc NID:       0x%08X\n"
@@ -450,11 +450,7 @@ int module_start(SceSize args, void *argp) {
            "system. See docs/porting-3.60.md.\n",
            g_armed ? "armed" : g_disabled_reason,
            g_fw ? g_fw->name : "none", g_fw ? g_fw->verified : 0,
-#if defined(JAMAISVU_TESTING)
-           "testing",
-#else
-           "release",
-#endif
+           jv_build_id(),
            (unsigned)module_nid("SceIofilemgr"),
            (unsigned)module_nid("SceExfatfs"),
            (unsigned)module_nid("SceRtc"),
