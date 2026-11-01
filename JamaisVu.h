@@ -105,6 +105,10 @@ typedef struct {
   /* display timing (DSI "vic"): 0 = A (libbaremetal's choice for the
    * LCD), 0x20 = B (the other 960x544 timing) - A/B test of the edges */
   uint32_t disp_vic;
+  /* Loads: the snapshot's own frame (recorded when it was saved), where
+   * the progress screen continues once memory is being restored. 0 = none:
+   * the screen goes dark for the restore. */
+  uint32_t disp_fb2_paddr, disp_fb2_pitch;
 } PayloadArguments;
 
 /* First sector of data/JamaisVu/trace.bin on the Memory Card. The plugin

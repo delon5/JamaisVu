@@ -371,6 +371,11 @@ static void resolve_hw_fns(void) {
     g_hw_flags_fn = NULL;
 }
 
+void jv_set_display_frame2(uint32_t paddr, uint32_t pitch) {
+  pargs.disp_fb2_paddr = paddr;
+  pargs.disp_fb2_pitch = pitch;
+}
+
 uint32_t jv_hw_info(void) {
   resolve_hw_fns();
   return g_hw_info_fn ? g_hw_info_fn() : 0;
@@ -418,7 +423,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   pargs.trace_n = 0;
   pargs.fault_type = pargs.fault_addr = pargs.fault_lr = 0;
   if (debug_mode == JV_TEST_DISPLAY || debug_mode == JV_TEST_DRYRUN ||
-      (debug_mode == JV_TEST_NONE && mode == JAMAISVU_MODE_SAVE)) {
+      debug_mode == JV_TEST_NONE) {
     uint8_t flags[16];
     memset(flags, 0, sizeof(flags));
     resolve_hw_fns();
@@ -427,8 +432,10 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
     pargs.disp_hw_info = jv_hw_info();
     pargs.disp_hw_flags0 = flags[0];
   } else {
-    pargs.disp_fb_paddr = 0; /* progress screen: not for loads yet */
+    pargs.disp_fb_paddr = 0; /* reset test: no screen */
   }
+  if (!(debug_mode == JV_TEST_NONE && mode == JAMAISVU_MODE_LOAD))
+    pargs.disp_fb2_paddr = 0; /* the snapshot's frame: loads only */
   pargs.trace_rel_lba = trace_nonce ? trace_rel_lba : 0;
   if (trace_nonce)
     memcpy(pargs.trace_nonce, trace_nonce, sizeof(pargs.trace_nonce));

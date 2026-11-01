@@ -24,6 +24,7 @@ include_directories(
   ./
   msif
   FatFs
+  ../plugin/gui
 )
 
 set(JamaisVu_payload_sources
@@ -55,6 +56,11 @@ set(JamaisVu_payload_sources
   xerpi/i2c.c
   xerpi/utils.c
   xerpi/font_data.c
+  # the menu's renderer, font and logo, for the progress screen
+  ../plugin/gui/render.c
+  ../plugin/gui/menu_view.c
+  ../plugin/gui/font_data.c
+  ../plugin/gui/jpfont.c
 )
 
 # Not -mgeneral-regs-only: on 3.60 hardware that build never reached the

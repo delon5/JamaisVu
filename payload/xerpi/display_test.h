@@ -36,6 +36,10 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 int jv_screen_begin(const JvDisplayArgs *a, void (*mark)(int step),
                     const char *title);
 void jv_screen_status(const char *line, int percent);
+/* draws the whole screen again (after something overwrote the frame) */
+void jv_screen_redraw(void);
+/* continues on another frame (same size, pitch 960-1024); < 0 if unusable */
+int jv_screen_switch(uint32_t paddr, uint32_t pitch);
 void jv_screen_end(void);
 int jv_screen_is_on(void);
 

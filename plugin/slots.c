@@ -387,10 +387,55 @@ int slot_info_remove(int slot) {
   static char path[80];
   if (!storage_mc_root())
     return JV_ERR_SLOT_IO;
+  path_for(path, sizeof(path), slot, "jvf"); /* its frame record too */
+  ksceIoRemove(path);
   path_for(path, sizeof(path), slot, "jvi");
   int res = ksceIoRemove(path);
   slots_sync();
   return res;
+}
+
+/* slotN.jvf: where the snapshot's game frame is (see slots.h) */
+int slot_frame_write(int slot, uint32_t info_crc, uint32_t paddr,
+                     uint32_t pitch, uint32_t width, uint32_t height) {
+  static char path[80];
+  SlotFrame f;
+  if (!storage_mc_root())
+    return JV_ERR_SLOT_IO;
+  f.magic = SLOT_FRAME_MAGIC;
+  f.info_crc = info_crc;
+  f.paddr = paddr;
+  f.pitch = pitch;
+  f.width = width;
+  f.height = height;
+  f.crc = crc32_update(0, &f, offsetof(SlotFrame, crc));
+  path_for(path, sizeof(path), slot, "jvf");
+  SceUID fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  if (fd < 0)
+    return JV_ERR_SLOT_IO;
+  int res = ksceIoWrite(fd, &f, sizeof(f)) == sizeof(f) ? 0 : JV_ERR_SLOT_IO;
+  if (ksceIoClose(fd) < 0)
+    res = JV_ERR_SLOT_IO;
+  slots_sync();
+  return res;
+}
+
+int slot_frame_read(int slot, uint32_t info_crc, SlotFrame *f) {
+  static char path[80];
+  if (!storage_mc_root())
+    return JV_ERR_SLOT_IO;
+  path_for(path, sizeof(path), slot, "jvf");
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  if (fd < 0)
+    return JV_ERR_SLOT_IO;
+  int n = ksceIoRead(fd, f, sizeof(*f));
+  ksceIoClose(fd);
+  if (n != sizeof(*f) || f->magic != SLOT_FRAME_MAGIC ||
+      f->crc != crc32_update(0, f, offsetof(SlotFrame, crc)))
+    return JV_ERR_SLOT_IO;
+  /* written for exactly this slot info: anything else (e.g. the slot was
+   * saved again by a build that does not write this file) - not used */
+  return f->info_crc == info_crc ? 0 : JV_ERR_SLOT_IO;
 }
 
 int slot_file_exists(int slot) {

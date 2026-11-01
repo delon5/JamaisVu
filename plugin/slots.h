@@ -101,6 +101,22 @@ int slot_stamp(int slot, uint8_t nonce[16]);
 
 int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb);
 int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb);
+
+/* slotN.jvf: physical address of the game's frame when the snapshot was
+ * taken, for the progress screen during a load (drawn there once the
+ * memory restore starts). Bound to the slot info by its CRC, so a slot
+ * saved again by a build without this file never uses an old record.
+ * Older slots have none: their load shows no progress while restoring. */
+#define SLOT_FRAME_MAGIC 0x3146564Au /* "JVF1" */
+typedef struct {
+  uint32_t magic;
+  uint32_t info_crc; /* SlotInfo.crc of the slot it belongs to */
+  uint32_t paddr, pitch, width, height;
+  uint32_t crc;      /* of the fields above */
+} SlotFrame;
+int slot_frame_write(int slot, uint32_t info_crc, uint32_t paddr,
+                     uint32_t pitch, uint32_t width, uint32_t height);
+int slot_frame_read(int slot, uint32_t info_crc, SlotFrame *f);
 int slot_info_remove(int slot);
 
 /* slotN.jvi is valid and slotN.bin has the right size */

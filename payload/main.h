@@ -43,6 +43,10 @@ void stage_mark(int n);
  * position reached (only draws; see main.c) */
 void progress_total(uint32_t total);
 void progress_at(uint32_t pos);
+/* loads: memory restore starting (total bytes), and after each piece the
+ * physical address reached and the bytes restored so far */
+void progress_load_begin(uint32_t total);
+void progress_load_at(uint32_t paddr_end, uint32_t done);
 
 int get_mediaid_sector(uint32_t *mbr_crc);
 

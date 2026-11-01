@@ -68,8 +68,11 @@ static void u_to_dec(char *out, unsigned v, int digits) {
  * left: (x+1,y) (x+1,y+2) (x,y+1). A glyph is a set of "add" polygons minus
  * "sub" polygons; a triangle belongs to the glyph if its centroid does.
  */
-#define LOGO_COL   32 /* column width, 1/8 px (4 px)            */
-#define LOGO_HALF  18 /* half triangle side, 1/8 px (~2.3 px)  */
+/* g_logo_scale: 1 in the menu; the payload's progress screen draws the
+ * same logo larger (menu_view_logo) */
+static int g_logo_scale = 1;
+#define LOGO_COL   (32 * g_logo_scale) /* column width, 1/8 px (4 px)  */
+#define LOGO_HALF  (18 * g_logo_scale) /* half triangle side, 1/8 px   */
 #define LOGO_SHRINK 84 /* triangle size in % (the rest is the gap) */
 
 typedef struct { int8_t x, y; } LPt;
@@ -232,6 +235,19 @@ static int draw_logo_word(Canvas *c, int x, int y, const char *word,
 static void draw_logo(Canvas *c, int x, int y) {
   int w = draw_logo_word(c, x, y, "JAMAIS", C_LOGO_A, 0x1234);
   draw_logo_word(c, x + w + 2 * LOGO_COL / 8, y, "VU", C_LOGO_B, 0x9876);
+}
+
+int menu_view_logo(Canvas *c, int x, int y, int scale) {
+  static uint32_t scratch[1];
+  Canvas none = { scratch, 0, 0, 0 }; /* measuring: draws nothing */
+  int w;
+  g_logo_scale = scale;
+  w = draw_logo_word(&none, 0, 0, "JAMAIS", 0, 0x1234);
+  w += 2 * LOGO_COL / 8 + draw_logo_word(&none, 0, 0, "VU", 0, 0x9876);
+  if (c)
+    draw_logo(c, x, y);
+  g_logo_scale = 1;
+  return w;
 }
 
 static void draw_counter(Canvas *c, const MenuModel *m) {

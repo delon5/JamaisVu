@@ -1200,15 +1200,26 @@ int load_state(FATFS *fs, const char *path) {
     goto out;
   }
 
+  /* Read in 1 MiB pieces (the same bytes into the same places as one
+   * read per segment) so the progress screen can follow; the hooks only
+   * draw. */
+  progress_load_begin(header.data_size);
+  uint32_t done = 0;
   for (uint32_t i = 0; i < header.segs_num; i++) {
     void *dst = jv_phys(segments[i].addr, segments[i].size);
     if (!dst) {
       res = JV_ERR_IO;
       goto out;
     }
-    res = state_read(&fp, dst, segments[i].size);
-    if (res < 0)
-      goto out;
+    for (uint32_t off = 0; off < segments[i].size;) {
+      uint32_t n = MIN(segments[i].size - off, 0x100000u);
+      res = state_read(&fp, (uint8_t *)dst + off, n);
+      if (res < 0)
+        goto out;
+      off += n;
+      done += n;
+      progress_load_at(segments[i].addr + off, done);
+    }
   }
 
   /* 2d. Block writes in the restored OS until the plugin has remounted. */

@@ -330,8 +330,74 @@ void progress_at(uint32_t pos) {
 
 /* Progress screen: what each step means on screen, and how far along */
 static int g_screen_save; /* a real save (not a dry run) */
+static int g_screen_load; /* a load */
+
+/* Loads: the screen moves to the snapshot's own frame when the memory
+ * restore starts (the restore overwrites memory, including the frame on
+ * screen; the snapshot's frame is display memory before and after). Once
+ * the restore has passed that frame, it is drawn again completely. */
+static uint32_t g_load_total, g_load_frame_end;
+static int g_load_redrawn;
+
+static char *put_u(char *p, uint32_t v);
+
+void progress_load_begin(uint32_t total) {
+  g_load_total = total;
+  if (!jv_screen_is_on())
+    return;
+  uint32_t y = pargs->disp_fb2_paddr, pitch = pargs->disp_fb2_pitch;
+  if (y && jv_screen_switch(y, pitch) == 0) {
+    g_load_frame_end = y + pitch * pargs->disp_fb_height * 4;
+    g_load_redrawn = 0;
+    jv_screen_status("Restoring memory", 5);
+    return;
+  }
+  /* no frame of the snapshot known (older slot): nowhere safe to draw
+   * while memory is replaced - dark until done */
+  jv_screen_status("Restoring memory - the screen stays dark until done",
+                   5);
+  uint32_t t0 = jv_time_us();
+  while (jv_time_us() - t0 < 1500000)
+    ;
+  jv_screen_end();
+}
+
+void progress_load_at(uint32_t paddr_end, uint32_t done) {
+  static uint32_t shown_mb = 0xffffffff;
+  if (!jv_screen_is_on() || g_load_total == 0)
+    return;
+  if (!g_load_redrawn && paddr_end >= g_load_frame_end) {
+    jv_screen_redraw(); /* the restore just wrote over it */
+    g_load_redrawn = 1;
+    shown_mb = 0xffffffff;
+  }
+  uint32_t mb = done >> 20;
+  if (mb == shown_mb)
+    return;
+  shown_mb = mb;
+  static char line[64];
+  char *p = line;
+  const char *w = "Restoring memory: ";
+  while (*w)
+    *p++ = *w++;
+  p = put_u(p, mb);
+  *p++ = ' ';
+  *p++ = '/';
+  *p++ = ' ';
+  p = put_u(p, g_load_total >> 20);
+  w = " MB";
+  while (*w)
+    *p++ = *w++;
+  *p = '\0';
+  jv_screen_status(line, 5 + (int)((uint64_t)done * 94 / g_load_total));
+}
 
 static void screen_step(int n) {
+  if (g_screen_load) {
+    if (n == JV_STAGE_FS_MOUNT)
+      jv_screen_status("Checking the slot", 3);
+    return;
+  }
   if (g_screen_save) {
     switch (n) {
       case JV_STAGE_FS_MOUNT:
@@ -371,6 +437,10 @@ static void screen_finish(int result) {
     msg = "Dry run passed - nothing was written";
   else if (result == JV_OK && g_screen_save)
     msg = "Saved";
+  else if (result == JV_OK && g_screen_load)
+    msg = "Loaded";
+  else if (g_screen_load && !pargs->applied)
+    msg = "Not loaded - nothing was changed (details in log.txt)";
   jv_screen_status(msg, result >= 0 ? 100 : -1);
   uint32_t t0 = jv_time_us();
   while (jv_time_us() - t0 < 2000000)
@@ -439,6 +509,15 @@ static int run(void) {
     if (jv_screen_begin(&a, display_mark, g_screen_save ? title :
                         "Dry run - nothing is written") == 0)
       jv_screen_status("Memory Card ready", g_screen_save ? 1 : 30);
+  } else if (pargs->disp_fb_paddr && pargs->mode == JAMAISVU_MODE_LOAD &&
+             pargs->debug_mode == JV_TEST_NONE) {
+    static char title[] = "Loading slot ?";
+    JvDisplayArgs a;
+    display_args(&a);
+    g_screen_load = 1;
+    title[sizeof(title) - 2] = (char)('1' + (pargs->slot % 9));
+    if (jv_screen_begin(&a, display_mark, title) == 0)
+      jv_screen_status("Memory Card ready", 1);
   }
 
   fres = f_mount(&fs, "ux0:", 1);
@@ -528,7 +607,14 @@ static int payload_main(void) {
   } else {
     stage_mark(JV_STAGE_MC_POWER);
     pargs->result = run();
-    screen_finish(pargs->result);
+    if (pargs->mode == JAMAISVU_MODE_LOAD && pargs->applied &&
+        pargs->result != JV_OK) {
+      /* cannot go back (halt_blink below): the message stays up */
+      jv_screen_status("Load failed - hold the POWER button to switch off",
+                       -1);
+    } else {
+      screen_finish(pargs->result);
+    }
   }
 
   guard_deny_all();

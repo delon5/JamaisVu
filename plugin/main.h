@@ -32,6 +32,9 @@ void jv_clocks_restore(char *out, int len);
 void jv_set_display_frame(uint32_t paddr, uint32_t pitch, uint32_t width,
                           uint32_t height, uint32_t vic);
 uint32_t jv_hw_info(void);
+/* loads: the snapshot's own frame (slotN.jvf), drawn into once the memory
+ * restore starts; 0 = none */
+void jv_set_display_frame2(uint32_t paddr, uint32_t pitch);
 int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
                uint32_t trace_rel_lba, const uint8_t *trace_nonce,
                int payload_variant);

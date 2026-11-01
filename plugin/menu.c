@@ -1528,6 +1528,16 @@ static void after_resume(void) {
   if (g_res_mode == JAMAISVU_MODE_SAVE) {
     if (g_res_result == JV_OK) {
       int r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
+      if (r == 0 && g_save_frame.valid &&
+          slot_frame_write(g_res_slot, g_pending_info.crc, g_save_frame.pa,
+                           g_save_frame.pitch, g_save_frame.w,
+                           g_save_frame.h) == 0) {
+        static char fl[96];
+        snprintf(fl, sizeof(fl), "    slot frame recorded: 0x%08X pitch %u\r\n",
+                 (unsigned)g_save_frame.pa, (unsigned)g_save_frame.pitch);
+        log_append(fl);
+      }
+      g_save_frame.valid = 0;
       if (r == 0)
         snprintf(msg, sizeof(msg), "Saved to slot %u", (unsigned)g_res_slot + 1);
       else
@@ -1611,6 +1621,30 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
 }
 
 static int display_frame_check(char *why, int len);
+
+/* The frame on screen right now (the display hook records the next one;
+ * the menu is open, so frames keep coming). Up to 0.3 s. */
+static int fresh_frame(void) {
+  g_fb_rec = 0;
+  __sync_synchronize();
+  for (int i = 0; i < 30 && !g_fb_rec; i++)
+    ksceKernelDelayThread(10000);
+  return g_fb_rec;
+}
+
+/* Display memory (CDRAM, 0x20000000-0x27FFFFFF): the only place a load may
+ * draw into the snapshot's own frame */
+static int frame_in_cdram(uint32_t pa, uint32_t pitch, uint32_t h) {
+  return pa >= 0x20000000u && (uint64_t)pa + (uint64_t)pitch * h * 4 <=
+                                  0x28000000u;
+}
+
+/* the frame recorded for the save in progress (written to slotN.jvf when
+ * the save succeeds) */
+static struct {
+  int valid;
+  uint32_t pa, pitch, w, h;
+} g_save_frame;
 
 static void do_save(int slot) {
   static char msg[64];
@@ -1720,14 +1754,23 @@ static void do_save(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
 
-  /* progress screen during the save (PCH-2000): the game's frame, if it
-   * passes the same checks as the display test; otherwise no screen */
+  /* progress screen during the save (PCH-2000): the game's frame as it is
+   * now, if it passes the same checks as the display test; otherwise no
+   * screen. Remembered for slotN.jvf (loads draw there). */
   {
     static char why[160];
-    if (display_frame_check(why, sizeof(why)))
+    g_save_frame.valid = 0;
+    fresh_frame();
+    if (display_frame_check(why, sizeof(why))) {
       jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h, 0x20);
-    else
+      g_save_frame.valid = frame_in_cdram(g_fb_pa, g_fb_pitch, g_fb_h);
+      g_save_frame.pa = g_fb_pa;
+      g_save_frame.pitch = g_fb_pitch;
+      g_save_frame.w = g_fb_w;
+      g_save_frame.h = g_fb_h;
+    } else {
       jv_set_display_frame(0, 0, 0, 0, 0);
+    }
   }
   run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce, JV_TEST_NONE,
                JV_PAYLOAD_DEFAULT);
@@ -1779,7 +1822,32 @@ static void do_load(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
 
-  jv_set_display_frame(0, 0, 0, 0, 0); /* loads: not yet (step 3) */
+  /* progress screen: the frame on screen now (game or LiveArea) until the
+   * memory restore starts, then the snapshot's own frame from slotN.jvf
+   * (none for older slots: the screen then goes dark while restoring) */
+  {
+    static char why[160], line[160];
+    static SlotFrame sf;
+    fresh_frame();
+    if (display_frame_check(why, sizeof(why))) {
+      jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h, 0x20);
+      if (slot_frame_read(slot, info.crc, &sf) == 0 && sf.width == 960 &&
+          sf.height == 544 && sf.pitch >= 960 && sf.pitch <= 1024 &&
+          !(sf.paddr & 0xfff) && frame_in_cdram(sf.paddr, sf.pitch, 544)) {
+        jv_set_display_frame2(sf.paddr, sf.pitch);
+        snprintf(line, sizeof(line), "    slot frame: 0x%08X pitch %u\r\n",
+                 (unsigned)sf.paddr, (unsigned)sf.pitch);
+      } else {
+        jv_set_display_frame2(0, 0);
+        snprintf(line, sizeof(line), "    slot frame: none (older slot) - "
+                 "screen dark while restoring\r\n");
+      }
+      log_append(line);
+    } else {
+      jv_set_display_frame(0, 0, 0, 0, 0);
+      jv_set_display_frame2(0, 0);
+    }
+  }
   run_and_wait(JAMAISVU_MODE_LOAD, slot, NULL, JV_TEST_NONE,
                JV_PAYLOAD_DEFAULT);
 }

@@ -71,6 +71,7 @@ JV_PIN(trace_nonce, 2068);
 JV_PIN(disp_fb_paddr, 2084);
 JV_PIN(disp_hw_flags0, 2104);
 JV_PIN(disp_vic, 2108);
+JV_PIN(disp_fb2_paddr, 2112);
 _Static_assert(sizeof(PayloadArguments) >= 2084,
                "PayloadArguments shrank: old snapshots would break");
 
@@ -109,6 +110,11 @@ uint64_t ksceKernelGetSystemTimeWide(void) { return 0; }
 void stage_mark(int n) { (void)n; }
 void progress_total(uint32_t total) { (void)total; }
 void progress_at(uint32_t pos) { (void)pos; }
+void progress_load_begin(uint32_t total) { (void)total; }
+void progress_load_at(uint32_t paddr_end, uint32_t done) {
+  (void)paddr_end;
+  (void)done;
+}
 void kscePervasiveMsifSetClock(int clock) { (void)clock; }
 
 DWORD get_fattime(void) {

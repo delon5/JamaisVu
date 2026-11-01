@@ -253,16 +253,60 @@ int jv_display_test(const JvDisplayArgs *a, void (*markfn)(int step),
 
 /* --- Progress screen for saves, loads and dry runs ---------------------- */
 
+/* Drawn with the menu's own renderer, font and logo (plugin/gui), in the
+ * menu's colours, so it looks like part of the same thing. */
+#include "render.h"
+#include <stddef.h>
+#include "menu_view.h"
+
+#define P_BG     RGBA(244, 246, 250, 255) /* menu panel */
+#define P_TEXT   RGBA(18, 22, 30, 255)
+#define P_DIM    RGBA(88, 98, 114, 255)
+#define P_BARBG  RGBA(200, 208, 220, 255)
+#define P_ACCENT RGBA(34, 178, 226, 255)
+
+#define PB_X 180
+#define PB_Y 350
+#define PB_W 600
+#define PB_H 16
+#define LOGO_SCALE 3
+
 static const char *g_title;
-static int g_screen_on, g_last_fill;
+static const char *g_line = "";
+static int g_screen_on, g_pct;
+static JvDisplayArgs g_args;
+
+static Canvas canvas(void) {
+	Canvas c = { (uint32_t *)g_fb, g_w, g_h, 0 };
+	return c;
+}
+
+static void draw_line(void) {
+	Canvas c = canvas();
+	cv_fill(&c, 0, 290, g_w, font_medium.height + 4, P_BG);
+	cv_text_centered(&c, &font_medium, g_w / 2, 292, g_line, P_DIM, g_w - 80);
+}
+
+static void draw_bar(void) {
+	Canvas c = canvas();
+	int w = PB_W * g_pct / 100;
+	cv_fill(&c, PB_X - 2, PB_Y - 2, PB_W + 4, PB_H + 4, P_BG);
+	cv_round_rect(&c, PB_X, PB_Y, PB_W, PB_H, PB_H / 2, P_BARBG);
+	if (w > 0)
+		cv_round_rect(&c, PB_X, PB_Y, w < PB_H ? PB_H : w, PB_H, PB_H / 2,
+		              P_ACCENT);
+}
 
 static void draw_progress(void) {
-	fill(0, 0, g_w, g_h, C_BG);
-	text((g_w - text_w("JamaisVu", 5)) / 2, 110, 5, C_TITLE, "JamaisVu");
-	centred(190, 3, C_TEXT, g_title);
-	bar_frame();
-	centred(420, 2, C_DIM, "Do not turn off the system");
-	g_last_fill = 0;
+	Canvas c = canvas();
+	cv_clear(&c, P_BG);
+	int lw = menu_view_logo(NULL, 0, 0, LOGO_SCALE);
+	menu_view_logo(&c, (g_w - lw) / 2, 110, LOGO_SCALE);
+	cv_text_centered(&c, &font_large, g_w / 2, 236, g_title, P_TEXT, g_w - 80);
+	cv_text_centered(&c, &font_small, g_w / 2, 420,
+	                 "Do not turn off the system", P_DIM, g_w - 80);
+	draw_line();
+	draw_bar();
 }
 
 int jv_screen_begin(const JvDisplayArgs *a, void (*markfn)(int step),
@@ -271,6 +315,9 @@ int jv_screen_begin(const JvDisplayArgs *a, void (*markfn)(int step),
 		return -1;
 	g_mark = markfn;
 	g_title = title;
+	g_line = "";
+	g_pct = 0;
+	g_args = *a;
 	hw_on(a, draw_progress);
 	g_screen_on = 1;
 	return 0;
@@ -279,17 +326,50 @@ int jv_screen_begin(const JvDisplayArgs *a, void (*markfn)(int step),
 void jv_screen_status(const char *line, int percent) {
 	if (!g_screen_on)
 		return;
-	if (line)
-		centred(260, 2, C_DIM, line);
+	if (line) {
+		g_line = line;
+		draw_line();
+	}
 	if (percent >= 0) {
 		if (percent > 100)
 			percent = 100;
-		int w = BAR_W * percent / 100;
-		if (w < g_last_fill) /* never goes back */
-			w = g_last_fill;
-		fill(BAR_X + g_last_fill, BAR_Y, w - g_last_fill, BAR_H, C_TITLE);
-		g_last_fill = w;
+		if (percent > g_pct) { /* never goes back */
+			g_pct = percent;
+			draw_bar();
+		}
 	}
+}
+
+void jv_screen_redraw(void) {
+	if (g_screen_on)
+		draw_progress();
+}
+
+/* Moves the screen to another frame: drawn there completely first, then
+ * the display controller's second configuration is pointed at it and
+ * selected (the switch happens at a frame boundary). */
+int jv_screen_switch(uint32_t paddr, uint32_t pitch) {
+	JvDisplayArgs b;
+	if (!g_screen_on)
+		return -1;
+	b = g_args;
+	b.fb_paddr = paddr;
+	b.pitch = pitch;
+	if (!args_ok(&b))
+		return -1;
+	g_fb = (volatile uint32_t *)(uintptr_t)paddr;
+	draw_progress();
+
+	struct iftu_plane_fb_config fb;
+	fb.paddr = paddr;
+	fb.pixelformat = IFTU_FB_PIXELFORMAT_A8B8G8R8;
+	fb.width = g_w;
+	fb.height = g_h;
+	iftu_plane_config_set_config(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1,
+	                             &fb, 0, 0, g_w, g_h);
+	iftu_bus_plane_config_select(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1);
+	g_args = b;
+	return 0;
 }
 
 void jv_screen_end(void) {
