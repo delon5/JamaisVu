@@ -101,6 +101,7 @@ echo
 gcc -O2 -Wall -Wextra -fsanitize=address,undefined -I"$ROOT/plugin/gui" \
   -o "$WORK/test_render" "$ROOT/tests/host/test_render.c" \
   "$ROOT/plugin/gui/render.c" "$ROOT/plugin/gui/menu_view.c" \
+  "$ROOT/plugin/gui/logo.c" \
   "$ROOT/plugin/gui/font_data.c" "$ROOT/plugin/gui/jpfont.c"
 "$WORK/test_render" "$ROOT/plugin/gui/jpfont.bin" || rc=1
 echo

@@ -3,6 +3,7 @@
 
 #include "font.h"
 
+#ifndef JV_NO_FONT_LARGE
 static const uint8_t font_large_bitmap[22561] = {
   0, 0, 206, 255, 255, 124, 0, 0, 0, 0, 201, 255, 255, 120, 0, 0, 0, 0, 197, 255, 255, 115, 0, 0,
   0, 0, 193, 255, 255, 111, 0, 0, 0, 0, 188, 255, 255, 106, 0, 0, 0, 0, 184, 255, 255, 101, 0, 0,
@@ -1046,7 +1047,9 @@ static const FontGlyph font_large_glyphs[95] = {
 };
 
 const Font font_large = { 30, 24, 32, 126, font_large_glyphs, font_large_bitmap };
+#endif
 
+#ifndef JV_NO_FONT_MEDIUM
 static const uint8_t font_medium_bitmap[15561] = {
   0, 46, 255, 255, 144, 0, 0, 41, 255, 255, 140, 0, 0, 36, 255, 255, 135, 0, 0, 31, 255, 255, 130, 0,
   0, 27, 255, 255, 126, 0, 0, 22, 255, 255, 121, 0, 0, 17, 255, 255, 116, 0, 0, 12, 255, 255, 111, 0,
@@ -1798,7 +1801,9 @@ static const FontGlyph font_medium_glyphs[95] = {
 };
 
 const Font font_medium = { 25, 20, 32, 126, font_medium_glyphs, font_medium_bitmap };
+#endif
 
+#ifndef JV_NO_FONT_SMALL
 static const uint8_t font_small_bitmap[10160] = {
   0, 138, 255, 168, 0, 0, 133, 255, 164, 0, 0, 129, 255, 159, 0, 0, 124, 255, 154, 0, 0, 120, 255, 149,
   0, 0, 115, 255, 144, 0, 0, 111, 255, 139, 0, 0, 106, 255, 134, 0, 0, 9, 23, 12, 0, 0, 16, 91,
@@ -2325,4 +2330,5 @@ static const FontGlyph font_small_glyphs[95] = {
 };
 
 const Font font_small = { 20, 16, 32, 126, font_small_glyphs, font_small_bitmap };
+#endif
 

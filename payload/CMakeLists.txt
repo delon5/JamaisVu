@@ -56,12 +56,15 @@ set(JamaisVu_payload_sources
   xerpi/i2c.c
   xerpi/utils.c
   xerpi/font_data.c
-  # the menu's renderer, font and logo, for the progress screen
+  # the menu's renderer, logo and fonts (large, small), for the progress
+  # screen; gui_stubs.c stands in for jpfont.c (no room for it)
   ../plugin/gui/render.c
-  ../plugin/gui/menu_view.c
+  ../plugin/gui/logo.c
   ../plugin/gui/font_data.c
-  ../plugin/gui/jpfont.c
+  gui_stubs.c
 )
+set_source_files_properties(../plugin/gui/font_data.c PROPERTIES
+  COMPILE_DEFINITIONS JV_NO_FONT_MEDIUM)
 
 # Not -mgeneral-regs-only: on 3.60 hardware that build never reached the
 # LED (A/B test, build ee965f0), while the default build does, and the FPU

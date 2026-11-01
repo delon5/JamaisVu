@@ -257,7 +257,7 @@ int jv_display_test(const JvDisplayArgs *a, void (*markfn)(int step),
  * menu's colours, so it looks like part of the same thing. */
 #include "render.h"
 #include <stddef.h>
-#include "menu_view.h"
+#include "logo.h"
 
 #define P_BG     RGBA(244, 246, 250, 255) /* menu panel */
 #define P_TEXT   RGBA(18, 22, 30, 255)
@@ -283,8 +283,8 @@ static Canvas canvas(void) {
 
 static void draw_line(void) {
 	Canvas c = canvas();
-	cv_fill(&c, 0, 290, g_w, font_medium.height + 4, P_BG);
-	cv_text_centered(&c, &font_medium, g_w / 2, 292, g_line, P_DIM, g_w - 80);
+	cv_fill(&c, 0, 290, g_w, font_small.height + 4, P_BG);
+	cv_text_centered(&c, &font_small, g_w / 2, 292, g_line, P_DIM, g_w - 80);
 }
 
 static void draw_bar(void) {
@@ -300,8 +300,8 @@ static void draw_bar(void) {
 static void draw_progress(void) {
 	Canvas c = canvas();
 	cv_clear(&c, P_BG);
-	int lw = menu_view_logo(NULL, 0, 0, LOGO_SCALE);
-	menu_view_logo(&c, (g_w - lw) / 2, 110, LOGO_SCALE);
+	int lw = logo_draw(NULL, 0, 0, LOGO_SCALE);
+	logo_draw(&c, (g_w - lw) / 2, 110, LOGO_SCALE);
 	cv_text_centered(&c, &font_large, g_w / 2, 236, g_title, P_TEXT, g_w - 80);
 	cv_text_centered(&c, &font_small, g_w / 2, 420,
 	                 "Do not turn off the system", P_DIM, g_w - 80);

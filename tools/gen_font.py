@@ -29,6 +29,8 @@ def emit(path, name, size):
             data += img.tobytes()
         glyphs.append((adv, bbox[0], bbox[1], w, h, off))
     out = []
+    # each font can be left out (the payload only needs some of them)
+    out.append(f"#ifndef JV_NO_{name.upper()}")
     out.append(f"static const uint8_t {name}_bitmap[{max(1, len(data))}] = {{")
     for i in range(0, len(data), 24):
         out.append("  " + ", ".join(str(b) for b in data[i:i + 24]) + ",")
@@ -40,7 +42,8 @@ def emit(path, name, size):
         out.append("  {%d, %d, %d, %d, %d, %d}, /* %r */" % (g + (chr(code),)))
     out.append("};\n")
     out.append(f"const Font {name} = {{ {height}, {ascent}, {FIRST}, {LAST}, "
-               f"{name}_glyphs, {name}_bitmap }};\n")
+               f"{name}_glyphs, {name}_bitmap }};")
+    out.append("#endif\n")
     return "\n".join(out)
 
 

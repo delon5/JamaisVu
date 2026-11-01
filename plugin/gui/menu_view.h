@@ -75,9 +75,6 @@ typedef struct {
 } MenuModel;
 
 void menu_view_render(Canvas *c, const MenuModel *m);
-/* The menu's logo, scale times as large, top-left at x, y; returns its
- * width in pixels (c may be NULL to only measure) */
-int menu_view_logo(Canvas *c, int x, int y, int scale);
 void menu_view_render_toast(Canvas *c, const char *msg, int is_error);
 
 #endif
