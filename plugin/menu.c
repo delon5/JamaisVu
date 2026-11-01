@@ -1806,10 +1806,6 @@ static void do_test(int kind, int slot, int variant) {
       snprintf(why, sizeof(why), "Display test: frame %ux%u pitch %u is not "
                "supported yet", (unsigned)g_fb_w, (unsigned)g_fb_h,
                (unsigned)g_fb_pitch);
-    else if (!g_fb_game)
-      snprintf(why, sizeof(why), "Display test: start a game first (frame "
-               "from the LiveArea, VA 0x%08X PA 0x%08X)", (unsigned)g_fb_va,
-               (unsigned)g_fb_pa0);
     else if (g_fb_pa0 == 0)
       snprintf(why, sizeof(why), "Display test: frame address 0x%08X could "
                "not be translated", (unsigned)g_fb_va);
@@ -1840,9 +1836,11 @@ static void do_test(int kind, int slot, int variant) {
       return;
     }
     static char line[160];
+    /* the LiveArea's frame is display memory too (loads start there) */
     snprintf(line, sizeof(line), "display test: frame at 0x%08X, %ux%u pitch "
-             "%u, hardware 0x%08X\r\n", (unsigned)g_fb_pa, (unsigned)g_fb_w,
-             (unsigned)g_fb_h, (unsigned)g_fb_pitch, (unsigned)hw);
+             "%u (%s), hardware 0x%08X\r\n", (unsigned)g_fb_pa,
+             (unsigned)g_fb_w, (unsigned)g_fb_h, (unsigned)g_fb_pitch,
+             g_fb_game ? "game" : "LiveArea", (unsigned)hw);
     log_append(line);
     jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h);
   }
