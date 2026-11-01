@@ -357,8 +357,27 @@ static void capture(const SceDisplayFrameBuf *p) {
 
 /* Blends canvas c, laid out at (dx,dy) on a 960x544 screen, onto the
  * framebuffer, scaling to the framebuffer's resolution. */
-static void compose(const SceDisplayFrameBuf *p, const Canvas *c, int dx,
-                    int dy) {
+/* Which canvas rows need blending (rounded corners, translucent edges);
+ * every other row is fully opaque and is written to the framebuffer
+ * without reading it first. Reading the game's framebuffer back is very
+ * slow in some games (Trails: 8-47 ms per frame with the old per-row
+ * read-modify-write), and it runs in the game's own rendering thread. */
+static uint8_t g_panel_blend[MENU_H], g_toast_blend[TOAST_H];
+
+static void scan_blend_rows(const Canvas *c, uint8_t *rows) {
+  for (int y = 0; y < c->h; y++) {
+    const uint32_t *r = &c->px[y * c->w];
+    int blend = 0;
+    for (int x = 0; x < c->w && !blend; x++)
+      blend = (r[x] >> 24) != 255;
+    rows[y] = (uint8_t)blend;
+  }
+}
+
+/* Puts canvas c, laid out at (dx,dy) on a 960x544 screen, onto the
+ * framebuffer, scaling to the framebuffer's resolution. */
+static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
+                    const uint8_t *blend_rows, int dx, int dy) {
   static int xmap[JV_SCREEN_W];
   int w = p->width, h = p->height;
   int fx0 = dx * w / JV_SCREEN_W, fy0 = dy * h / JV_SCREEN_H;
@@ -372,15 +391,24 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c, int dx,
 
   for (int j = 0; j < fh; j++) {
     int sy = j * c->h / fh;
+    const uint32_t *src = &c->px[sy * c->w];
     uint32_t *dst = (uint32_t *)p->base + (fy0 + j) * p->pitch + fx0;
-    fb_cache_sync(dst, fw * 4);
-    if (jv_copy_from_user(g_rowbuf, dst, fw * 4) < 0)
-      return;
-    cv_compose_row(g_rowbuf, &c->px[sy * c->w], xmap, fw);
+    if (blend_rows[sy]) {
+      /* only these few rows read the game's pixels */
+      fb_cache_sync(dst, fw * 4);
+      if (jv_copy_from_user(g_rowbuf, dst, fw * 4) < 0)
+        return;
+      cv_compose_row(g_rowbuf, src, xmap, fw);
+    } else {
+      for (int i = 0; i < fw; i++)
+        g_rowbuf[i] = 0xff000000u | (src[xmap[i]] & 0x00ffffffu);
+    }
     if (jv_copy_to_user(dst, g_rowbuf, fw * 4) < 0)
       return;
-    fb_cache_sync(dst, fw * 4);
   }
+  /* one cache clean for the whole area (was two per row) */
+  uint32_t *first = (uint32_t *)p->base + fy0 * p->pitch + fx0;
+  fb_cache_sync(first, ((fh - 1) * p->pitch + fw) * 4);
 }
 
 static void draw_overlays(const SceDisplayFrameBuf *p) {
@@ -402,15 +430,20 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       memcpy(&local, &g_model, sizeof(local));
       __sync_synchronize();
       if (g_model_seq == s1) {
+        uint32_t t0 = prof_now();
         Canvas c = { g_panel_px, MENU_W, MENU_H };
         menu_view_render(&c, &local);
+        scan_blend_rows(&c, g_panel_blend);
+        prof_add(PROF_RENDER, t0);
         /* thumbnails may have changed while rendering: redo next frame */
         rendered_seq = (g_model_seq == s1) ? s1 : 1;
       }
     }
     if (!(rendered_seq & 1)) {
+      uint32_t t0 = prof_now();
       Canvas c = { g_panel_px, MENU_W, MENU_H };
-      compose(p, &c, MENU_X, MENU_Y);
+      compose(p, &c, g_panel_blend, MENU_X, MENU_Y);
+      prof_add(PROF_COMPOSE, t0);
     }
   }
 
@@ -419,15 +452,37 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     if (rendered_toast != g_toast_seq) {
       rendered_toast = g_toast_seq;
       menu_view_render_toast(&c, g_toast_msg, g_toast_err);
+      scan_blend_rows(&c, g_toast_blend);
     }
-    compose(p, &c, TOAST_X, TOAST_Y);
+    compose(p, &c, g_toast_blend, TOAST_X, TOAST_Y);
   }
+}
+
+/* Which frames get the overlay (as PSV-Shell-Plus does it): only the
+ * primary display; a game's frames on layer 0; the LiveArea (SceShell)
+ * on its layer 1, and not while a game is drawing (the shell's layer
+ * would keep a stale copy over the game). Drawing on the LiveArea's
+ * layer 0 made the menu flicker, hidden by layer 1. */
+static volatile int64_t g_game_frame_us;
+
+static int overlay_target(int head, int index) {
+  if (head != ksceDisplayGetPrimaryHead())
+    return 0;
+  int64_t now = now_us();
+  if (ksceKernelGetProcessId() != ksceKernelSysrootGetShellPid()) {
+    if (index != 0)
+      return 0;
+    g_game_frame_us = now;
+    return 1;
+  }
+  return index == 1 && now - g_game_frame_us > 500000;
 }
 
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
   if (g_overlay_ready && p && p->base && p->pixelformat == 0 &&
+      overlay_target(head, index) &&
       p->width >= 480 && p->width <= 960 && p->height >= 272 &&
       p->height <= 544 && p->pitch >= p->width) {
     __sync_fetch_and_add(&g_overlay_users, 1);
@@ -541,7 +596,8 @@ static void perf_report(void) {
   uint32_t last_t = g_perf_since;
   static char line[320];
   static const char *const names[PROF_N] = {
-    "display", "ctrl", "ctrl-incl-original", "syscon", "exfat-write", "input"
+    "display", "ctrl", "ctrl-incl-original", "syscon", "exfat-write", "input",
+    "render", "compose"
   };
   uint32_t now = prof_now();
   uint32_t secs = (now - last_t) / 1000000;
@@ -831,6 +887,7 @@ static void refresh_slots(void) {
 
   model_begin();
   g_model.savedata_rolls_back = mc && strcmp(mc, "ux0:") == 0;
+  g_model.refreshing = 1; /* thumbnails still loading */
   model_end();
 
   /* free-space safeguard: only as many new slots as fit (slot_policy.h) */
@@ -856,11 +913,14 @@ static void refresh_slots(void) {
   g_model.prepare_count = prepare_count;
   model_end();
 
+  /* All file reading happens here, without the model lock: the input
+   * thread takes that lock for every press, and in heavy games (Trails)
+   * a param.sfo read could take seconds - the menu stopped responding. */
+  static MenuSlot fresh[JV_NUM_SLOTS];
   for (int i = 0; i < JV_NUM_SLOTS; i++) {
+    MenuSlot *s = &fresh[i];
     int ok = exists[i] && slot_info_read(i, &info, g_thumbs[i]) == 0;
 
-    model_begin();
-    MenuSlot *s = &g_model.slots[i];
     memset(s, 0, sizeof(*s));
     s->locked = locked[i];
     s->prepared = exists[i];
@@ -879,8 +939,13 @@ static void refresh_slots(void) {
       s->outdated = !app_versions_match(s->app_ver, s->installed_ver);
       s->config_changed = !config_matches_fp(&info, cfg_state, cfg_md5, NULL);
     }
-    model_end();
   }
+
+  /* then one short update under the lock */
+  model_begin();
+  memcpy(g_model.slots, fresh, sizeof(fresh));
+  g_model.refreshing = 0;
+  model_end();
 }
 
 /* Why save/load cannot run right now, or NULL */

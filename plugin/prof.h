@@ -20,6 +20,8 @@ enum {
   PROF_SYSCON,     /* syscon command hook, JamaisVu's part      */
   PROF_WRITE,      /* exFAT write hook, JamaisVu's part         */
   PROF_INPUT,      /* menu input thread, one poll               */
+  PROF_RENDER,     /* drawing the menu image (on model change)  */
+  PROF_COMPOSE,    /* putting the menu on a game frame          */
   PROF_N
 };
 

@@ -84,6 +84,7 @@ target_link_libraries(JamaisVu
   SceSysconForDriver_stub
   SceSysmemForDriver_stub
   SceSysrootForKernel_stub
+  SceSysrootForDriver_stub
   SceThreadmgrForDriver_stub
   taihenForKernel_stub
   taihenModuleUtils_stub

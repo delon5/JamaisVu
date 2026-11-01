@@ -288,7 +288,8 @@ static void draw_slot(Canvas *c, const MenuModel *m, int i) {
     } else {
       cv_text_centered(c, &font_small, x + JV_THUMB_W / 2,
                        y + (JV_THUMB_H - font_small.height) / 2,
-                       s->used ? "NO PREVIEW" : s->prepared ? "READY" : "EMPTY",
+                       s->used ? (m->refreshing ? "LOADING" : "NO PREVIEW")
+                               : s->prepared ? "READY" : "EMPTY",
                        C_TEXT_DIM,
                        JV_THUMB_W);
     }
