@@ -11,7 +11,12 @@ endif()
 project(JamaisVu_payload C ASM)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu17 -Wl,-q -Wall -O0 -mcpu=cortex-a9 -mthumb-interwork -fno-builtin -Wno-main")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu17 -Wl,-q -Wall -O0 -mcpu=cortex-a9 -mthumb-interwork -mno-unaligned-access -fno-builtin -Wno-main")
+# -mno-unaligned-access: the payload runs with the MMU off, so all memory is
+# strongly-ordered and every misaligned access faults (ARMv7). Without it GCC
+# reads packed fields (MBR partition table) and merged byte loads (FatFs)
+# with LDR at odd addresses: data abort seen on 3.60 hardware (75f1aaf,
+# fault address 0x1C00ED21 in trace_locate).
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -fno-exceptions")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -T ${CMAKE_CURRENT_SOURCE_DIR}/linker.x -nostartfiles -nodefaultlibs -nostdlib")
 
