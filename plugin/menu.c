@@ -812,10 +812,21 @@ static int overlay_target(int head, int index) {
 /* time of the first frame on the display after a save/load (0 = waiting) */
 static volatile int64_t g_t_first_frame;
 static volatile int g_wait_first_frame;
+/* the first frame on any head/index (to tell "the game drew late" from
+ * "frames came, but not on the head/index the overlay uses") */
+static volatile int64_t g_t_first_any;
+static volatile int g_first_any_head, g_first_any_index;
+static volatile int g_wait_first_any;
 
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
+  if (g_wait_first_any && p && p->base) {
+    g_t_first_any = ksceKernelGetSystemTimeWide();
+    g_first_any_head = head;
+    g_first_any_index = index;
+    g_wait_first_any = 0;
+  }
   if (g_wait_first_frame && p && p->base && overlay_target(head, index)) {
     g_t_first_frame = ksceKernelGetSystemTimeWide();
     g_wait_first_frame = 0;
@@ -1630,6 +1641,8 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
    * armed here it caught a frame from before the sleep (-4028 ms) */
   g_t_first_frame = 0;
   g_wait_first_frame = 0;
+  g_t_first_any = 0;
+  g_wait_first_any = 0;
   unsigned int out;
   ksceKernelWaitEventFlag(g_evf, EVF_RESUMED,
                           SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
@@ -1643,6 +1656,7 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
    * the *restored* image, which was waiting here when the snapshot was
    * taken. after_resume() looks only at the payload's result. */
   after_resume();
+  int64_t t_after = ksceKernelGetSystemTimeWide();
 
   /* Timing, after everything else (clocks, result, slot info): how long
    * the Vita took to wake and show the first frame (up to 10 s). After a
@@ -1651,8 +1665,9 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   for (int i = 0; i < 1000 && g_wait_first_frame; i++)
     ksceKernelDelayThread(10000);
   g_wait_first_frame = 0;
+  g_wait_first_any = 0;
   {
-    static char tl[256];
+    static char tl[384];
     int64_t now = ksceKernelGetSystemTimeWide();
     int n = 0;
     if (g_res_mode == JAMAISVU_MODE_SAVE)
@@ -1672,6 +1687,18 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
              g_t_first_frame ? "" : "none within 10 s, waited ",
              (int)(((g_t_first_frame ? g_t_first_frame : now) - g_t_resume)
                    / 1000));
+    log_append(tl);
+    if (g_t_first_any)
+      snprintf(tl, sizeof(tl), "    timing after wake: first frame on any "
+               "screen %d ms (head %d index %d, game %d); JamaisVu's own "
+               "work after the wake-up done at %d ms\r\n",
+               (int)((g_t_first_any - g_t_resume) / 1000), g_first_any_head,
+               g_first_any_index, ksceAppMgrIsExclusiveProcessRunning() ? 1 : 0,
+               (int)((t_after - g_t_resume) / 1000));
+    else
+      snprintf(tl, sizeof(tl), "    timing after wake: no frame on any "
+               "screen; JamaisVu's own work after the wake-up done at %d ms"
+               "\r\n", (int)((t_after - g_t_resume) / 1000));
     log_append(tl);
   }
 }
@@ -2191,6 +2218,8 @@ static int worker_thread(SceSize args, void *argp) {
 void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
   g_t_first_frame = 0;
   g_wait_first_frame = 1; /* timing: first frame after the wake-up */
+  g_t_first_any = 0;
+  g_wait_first_any = 1;
   memcpy(&g_res_pa, pa, sizeof(g_res_pa));
   g_res_debug = pa->debug_mode;
   g_res_stage = pa->stage;
