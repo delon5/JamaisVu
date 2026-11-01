@@ -233,6 +233,10 @@ static int fb_cache_sync(void *addr, unsigned int size) {
  * physically contiguous block - checked page by page. */
 static volatile int g_fb_rec; /* recorded for this menu session */
 static volatile uint32_t g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h;
+/* why g_fb_pa is 0: the frame's address, its first translation, and the
+ * offset where the translation failed or stopped being contiguous */
+static volatile uint32_t g_fb_va, g_fb_pa0, g_fb_bad_off;
+static volatile int g_fb_game; /* recorded from a game's frame */
 
 static uint32_t user_va2pa(uintptr_t va) {
   uint32_t par;
@@ -245,11 +249,21 @@ static uint32_t user_va2pa(uintptr_t va) {
   return (par & 0xfffff000) | (va & 0xfff);
 }
 
+static int valid_game_titleid(const char *tid);
+
 static void record_frame(const SceDisplayFrameBuf *p) {
   uintptr_t base = (uintptr_t)p->base;
   uint32_t size = p->pitch * p->height * 4;
   uint32_t pa0 = user_va2pa(base);
+  char tid[32];
+  memset(tid, 0, sizeof(tid));
+  g_fb_game = ksceKernelGetProcessTitleId(ksceKernelGetProcessId(), tid,
+                                          sizeof(tid)) >= 0 &&
+              valid_game_titleid(tid);
   g_fb_pa = 0;
+  g_fb_va = base;
+  g_fb_pa0 = pa0;
+  g_fb_bad_off = 0;
   if (pa0 != 0) {
     uint32_t off;
     for (off = 4096 - (base & 0xfff); off < size; off += 4096)
@@ -257,6 +271,8 @@ static void record_frame(const SceDisplayFrameBuf *p) {
         break;
     if (off >= size)
       g_fb_pa = pa0;
+    else
+      g_fb_bad_off = off;
   }
   g_fb_pitch = p->pitch;
   g_fb_w = p->width;
@@ -1711,10 +1727,21 @@ static void do_test(int kind, int slot, int variant) {
       snprintf(why, sizeof(why), "Display test: frame %ux%u pitch %u is not "
                "supported yet", (unsigned)g_fb_w, (unsigned)g_fb_h,
                (unsigned)g_fb_pitch);
+    else if (!g_fb_game)
+      snprintf(why, sizeof(why), "Display test: start a game first (frame "
+               "from the LiveArea, VA 0x%08X PA 0x%08X)", (unsigned)g_fb_va,
+               (unsigned)g_fb_pa0);
+    else if (g_fb_pa0 == 0)
+      snprintf(why, sizeof(why), "Display test: frame address 0x%08X could "
+               "not be translated", (unsigned)g_fb_va);
+    else if (g_fb_pa == 0)
+      snprintf(why, sizeof(why), "Display test: frame not in one piece of "
+               "memory (PA 0x%08X, breaks at +0x%X)", (unsigned)g_fb_pa0,
+               (unsigned)g_fb_bad_off);
     else if (g_fb_pa < 0x20000000u || g_fb_pa >= 0x60000000u ||
              (g_fb_pa & 0xfff))
-      snprintf(why, sizeof(why), "Display test: frame not in one piece of "
-               "memory (0x%08X)", (unsigned)g_fb_pa);
+      snprintf(why, sizeof(why), "Display test: frame at an unexpected "
+               "address (PA 0x%08X)", (unsigned)g_fb_pa);
     if (why[0]) {
       log_append(why);
       log_append("\r\n");
