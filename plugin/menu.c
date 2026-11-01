@@ -365,6 +365,9 @@ static void confirm_prepare(int all) {
 static void handle_buttons(uint32_t held, uint32_t pressed) {
   int combo = (held & JV_COMBO_BUTTON) && (held & SCE_CTRL_UP) &&
               (pressed & (JV_COMBO_BUTTON | SCE_CTRL_UP));
+  /* START + DOWN only closes the menu */
+  int close_combo = (held & JV_COMBO_BUTTON) && (held & SCE_CTRL_DOWN) &&
+                    (pressed & (JV_COMBO_BUTTON | SCE_CTRL_DOWN));
 
   if (!g_menu_open) {
     if (!combo)
@@ -396,7 +399,7 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   int prepare_count = g_model.prepare_count;
   ksceKernelUnlockMutex(g_mtx, 1);
 
-  if (combo && mode != MV_BUSY) {
+  if ((combo || close_combo) && mode != MV_BUSY) {
     close_menu();
     return;
   }

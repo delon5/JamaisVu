@@ -40,6 +40,7 @@ int64_t slot_file_size(const char *path); /* -1 if missing */
 #define JV_CFG_ABSENT     0 /* the file does not exist */
 #define JV_CFG_PRESENT    1 /* md5 is valid */
 #define JV_CFG_UNREADABLE 2 /* exists but could not be read (or too big) */
+#define JV_CFG_UNKNOWN    3 /* snapshot made before the check existed */
 
 typedef struct {
   uint32_t magic;
@@ -58,6 +59,23 @@ typedef struct {
   uint8_t cfg_md5[JV_CFG_FILES][16];
   uint32_t crc; /* crc32 of this struct up to crc, then the thumbnail */
 } SlotInfo;
+
+/* Slot info written before the config.txt check (version 2): the same
+ * fields without cfg_*. Every later version must keep reading every older
+ * one, so an update never hides or invalidates existing snapshots. */
+typedef struct {
+  uint32_t magic;
+  uint32_t version;
+  char titleid[16];
+  char title[128];
+  uint16_t year;
+  uint8_t month, day, hour, minute, second, pad;
+  uint32_t thumb_w, thumb_h;
+  uint32_t has_thumb;
+  char app_ver[8];
+  uint32_t crc;
+} SlotInfoV2;
+
 
 #define JV_ERR_SLOT_NO_SPACE (-100)
 #define JV_ERR_SLOT_IO       (-101)

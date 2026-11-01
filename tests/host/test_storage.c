@@ -21,6 +21,7 @@
 #include "storage.h"
 #include "slots.h"
 #include "trace.h"
+#include "../payload/crc32.h"
 
 JvIoMountPoint *fk_find_mount_point(int id);
 
@@ -305,6 +306,56 @@ static void test_config(void) {
         "fingerprint only reads");
 }
 
+/* A slot written by the previous version (slot info v2, no config
+ * fingerprint) must still read as a normal, loadable snapshot. */
+static void test_slot_info_v2(void) {
+  static uint32_t thumb[JV_THUMB_W * JV_THUMB_H], back_thumb[JV_THUMB_W * JV_THUMB_H];
+  static SlotInfoV2 v2;
+  static SlotInfo info;
+  static char path[128];
+
+  printf("slot info written by the previous version (v2)\n");
+  scenario("", "ux0:", 0, 0);
+  CHECK(detect_readonly() != NULL, "card");
+  CHECK(slots_mkdirs() == 0 && slot_prepare(1, NULL) == 0, "prepare slot 2");
+
+  memset(&v2, 0, sizeof(v2));
+  v2.magic = SLOT_INFO_MAGIC;
+  v2.version = 2;
+  strcpy(v2.titleid, "PCSB00001");
+  strcpy(v2.title, "Old Save");
+  v2.year = 2026; v2.month = 11; v2.day = 1;
+  v2.thumb_w = JV_THUMB_W;
+  v2.thumb_h = JV_THUMB_H;
+  v2.has_thumb = 1;
+  strcpy(v2.app_ver, "01.00");
+  for (int i = 0; i < JV_THUMB_W * JV_THUMB_H; i++)
+    thumb[i] = 0xff000000u | (uint32_t)i;
+  v2.crc = crc32_update(crc32_update(0, &v2, offsetof(SlotInfoV2, crc)),
+                        thumb, sizeof(thumb));
+  slot_path(path, sizeof(path), 1, "jvi");
+  SceUID fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  CHECK(fd >= 0, "write v2 info");
+  ksceIoWrite(fd, &v2, sizeof(v2));
+  ksceIoWrite(fd, thumb, sizeof(thumb));
+  ksceIoClose(fd);
+
+  CHECK(slot_info_read(1, &info, back_thumb) == 0, "v2 info reads");
+  CHECK(!strcmp(info.titleid, "PCSB00001") && !strcmp(info.title, "Old Save")
+        && !strcmp(info.app_ver, "01.00") && info.has_thumb &&
+        !memcmp(thumb, back_thumb, sizeof(thumb)), "v2 fields and thumbnail");
+  CHECK(slot_is_loadable(1), "v2 slot is loadable");
+  CHECK(config_matches(&info, NULL), "no fingerprint -> config check skipped");
+
+  /* a corrupted v2 file is still rejected */
+  thumb[5] ^= 1;
+  fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  ksceIoWrite(fd, &v2, sizeof(v2));
+  ksceIoWrite(fd, thumb, sizeof(thumb));
+  ksceIoClose(fd);
+  CHECK(slot_info_read(1, &info, back_thumb) < 0, "damaged v2 info rejected");
+}
+
 static void test_versions(void) {
   char ver[8], title[64];
 
@@ -413,6 +464,7 @@ int main(int argc, char **argv) {
   test_trace("uma0:", 1, 0, 40);
   test_trace("xmc0:", 1, 1, 0);
   test_config();
+  test_slot_info_v2();
 
   CHECK(fk_blocks_in_use() == 0, "memory blocks leaked: %d", fk_blocks_in_use());
   CHECK(fk_fds_in_use() == 0, "file descriptors leaked: %d", fk_fds_in_use());

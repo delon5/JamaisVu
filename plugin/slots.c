@@ -234,6 +234,44 @@ int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
   return res;
 }
 
+/* Version 2 (before the config.txt check): converted to the current
+ * layout; its plugin configuration is unknown (JV_CFG_UNKNOWN). */
+static int slot_info_read_v2(SceUID fd, SlotInfo *info, uint32_t *thumb) {
+  static SlotInfoV2 v2;
+  uint32_t crc;
+
+  if (ksceIoLseek(fd, 0, SCE_SEEK_SET) != 0 ||
+      ksceIoRead(fd, &v2, sizeof(v2)) != sizeof(v2) ||
+      v2.thumb_w != JV_THUMB_W || v2.thumb_h != JV_THUMB_H)
+    return JV_ERR_SLOT_IO;
+  if (v2.has_thumb && ksceIoRead(fd, thumb, THUMB_BYTES) != THUMB_BYTES)
+    return JV_ERR_SLOT_IO;
+  crc = crc32_update(0, &v2, offsetof(SlotInfoV2, crc));
+  if (v2.has_thumb)
+    crc = crc32_update(crc, thumb, THUMB_BYTES);
+  if (crc != v2.crc)
+    return JV_ERR_SLOT_IO;
+
+  memset(info, 0, sizeof(*info));
+  info->magic = v2.magic;
+  info->version = v2.version;
+  memcpy(info->titleid, v2.titleid, sizeof(info->titleid));
+  memcpy(info->title, v2.title, sizeof(info->title));
+  info->year = v2.year;
+  info->month = v2.month;
+  info->day = v2.day;
+  info->hour = v2.hour;
+  info->minute = v2.minute;
+  info->second = v2.second;
+  info->thumb_w = v2.thumb_w;
+  info->thumb_h = v2.thumb_h;
+  info->has_thumb = v2.has_thumb;
+  memcpy(info->app_ver, v2.app_ver, sizeof(info->app_ver));
+  for (int i = 0; i < JV_CFG_FILES; i++)
+    info->cfg_state[i] = JV_CFG_UNKNOWN;
+  return 0;
+}
+
 int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb) {
   static char path[80];
   int res = 0;
@@ -244,21 +282,27 @@ int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb) {
   if (fd < 0)
     return JV_ERR_SLOT_IO;
 
-  if (ksceIoRead(fd, info, sizeof(*info)) != sizeof(*info) ||
-      info->magic != SLOT_INFO_MAGIC || info->version != SLOT_INFO_VERSION ||
-      info->thumb_w != JV_THUMB_W || info->thumb_h != JV_THUMB_H)
+  /* the header (magic, version) is the same in every version */
+  if (ksceIoRead(fd, info, 8) != 8 || info->magic != SLOT_INFO_MAGIC) {
     res = JV_ERR_SLOT_IO;
-
-  if (res == 0 && info->has_thumb &&
-      ksceIoRead(fd, thumb, THUMB_BYTES) != THUMB_BYTES)
+  } else if (info->version == 2) {
+    res = slot_info_read_v2(fd, info, thumb);
+  } else if (info->version != SLOT_INFO_VERSION ||
+             ksceIoRead(fd, (uint8_t *)info + 8, sizeof(*info) - 8) !=
+                 (int)(sizeof(*info) - 8) ||
+             info->thumb_w != JV_THUMB_W || info->thumb_h != JV_THUMB_H) {
     res = JV_ERR_SLOT_IO;
+  } else {
+    if (info->has_thumb &&
+        ksceIoRead(fd, thumb, THUMB_BYTES) != THUMB_BYTES)
+      res = JV_ERR_SLOT_IO;
+    if (res == 0 && info_crc(info, thumb) != info->crc)
+      res = JV_ERR_SLOT_IO;
+  }
 
   ksceIoClose(fd);
 
-  if (res == 0 && info_crc(info, thumb) != info->crc)
-    res = JV_ERR_SLOT_IO;
-
-  if (res == 0) {
+  if (res >= 0) {
     info->titleid[sizeof(info->titleid) - 1] = '\0';
     info->title[sizeof(info->title) - 1] = '\0';
   }
@@ -289,6 +333,8 @@ int slot_is_loadable(int slot) {
   static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
   return slot_file_exists(slot) && slot_info_read(slot, &info, thumb) == 0;
 }
+
+
 
 /* --- param.sfo ---------------------------------------------------------- */
 
@@ -477,6 +523,9 @@ int config_matches(const SlotInfo *info, int *which) {
 
   config_fingerprint(state, md5);
   for (int i = 0; i < JV_CFG_FILES; i++) {
+    /* snapshot older than the check: nothing to compare */
+    if (info->cfg_state[i] == JV_CFG_UNKNOWN)
+      continue;
     /* an unreadable file can never be shown to be unchanged */
     if (state[i] != info->cfg_state[i] || state[i] == JV_CFG_UNREADABLE ||
         (state[i] == JV_CFG_PRESENT && memcmp(md5[i], info->cfg_md5[i], 16))) {

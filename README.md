@@ -37,7 +37,7 @@ On any firmware without a verified offset table, the plugin installs no filesyst
 
 ## Usage
 
-Press **START + UP** to open the slot menu (and again to close it). The game keeps running underneath but no longer receives input. Tip: hold **UP first, then press START**, so the game never sees START on its own (many games pause on START).
+Press **START + UP** to open the slot menu; **START + UP** or **START + DOWN** closes it. The game keeps running underneath but no longer receives input. Tip: hold **UP first, then press START**, so the game never sees START on its own (many games pause on START).
 
 | Button | Action |
 | --- | --- |
