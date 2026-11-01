@@ -1247,9 +1247,11 @@ static int input_thread(SceSize args, void *argp) {
       model_end();
     }
 
-    if (g_ev_normal_ready) {
+    if (g_ev_normal_ready && g_ev_r0 &&
+        ksceKernelGetSystemTimeWide() - g_ev_r0 > 3000000) {
       /* a sleep JamaisVu did not request (power button): for comparison
-       * with the request -> sleep time of a save */
+       * with the request -> sleep time of a save; logged 3 s after the
+       * wake-up began, whether or not the last resume event came */
       static char el[1536];
       g_ev_normal_ready = 0;
       format_events(el, sizeof(el), "normal sleep/wake, system events (S: "

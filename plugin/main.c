@@ -334,8 +334,14 @@ static int savestate_system_event(int resume, int eventid,
     }
     if (!g_ev_open)
       goto ev_done;
-    if (resume && !g_ev_r0)
+    if (resume && !g_ev_r0) {
       g_ev_r0 = now;
+      /* logged by menu.c 3 s after the first resume event: a sleep from
+       * the LiveArea with no game open may never send 0x100000 (3566f60
+       * logged nothing for one) */
+      if (g_ev_normal && pargs.mode == JAMAISVU_MODE_NONE)
+        g_ev_normal_ready = 1;
+    }
     uint32_t n = g_ev_n;
     if (n && g_ev_id[n - 1] == id) {
       g_ev_cnt[n - 1]++;
@@ -346,11 +352,8 @@ static int savestate_system_event(int resume, int eventid,
       g_ev_cnt[n] = 1;
       g_ev_n = n + 1;
     }
-    if (resume && eventid == 0x100000) {
+    if (resume && eventid == 0x100000)
       g_ev_open = 0;
-      if (g_ev_normal && pargs.mode == JAMAISVU_MODE_NONE)
-        g_ev_normal_ready = 1; /* menu.c logs it */
-    }
   }
 ev_done:
   if (pargs.mode != JAMAISVU_MODE_NONE) {
