@@ -20,6 +20,7 @@
 #include "fake_ctl.h"
 #include "storage.h"
 #include "slots.h"
+#include "trace.h"
 
 JvIoMountPoint *fk_find_mount_point(int id);
 
@@ -181,6 +182,74 @@ static void write_sfo(const char *path, const char *title, const char *ver) {
   ksceIoClose(fd);
 }
 
+/* Persistent trace: trace_prepare must find trace.bin's sector by walking
+ * the card's exFAT structures through the raw device, and the payload's
+ * record there must come back through trace_collect. */
+static void test_trace(const char *mc_mount, int sd_ux0, int usb_uma0,
+                       int filler) {
+  static char path[128], out[1400];
+  uint32_t rel = 0;
+  uint8_t nonce[16];
+  const char *why = "";
+
+  printf("trace.bin with the card as %s, %d other files first\n", mc_mount,
+         filler);
+  scenario("", mc_mount, sd_ux0, usb_uma0);
+  CHECK(detect_readonly() != NULL, "card");
+  CHECK(slots_mkdirs() == 0, "mkdirs");
+  /* push trace.bin's directory entries across many sectors and clusters */
+  for (int i = 0; i < filler; i++) {
+    snprintf(path, sizeof(path), "%sdata/JamaisVu/filler_with_a_long_name_%04d"
+             ".txt", mc_mount, i);
+    SceUID fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT, 0666);
+    CHECK(fd >= 0, "filler %d", i);
+    ksceIoWrite(fd, "x", 1);
+    ksceIoClose(fd);
+  }
+
+  CHECK(trace_prepare(&rel, nonce, &why) == 0, "trace_prepare: %s", why);
+  CHECK(rel != 0 && rel < fk_mc_sectors, "rel %u", rel);
+  if (rel == 0 || rel >= fk_mc_sectors)
+    return;
+  JvTraceSector *t = (JvTraceSector *)(fk_mc_image + (size_t)rel * 512);
+  CHECK(!memcmp(t->magic, JV_TRACE_MAGIC, 8) && !memcmp(t->nonce, nonce, 16),
+        "the located sector holds this run's magic + nonce");
+
+  /* a second run keeps working (new nonce, same file) */
+  uint32_t rel2 = 0;
+  uint8_t nonce2[16];
+  CHECK(trace_prepare(&rel2, nonce2, &why) == 0 && rel2 == rel,
+        "second prepare: %s (%u vs %u)", why, rel2, rel);
+  CHECK(!memcmp(t->nonce, nonce2, 16), "nonce updated");
+
+  CHECK(trace_collect(out, sizeof(out)) == 0, "nothing to collect yet");
+
+  /* what the payload writes behind the OS's back */
+  t->written = 1;
+  t->mode = JAMAISVU_MODE_SAVE;
+  t->debug_mode = JV_TEST_DRYRUN;
+  t->slot = 2;
+  t->result = JV_ERR_CRASH;
+  t->detail = 4;
+  t->stage = JV_STAGE_MC_AUTH;
+  t->trace_n = 3;
+  t->trace_stage[0] = JV_STAGE_ENTRY;      t->trace_ms[0] = 0;
+  t->trace_stage[1] = JV_STAGE_MC_MOUNT;   t->trace_ms[1] = 1700;
+  t->trace_stage[2] = JV_STAGE_MC_AUTH;    t->trace_ms[2] = 1750;
+  t->fault_type = 4;
+  t->fault_addr = 0x1c0abcde;
+  t->fault_lr = 0x1c012345;
+
+  CHECK(trace_collect(out, sizeof(out)) == 1, "collect");
+  printf("  collected: %s", out);
+  CHECK(strstr(out, "save (dry run) slot=3") && strstr(out, "card-auth@1750ms")
+        && strstr(out, "data abort") && strstr(out, "0x1C0ABCDE"),
+        "formatted record");
+  CHECK(trace_collect(out, sizeof(out)) == 0, "consumed after collecting");
+  CHECK(count_entries(d_ux0) == 0 && count_entries(d_uma0) == 0,
+        "trace.bin only on the Memory Card");
+}
+
 static void test_versions(void) {
   char ver[8], title[64];
 
@@ -283,6 +352,11 @@ int main(int argc, char **argv) {
   storage_set_mount_lookup(fk_find_mount_point);
 
   test_versions();
+
+  test_trace("ux0:", 0, 0, 0);
+  test_trace("ux0:", 0, 0, 1500); /* directory spans clusters */
+  test_trace("uma0:", 1, 0, 40);
+  test_trace("xmc0:", 1, 1, 0);
 
   CHECK(fk_blocks_in_use() == 0, "memory blocks leaked: %d", fk_blocks_in_use());
   CHECK(fk_fds_in_use() == 0, "file descriptors leaked: %d", fk_fds_in_use());

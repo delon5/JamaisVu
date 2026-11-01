@@ -21,6 +21,7 @@
 #include "menu.h"
 #include "slots.h"
 #include "storage.h"
+#include "trace.h"
 #include "gui/menu_view.h"
 
 int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
@@ -129,29 +130,7 @@ static void toast(const char *msg, int is_error) {
   g_toast_until = now_us() + (is_error ? 12000000 : 4000000);
 }
 
-static const char *result_text(int32_t res) {
-  switch (res) {
-    case JV_ERR_CARD:       return "Memory Card could not be read";
-    case JV_ERR_NO_SLOT:    return "slot file is missing";
-    case JV_ERR_FRAGMENTED: return "slot file is too fragmented";
-    case JV_ERR_TOO_BIG:    return "the game uses too much memory";
-    case JV_ERR_IO:         return "Memory Card read/write error";
-    case JV_ERR_BAD_STATE:  return "this snapshot is damaged";
-    case JV_ERR_OTHER_CARD: return "snapshot is from another Memory Card";
-    case JV_ERR_GUARD:      return "an unsafe write was blocked";
-    case JV_ERR_MEDIAID:    return "Memory Card layout not recognised";
-    case JV_ERR_SAVEDATA:   return "could not back up the savedata";
-    case JV_ERR_NOT_MC:     return "slot file is not on the official Memory Card";
-    case JV_ERR_TIMER:      return "CPU cycle counter not running";
-    case JV_ERR_HW:         return "hardware did not respond";
-    case JV_ERR_CRASH:      return "crashed (details in log.txt)";
-    case JV_ERR_ARGS:       return "invalid request";
-
-    case JV_ERR_SLOT_NO_SPACE: return "not enough free space (704 MB needed)";
-    case JV_ERR_SLOT_IO:    return "could not create the slot file";
-    default:                return "internal error";
-  }
-}
+#define result_text jv_result_text
 
 /* ------------------------------------------------------------------------ */
 /* Display hook: thumbnail capture and overlay                              */
@@ -598,30 +577,15 @@ static const char *storage_problem(void) {
   return NULL;
 }
 
-static const char *stage_name(uint32_t stage) {
-  switch (stage) {
-    case JV_STAGE_ENTRY:      return "payload started";
-    case JV_STAGE_L2_FLUSH:   return "cache flush";
-    case JV_STAGE_SYSCON:     return "syscon";
-    case JV_STAGE_CDRAM:      return "CDRAM";
-    case JV_STAGE_MC_POWER:   return "card power";
-    case JV_STAGE_MC_START:   return "card start";
-    case JV_STAGE_MC_MOUNT:   return "card mount";
-    case JV_STAGE_MC_AUTH:    return "card auth";
-    case JV_STAGE_FS_MOUNT:   return "filesystem";
-    case JV_STAGE_SLOT_FOUND: return "slot file found";
-    case JV_STAGE_SLOT_TOKEN: return "slot token ok";
-    case JV_STAGE_WRITING:    return "writing";
-    case JV_STAGE_DONE:       return "done";
-    default:                  return "none";
-  }
-}
+#define stage_name jv_stage_name
 
-/* Every save/load/test result is appended to data/JamaisVu/log.txt on the
- * Memory Card (kept below 64 KB), so it can be read later in VitaShell. */
-static void log_result(const char *msg) {
-  static char path[64], line[1024];
-  static const char *const modes[] = {"none", "load", "save"};
+/* Every run is logged to data/JamaisVu/log.txt on the Memory Card (kept
+ * below 64 KB), readable in VitaShell: a line when it starts, and the
+ * result with the payload's step trace when the system is back. If the
+ * system never came back, the next boot recovers the trace from trace.bin
+ * (see trace.c). */
+static void log_append(const char *text) {
+  static char path[64], line[160];
   SceDateTime t;
   SceIoStat st;
 
@@ -635,52 +599,27 @@ static void log_result(const char *msg) {
 
   memset(&t, 0, sizeof(t));
   ksceRtcGetCurrentClockLocalTime(&t);
-  int n = snprintf(line, sizeof(line),
-                   "%04d-%02d-%02d %02d:%02d:%02d %s%s slot=%u result=%d "
-                   "stage=%u(%s) detail=%d/0x%08X timer=%u | %s\r\n",
-                   t.year, t.month, t.day, t.hour, t.minute, t.second,
-                   g_res_mode <= 2 ? modes[g_res_mode] : "?",
-                   g_res_debug == JV_TEST_RESET ? " (reset test)" :
-                   g_res_debug == JV_TEST_DRYRUN ? " (dry run)" : "",
-                   (unsigned)g_res_slot + 1, (int)g_res_result,
-                   (unsigned)g_res_stage, stage_name(g_res_stage),
-                   (int)g_res_detail, (unsigned)g_res_detail,
-                   (unsigned)g_res_pa.soc_timer_10ms, msg);
-  if (n <= 0)
-    return;
-  if (n >= (int)sizeof(line))
-    n = sizeof(line) - 1;
-
-  /* step trace: "stage@ms" for every step the payload reached */
-  if (g_res_pa.trace_n > 0 && n < (int)sizeof(line) - 1) {
-    uint32_t cnt = g_res_pa.trace_n;
-    if (cnt > sizeof(g_res_pa.trace_stage))
-      cnt = sizeof(g_res_pa.trace_stage);
-    n += snprintf(line + n, sizeof(line) - n, "    steps:");
-    for (uint32_t i = 0; i < cnt && n < (int)sizeof(line) - 40; i++)
-      n += snprintf(line + n, sizeof(line) - n, " %s@%ums",
-                    stage_name(g_res_pa.trace_stage[i]),
-                    (unsigned)g_res_pa.trace_ms[i]);
-    n += snprintf(line + n, sizeof(line) - n, "\r\n");
-  }
-  /* CPU fault inside the payload */
-  if (g_res_pa.fault_type && n < (int)sizeof(line) - 1)
-    n += snprintf(line + n, sizeof(line) - n,
-                  "    crash: %s at address 0x%08X, return address 0x%08X\r\n",
-                  g_res_pa.fault_type == 1 ? "undefined instruction" :
-                  g_res_pa.fault_type == 2 ? "svc" :
-                  g_res_pa.fault_type == 3 ? "prefetch abort" :
-                  g_res_pa.fault_type == 4 ? "data abort" : "exception",
-                  (unsigned)g_res_pa.fault_addr, (unsigned)g_res_pa.fault_lr);
-  if (n >= (int)sizeof(line))
-    n = sizeof(line) - 1;
+  int n = snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d ",
+                   t.year, t.month, t.day, t.hour, t.minute, t.second);
 
   SceUID fd = ksceIoOpen(path, flags, 0666);
   if (fd < 0)
     return;
   ksceIoWrite(fd, line, n);
+  ksceIoWrite(fd, text, strlen(text));
   ksceIoClose(fd);
   slots_sync();
+}
+
+static void log_result(const char *msg) {
+  static char text[1200];
+  static JvTraceSector t;
+
+  trace_from_args(&t, &g_res_pa);
+  int n = trace_format(text, sizeof(text), &t);
+  snprintf(text + n, sizeof(text) - n, "    message: %s\r\n", msg);
+  log_append(text);
+  trace_consumed(); /* already logged from the arguments */
 }
 
 static void report(const char *msg, int is_error) {
@@ -741,7 +680,20 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   ksceKernelClearEventFlag(g_evf, ~EVF_RESUMED);
   close_menu();
 
-  if (jv_request(mode, slot, nonce, debug_mode) < 0) {
+  static char start[200];
+  static uint8_t tnonce[16];
+  uint32_t trel = 0;
+  const char *why = "";
+  int tok = trace_prepare(&trel, tnonce, &why) == 0;
+  snprintf(start, sizeof(start), "starting %s%s slot=%d build=%s; trace.bin: "
+           "%s\r\n", mode == JAMAISVU_MODE_LOAD ? "load" : "save",
+           debug_mode == JV_TEST_RESET ? " (reset test)" :
+           debug_mode == JV_TEST_DRYRUN ? " (dry run)" : "", slot + 1,
+           jv_build_id(), why);
+  log_append(start);
+
+  if (jv_request(mode, slot, nonce, debug_mode, trel,
+                 tok ? tnonce : NULL) < 0) {
     toast("Could not start - the system refused to reset", 1);
     return;
   }
@@ -1010,7 +962,16 @@ static void write_status(void) {
 }
 
 static int worker_thread(SceSize args, void *argp) {
+  static char prev[1200];
+
   write_status();
+  /* a run that never got back to the system: its trace is in trace.bin */
+  if (trace_collect(prev, sizeof(prev) - 120)) {
+    static char text[1300];
+    snprintf(text, sizeof(text), "PREVIOUS RUN DID NOT RETURN (recovered "
+             "from trace.bin):\r\n    %s", prev);
+    log_append(text);
+  }
 
   while (1) {
     unsigned int out;

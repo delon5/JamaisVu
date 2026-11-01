@@ -65,6 +65,7 @@ objcopy --redefine-syms="$SO/rename.txt" "$SO/ff_os.o"
 objcopy --redefine-syms="$SO/rename.txt" "$SO/ffuni_os.o"
 for src in "$ROOT/plugin/storage.c" "$ROOT/plugin/slots.c" \
            "$ROOT/plugin/slot_policy.c" "$ROOT/payload/crc32.c" \
+           "$ROOT/plugin/trace.c" \
            "$ROOT/tests/host/fake_kernel.c" "$ROOT/tests/host/test_storage.c"; do
   gcc $CF $SZ -c -I"$ROOT/tests/host/fake_sdk" -I"$ROOT/tests/host" \
     -I"$ROOT/plugin" -I"$WORK/fatfs" -o "$SO/$(basename "$src" .c).o" "$src"

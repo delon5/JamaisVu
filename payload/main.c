@@ -132,8 +132,68 @@ static void __attribute__((noreturn)) halt_blink(void) {
   }
 }
 
-/* Diagnostics: record step n (a JV_STAGE_*) with a timestamp. The plugin
- * writes the trace to log.txt after resuming. */
+/* ---- Persistent trace (JvTraceSector in JamaisVu.h) -------------------
+ * One sector of data/JamaisVu/trace.bin, found and signed by the plugin.
+ * It is only ever written after reading it back from the card with the
+ * expected magic and nonce, so no other sector can be hit. This single
+ * verified sector is the one write that does not go through the slot
+ * guard (the guard covers the slot file). */
+static uint32_t g_trace_lba; /* 0 = not found / not available */
+static JvTraceSector g_trace_buf __attribute__((aligned(64)));
+static uint8_t g_trace_mbr[512] __attribute__((aligned(64)));
+
+static void trace_flush(void) {
+  JvTraceSector *t = &g_trace_buf;
+
+  if (!g_trace_lba)
+    return;
+  t->written = 1;
+  t->mode = pargs->mode;
+  t->debug_mode = pargs->debug_mode;
+  t->slot = pargs->slot;
+  t->result = pargs->result;
+  t->detail = pargs->detail;
+  t->stage = pargs->stage;
+  t->soc_timer_10ms = pargs->soc_timer_10ms;
+  t->trace_n = pargs->trace_n;
+  memcpy(t->trace_stage, pargs->trace_stage, sizeof(t->trace_stage));
+  memcpy(t->trace_ms, pargs->trace_ms, sizeof(t->trace_ms));
+  t->fault_type = pargs->fault_type;
+  t->fault_addr = pargs->fault_addr;
+  t->fault_lr = pargs->fault_lr;
+  ms_write_sector(t, (int)g_trace_lba, 1);
+}
+
+/* The plugin knows the sector relative to the exFAT partition; try the
+ * card start and every partition in the MBR, and accept only the sector
+ * that carries this run's magic + nonce. */
+static int trace_locate(void) {
+  const master_block_t *mbr = (const master_block_t *)g_trace_mbr;
+  uint32_t rel = pargs->trace_rel_lba;
+
+  if (rel == 0 || ms_read_sector(g_trace_mbr, 0, 1) != 0)
+    return -1;
+
+  for (int i = -1; i < 0x10; i++) {
+    uint32_t base = i < 0 ? 0 : mbr->partitions[i].off;
+    if (i >= 0 && base == 0)
+      continue;
+    if (base + rel < base)
+      continue;
+    if (ms_read_sector(&g_trace_buf, (int)(base + rel), 1) != 0)
+      continue;
+    if (memcmp(g_trace_buf.magic, JV_TRACE_MAGIC, 8) == 0 &&
+        memcmp(g_trace_buf.nonce, pargs->trace_nonce, 16) == 0) {
+      g_trace_lba = base + rel;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+/* Diagnostics: record step n (a JV_STAGE_*) with a timestamp, in the
+ * arguments (read by the plugin after resuming) and in the persistent
+ * trace sector once the card is usable. */
 void stage_mark(int n) {
   if (n != JV_STAGE_DONE)
     pargs->stage = n; /* the last real step, reported if a run fails */
@@ -142,6 +202,7 @@ void stage_mark(int n) {
     pargs->trace_ms[pargs->trace_n] = jv_time_us() / 1000;
     pargs->trace_n++;
   }
+  trace_flush();
 }
 
 static uint32_t g_old_vbar;
@@ -165,6 +226,7 @@ void __attribute__((noreturn)) jv_exception(uint32_t type, uint32_t far,
     pargs->result = JV_ERR_CRASH;
     pargs->detail = (int32_t)type;
     guard_deny_all();
+    trace_flush(); /* best effort: the card driver may be mid-transfer */
     if (!(pargs->mode == JAMAISVU_MODE_LOAD && pargs->applied))
       jv_recover();
   }
@@ -219,6 +281,12 @@ static int run(void) {
     return msif_auth_hw_fault() ? JV_ERR_HW : JV_ERR_CARD;
   }
   stage_mark(JV_STAGE_MC_AUTH);
+
+  /* card usable: from here on every step is also saved to trace.bin */
+  if (trace_locate() == 0) {
+    gpio_port_clear(0, GPIO_PORT_GAMECARD_LED); /* "trace is recording" */
+    trace_flush();
+  }
 
   fres = f_mount(&fs, "ux0:", 1);
   if (fres != FR_OK) {
@@ -292,6 +360,9 @@ static int payload_main(void) {
   syscon_common_write(0x80 | 0x40, 0x891, 2);
   gpio_set_port_mode(0, GPIO_PORT_GAMECARD_LED, GPIO_PORT_MODE_OUTPUT);
   gpio_port_set(0, GPIO_PORT_GAMECARD_LED);
+  /* Diagnostics: the LED stays on until trace.bin is recording (after card
+   * authentication) or the run ends; hold it long enough to be seen. */
+  delay_ms(1500);
 
   syscon_msif_set_power(1);
   pervasive_reset_enter_msif();
@@ -307,9 +378,10 @@ static int payload_main(void) {
   }
 
   guard_deny_all();
+  stage_mark(JV_STAGE_DONE); /* saved to trace.bin while the card is on */
   pervasive_clock_disable_msif();
   syscon_msif_set_power(0);
-  stage_mark(JV_STAGE_DONE);
+  gpio_port_clear(0, GPIO_PORT_GAMECARD_LED);
 
   if (pargs->mode == JAMAISVU_MODE_LOAD && pargs->applied &&
       pargs->result != JV_OK)
@@ -323,6 +395,7 @@ int main(void) {
 
   pargs = (PayloadArguments *)PAYLOAD_ARGS_PADDR;
   g_in_exception = 0;
+  g_trace_lba = 0;
 
   /* catch faults (see jv_exception) instead of hanging silently */
   old_vbar = vbar_get();
@@ -339,11 +412,13 @@ int main(void) {
  * main() set up, then start.S resumes the OS exactly like after main(). */
 void payload_cleanup(void) {
   guard_deny_all();
+  stage_mark(JV_STAGE_DONE);
   if (pargs->stage >= JV_STAGE_MC_POWER) {
     pervasive_clock_disable_msif();
     syscon_msif_set_power(0);
   }
-  stage_mark(JV_STAGE_DONE);
+  if (pargs->stage >= JV_STAGE_CDRAM)
+    gpio_port_clear(0, GPIO_PORT_GAMECARD_LED);
   pmu_stop();
   vbar_set(g_old_vbar);
 }

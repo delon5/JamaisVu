@@ -22,7 +22,9 @@ int module_get_offset(SceUID pid, SceUID modid, int segidx,
 int jv_armed(void);
 int jv_armed_untested(void);
 const char *jv_disabled_reason(void);
-int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode);
+const char *jv_build_id(void);
+int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
+               uint32_t trace_rel_lba, const uint8_t *trace_nonce);
 
 extern int (* _ksceKernelFindClassByName)(const char *name, SceClass **cls);
 extern int (* _ksceGUIDGetUIDVectorByClass)(SceClass *cls, int vis_level,

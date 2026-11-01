@@ -60,5 +60,8 @@ const char *storage_detect(void);
 
 const char *storage_mc_root(void);  /* result of the last detection */
 const char *storage_reason(void);   /* why there is no usable card */
+/* raw block device of the Memory Card's partition, e.g.
+ * "sdstor0:xmc-lp-ign-userext" (read-only use only) */
+const char *storage_mc_blkdev(void);
 
 #endif

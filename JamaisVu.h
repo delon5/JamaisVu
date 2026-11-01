@@ -91,7 +91,36 @@ typedef struct {
   uint32_t fault_type; /* 1 undef, 2 svc, 3 prefetch abort, 4 data abort */
   uint32_t fault_addr; /* DFAR / IFAR */
   uint32_t fault_lr;   /* return address of the exception */
+  /* Persistent trace (see JvTraceSector): sector of data/JamaisVu/trace.bin
+   * relative to the start of the Memory Card's exFAT partition, and the
+   * random signature the plugin wrote there. 0 = not available. */
+  uint32_t trace_rel_lba;
+  uint8_t trace_nonce[16];
 } PayloadArguments;
+
+/* First sector of data/JamaisVu/trace.bin on the Memory Card. The plugin
+ * writes it (through the OS) with a fresh nonce before every run and
+ * finds where it lies on the card. Once the card is authenticated, the
+ * payload checks magic + nonce and then rewrites this one sector after
+ * every step, so the progress survives even a forced power-off; the
+ * plugin copies it into log.txt on the next boot. */
+#define JV_TRACE_MAGIC "JVTRACE1"
+typedef struct {
+  char magic[8];
+  uint8_t nonce[16];
+  uint32_t written;       /* 1 once the payload has written it */
+  uint32_t mode, debug_mode, slot;
+  int32_t result;         /* JV_ERR_CARD until the run ends */
+  int32_t detail;
+  uint32_t stage;
+  uint32_t soc_timer_10ms;
+  uint32_t trace_n;
+  uint8_t trace_stage[24];
+  uint32_t trace_ms[24];
+  uint32_t fault_type, fault_addr, fault_lr;
+  uint8_t pad[512 - 8 - 16 - 4 * 9 - 24 - 4 * 24 - 4 * 3];
+} JvTraceSector;
+_Static_assert(sizeof(JvTraceSector) == 512, "one sector");
 
 enum JamaisVuModes {
   JAMAISVU_MODE_NONE,

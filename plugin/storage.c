@@ -27,6 +27,7 @@ static const struct {
 
 static MountLookupFn g_lookup = NULL;
 static const char *g_mc_root = NULL;
+static const char *g_mc_blkdev = NULL;
 static const char *g_reason = "not detected yet";
 
 void storage_set_mount_lookup(MountLookupFn fn) {
@@ -35,6 +36,10 @@ void storage_set_mount_lookup(MountLookupFn fn) {
 
 const char *storage_mc_root(void) {
   return g_mc_root;
+}
+
+const char *storage_mc_blkdev(void) {
+  return g_mc_blkdev;
 }
 
 const char *storage_reason(void) {
@@ -67,8 +72,20 @@ static int mount_is_mc(int id) {
   return 1;
 }
 
+static const char *mc_blkdev_of(int id) {
+  JvIoMountPoint *mp = g_lookup ? g_lookup(id) : NULL;
+  if (!mp || !mp->dev)
+    return NULL;
+  if (is_mc_blkdev(mp->dev->blkdev))
+    return mp->dev->blkdev;
+  if (is_mc_blkdev(mp->dev->blkdev2))
+    return mp->dev->blkdev2;
+  return NULL;
+}
+
 const char *storage_detect(void) {
   g_mc_root = NULL;
+  g_mc_blkdev = NULL;
 
   if (!g_lookup) {
     g_reason = "the mount table is not available on this firmware";
@@ -78,6 +95,7 @@ const char *storage_detect(void) {
   for (size_t i = 0; i < N_MOUNTS; i++) {
     if (mount_is_mc(k_mounts[i].id) && mounted(k_mounts[i].root)) {
       g_mc_root = k_mounts[i].root;
+      g_mc_blkdev = mc_blkdev_of(k_mounts[i].id);
       g_reason = "ok";
       return g_mc_root;
     }
