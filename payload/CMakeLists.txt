@@ -65,6 +65,14 @@ set(JamaisVu_payload_sources
 )
 set_source_files_properties(../plugin/gui/font_data.c PROPERTIES
   COMPILE_DEFINITIONS JV_NO_FONT_MEDIUM)
+# The display and drawing code only runs for the progress screen and is
+# limited by uncached video memory, not by the CPU: optimised for size,
+# so the payload fits below PAYLOAD_ARGS_PADDR with room to spare.
+set_source_files_properties(
+  ../plugin/gui/render.c ../plugin/gui/logo.c
+  xerpi/display_test.c xerpi/pervasive_display.c xerpi/dsi.c xerpi/iftu.c
+  xerpi/lcd.c xerpi/i2c.c xerpi/utils.c
+  PROPERTIES COMPILE_OPTIONS "-Os")
 
 # Not -mgeneral-regs-only: on 3.60 hardware that build never reached the
 # LED (A/B test, build ee965f0), while the default build does, and the FPU
