@@ -8,6 +8,7 @@ BG=$1
 OUT=$2
 mkdir -p "$OUT"
 WORK=$(mktemp -d)
+trap 'rm -rf -- "$WORK"' EXIT
 
 python3 - "$BG" "$WORK" <<'PY'
 import sys

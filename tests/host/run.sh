@@ -4,7 +4,11 @@
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-WORK=${WORK:-$(mktemp -d)}
+if [ -z "${WORK:-}" ]; then
+  # own temporary directory: removed on exit (card images are large)
+  WORK=$(mktemp -d)
+  trap 'rm -rf -- "$WORK"' EXIT
+fi
 mkdir -p "$WORK/fatfs" "$WORK/img"
 
 # FatFs with the payload's configuration (copied so the test build can never
