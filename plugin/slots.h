@@ -115,6 +115,10 @@ int64_t slot_free_space(void);
 /* Game name from param.sfo (ASCII only; falls back to the title ID). */
 void lookup_title(const char *titleid, char *out, int len);
 
+/* A UTF-8 name as printable ASCII (TM/(R) spelled out, other non-ASCII
+ * left out). Returns 0 if it has at least 2 Latin letters, else -1. */
+int title_to_ascii(const uint8_t *p, uint32_t vlen, char *out, int len);
+
 /* The game's name as written in its param.sfo (UTF-8, e.g. Japanese),
  * cleaned of control characters. Returns -1 if not installed/readable. */
 int lookup_title_utf8(const char *titleid, char *out, int len);

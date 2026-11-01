@@ -465,14 +465,7 @@ static int sfo_read(const char *path, uint8_t *buf, int size) {
 /* one buffer for all param.sfo reads (all on the worker thread) */
 static uint8_t g_sfo_buf[0x4000];
 
-static int sfo_get_title(const char *path, char *out, int len) {
-  uint8_t *buf = g_sfo_buf;
-  uint32_t vlen;
-  int n = sfo_read(path, buf, sizeof(g_sfo_buf));
-  const uint8_t *p = sfo_find(buf, n, "TITLE", &vlen);
-  if (!p)
-    return -1;
-
+int title_to_ascii(const uint8_t *p, uint32_t vlen, char *out, int len) {
   /* UTF-8 -> printable ASCII. A few common symbols are spelled out,
    * anything else non-ASCII is skipped. */
   const uint8_t *end = p + vlen;
@@ -500,6 +493,16 @@ static int sfo_get_title(const char *path, char *out, int len) {
     o--;
   out[o] = '\0';
   return letters >= 2 ? 0 : -1;
+}
+
+static int sfo_get_title(const char *path, char *out, int len) {
+  uint8_t *buf = g_sfo_buf;
+  uint32_t vlen;
+  int n = sfo_read(path, buf, sizeof(g_sfo_buf));
+  const uint8_t *p = sfo_find(buf, n, "TITLE", &vlen);
+  if (!p)
+    return -1;
+  return title_to_ascii(p, vlen, out, len);
 }
 
 /* An installed update (ux0:patch) is what actually runs, so it is checked

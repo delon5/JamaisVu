@@ -105,6 +105,14 @@ gcc -O2 -Wall -Wextra -fsanitize=address,undefined -I"$ROOT/plugin/gui" \
 "$WORK/test_render" "$ROOT/plugin/gui/jpfont.bin" || rc=1
 echo
 
+mkdir -p "$WORK/appdb"
+python3 "$ROOT/tests/host/make_appdb.py" "$WORK/appdb"
+gcc -O1 -g -Wall -Wextra -fsanitize=address,undefined \
+  -fno-sanitize-recover=undefined -I"$ROOT/plugin" -o "$WORK/test_appdb" \
+  "$ROOT/tests/host/test_appdb.c" "$ROOT/plugin/appdb.c"
+"$WORK/test_appdb" "$WORK/appdb" ${JV_REAL_APPDB:-} || rc=1
+echo
+
 for flavour in release testing; do
   def=""
   [ "$flavour" = testing ] && def="-DJAMAISVU_TESTING"

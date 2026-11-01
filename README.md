@@ -58,6 +58,8 @@ Preparing slots can be cancelled with the back button; slots already finished ar
 
 Each slot shows a thumbnail of the game screen at the moment you saved, the game's name, its title ID, its version and the date.
 
+**Game names** are the ones your LiveArea shows (read from `ur0:shell/db/app.db`, only read), so a game you renamed (e.g. Japanese → English) shows its new name; otherwise the name from the game's `param.sfo`.
+
 **Japanese game names** (kana and kanji, e.g. キャサリン・ＦＢ) need `jpfont.bin` (from the release, ~1.7 MB) in `ux0:data/JamaisVu/`. It stays on the Memory Card: when the menu opens, only the characters the five names need are read (at most ~70 KB, and only while the menu is shown). Without the file, such names show only their Latin letters, or the title ID.
 
 ![Japanese name](docs/menu-preview/18_japanese_name.png)

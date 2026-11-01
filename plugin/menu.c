@@ -26,6 +26,7 @@
 #include "remap.h"
 #include "prof.h"
 #include "lockskip.h"
+#include "appdb.h"
 #include "gui/menu_view.h"
 
 int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
@@ -1024,31 +1025,59 @@ static int drawable_chars(const char *s, const ExtGlyphs *ext) {
   return n;
 }
 
-/* Game names as the games write them (Japanese included): for installed
- * games with a non-ASCII name, the glyphs are read from jpfont.bin and the
- * slot shows that name. Without the file the slot keeps the stored name
- * (letters only, or the title ID), as before. Worker thread (file I/O). */
-static const ExtGlyphs *load_name_glyphs(MenuSlot *fresh) {
-  static char names[JV_NUM_SLOTS][sizeof(fresh[0].title)];
+/* The names the LiveArea shows (ur0:shell/db/app.db, opened read-only):
+ * a game renamed by the user has its new name there. */
+static int livearea_names(const char *const *ids, int n,
+                          char names[][APPDB_NAME_LEN]) {
+  SceUID fd = ksceIoOpen(APPDB_PATH, SCE_O_RDONLY, 0);
+  if (fd < 0) {
+    for (int i = 0; i < n; i++)
+      names[i][0] = '\0';
+    return -1;
+  }
+  int r = appdb_names(jf_read, &fd, ids, n, names);
+  ksceIoClose(fd);
+  return r;
+}
+
+/* Slot names: the LiveArea's name for the game (so a renamed game shows
+ * its new name), else the game's param.sfo TITLE. A name in plain Latin
+ * letters is shown as it is; one with Japanese (or other non-ASCII)
+ * characters needs their glyphs from jpfont.bin. Without them - or for
+ * games no longer installed - the slot keeps its stored name, as before.
+ * Worker thread (file I/O). Returns the glyph set to draw with, or NULL. */
+static const ExtGlyphs *resolve_names(MenuSlot *fresh) {
+  static char names[JV_NUM_SLOTS][APPDB_NAME_LEN];
+  static char ascii[sizeof(fresh[0].title)];
   static char path[96];
   static int warned;
-  const char *strs[JV_NUM_SLOTS];
+  const char *ids[JV_NUM_SLOTS], *strs[JV_NUM_SLOTS];
   int has[JV_NUM_SLOTS], n = 0;
 
-  if (!g_ext)
-    return NULL;
+  for (int i = 0; i < JV_NUM_SLOTS; i++)
+    ids[i] = fresh[i].used ? fresh[i].titleid : "";
+  livearea_names(ids, JV_NUM_SLOTS, names);
+
   for (int i = 0; i < JV_NUM_SLOTS; i++) {
     has[i] = 0;
-    if (!fresh[i].used ||
+    if (!fresh[i].used)
+      continue;
+    if (!names[i][0] &&
         lookup_title_utf8(fresh[i].titleid, names[i], sizeof(names[i])) < 0)
       continue;
     for (const char *c = names[i]; *c; c++)
       if ((uint8_t)*c >= 0x80)
         has[i] = 1;
-    if (has[i])
-      strs[n++] = names[i];
+    if (!has[i]) {
+      /* Latin letters only: no glyphs needed */
+      if (title_to_ascii((const uint8_t *)names[i], strlen(names[i]), ascii,
+                         sizeof(ascii)) == 0)
+        memcpy(fresh[i].title, ascii, sizeof(fresh[i].title));
+      continue;
+    }
+    strs[n++] = names[i];
   }
-  if (n == 0)
+  if (n == 0 || !g_ext)
     return NULL;
 
   /* nothing may draw with the set while it changes */
@@ -1081,8 +1110,10 @@ static const ExtGlyphs *load_name_glyphs(MenuSlot *fresh) {
     return NULL;
   }
   for (int i = 0; i < JV_NUM_SLOTS; i++)
-    if (has[i] && drawable_chars(names[i], g_ext) >= 2)
-      memcpy(fresh[i].title, names[i], sizeof(fresh[i].title));
+    if (has[i] && drawable_chars(names[i], g_ext) >= 2) {
+      memcpy(fresh[i].title, names[i], sizeof(fresh[i].title) - 1);
+      fresh[i].title[sizeof(fresh[i].title) - 1] = '\0';
+    }
   return g_ext;
 }
 
@@ -1148,7 +1179,7 @@ static void refresh_slots(void) {
     }
   }
 
-  const ExtGlyphs *ext = load_name_glyphs(fresh);
+  const ExtGlyphs *ext = resolve_names(fresh);
 
   /* then one short update under the lock */
   model_begin();
@@ -1392,8 +1423,19 @@ static void do_save(int slot) {
   memset(&g_pending_info, 0, sizeof(g_pending_info));
   strncpy(g_pending_info.titleid, g_capture_tid,
           sizeof(g_pending_info.titleid) - 1);
-  lookup_title(g_capture_tid, g_pending_info.title,
-               sizeof(g_pending_info.title));
+  /* stored with the slot (shown if the game is uninstalled later): the
+   * LiveArea's name if it has Latin letters (e.g. renamed to English),
+   * else the game's own */
+  {
+    static char la[1][APPDB_NAME_LEN];
+    const char *one[1] = { g_capture_tid };
+    if (livearea_names(one, 1, la) <= 0 ||
+        title_to_ascii((const uint8_t *)la[0], strlen(la[0]),
+                       g_pending_info.title,
+                       sizeof(g_pending_info.title)) < 0)
+      lookup_title(g_capture_tid, g_pending_info.title,
+                   sizeof(g_pending_info.title));
+  }
   g_pending_info.has_thumb = 1;
 
   /* the snapshot is only valid for this exact game version */
