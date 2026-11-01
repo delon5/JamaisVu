@@ -254,12 +254,24 @@ static int valid_game_titleid(const char *tid);
 static void record_frame(const SceDisplayFrameBuf *p) {
   uintptr_t base = (uintptr_t)p->base;
   uint32_t size = p->pitch * p->height * 4;
-  uint32_t pa0 = user_va2pa(base);
+  /* The kernel normally runs with the user memory domain set to "no
+   * access" (it reaches game memory only through its copy functions), so
+   * a translation of a game address faults: 0x00000000 on hardware, in a
+   * game and in the LiveArea. Open the domains just for the translations
+   * (as PSV-Shell-Plus does around its framebuffer copies), with
+   * interrupts off so nothing else runs meanwhile, then restore. */
+  uint32_t dacr, cpsr, pa0;
   char tid[32];
   memset(tid, 0, sizeof(tid));
   g_fb_game = ksceKernelGetProcessTitleId(ksceKernelGetProcessId(), tid,
                                           sizeof(tid)) >= 0 &&
               valid_game_titleid(tid);
+  /* no kernel calls from here until the domains are restored */
+  __asm__ volatile("mrs %0, cpsr\n\tcpsid if" : "=r"(cpsr) :: "memory");
+  __asm__ volatile("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
+  __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(0xFFFF0000u)
+                   : "memory");
+  pa0 = user_va2pa(base);
   g_fb_pa = 0;
   g_fb_va = base;
   g_fb_pa0 = pa0;
@@ -274,6 +286,8 @@ static void record_frame(const SceDisplayFrameBuf *p) {
     else
       g_fb_bad_off = off;
   }
+  __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(dacr) : "memory");
+  __asm__ volatile("msr cpsr_c, %0" :: "r"(cpsr) : "memory");
   g_fb_pitch = p->pitch;
   g_fb_w = p->width;
   g_fb_h = p->height;
