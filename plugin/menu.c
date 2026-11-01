@@ -239,6 +239,14 @@ static volatile uint32_t g_fb_va, g_fb_pa0, g_fb_bad_off;
 static volatile int g_fb_game; /* recorded from a game's frame */
 static volatile uint32_t g_disp_vic; /* display test timing, see input */
 
+/* the frame recorded for the save in progress (written to slotN.jvf when
+ * the save succeeds) */
+static struct {
+  int valid;
+  uint32_t pa, pitch, w, h;
+} g_save_frame;
+
+
 /* Four ways to translate a game address, tried in order; the log shows
  * each one's raw result (on hardware the CPU translation alone failed for
  * 0x62320000 in 1001 Spikes, even with the domains open). */
@@ -1638,13 +1646,6 @@ static int frame_in_cdram(uint32_t pa, uint32_t pitch, uint32_t h) {
   return pa >= 0x20000000u && (uint64_t)pa + (uint64_t)pitch * h * 4 <=
                                   0x28000000u;
 }
-
-/* the frame recorded for the save in progress (written to slotN.jvf when
- * the save succeeds) */
-static struct {
-  int valid;
-  uint32_t pa, pitch, w, h;
-} g_save_frame;
 
 static void do_save(int slot) {
   static char msg[64];
