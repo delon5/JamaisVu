@@ -1705,6 +1705,23 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
                "screen; JamaisVu's own work after the wake-up done at %d ms"
                "\r\n", (int)((t_after - g_t_resume) / 1000));
     log_append(tl);
+    if (g_res_mode == JAMAISVU_MODE_SAVE && g_ev_n) {
+      /* suspend events in ms after the request, resume events in ms after
+       * the wake-up (system time stops while the Vita sleeps). After a
+       * load the restored image holds its own save's events: not shown. */
+      int m = snprintf(tl, sizeof(tl), "    system events:");
+      uint32_t cnt = g_ev_n < JV_EV_MAX ? g_ev_n : JV_EV_MAX;
+      for (uint32_t i = 0; i < cnt && m < (int)sizeof(tl) - 24; i++) {
+        uint32_t id = g_ev_id[i];
+        int r = (id & 0x80000000u) != 0;
+        int64_t base = r ? g_t_resume : g_t_request;
+        m += snprintf(tl + m, sizeof(tl) - m, " %s%X@%d", r ? "R" : "S",
+                      (unsigned)(id & 0x7FFFFFFFu),
+                      base ? (int)((g_ev_t[i] - base) / 1000) : -1);
+      }
+      snprintf(tl + m, sizeof(tl) - m, "\r\n");
+      log_append(tl);
+    }
     if (g_t_fs_done) {
       const FsUpdateTiming *f = &g_fs_update_timing;
       snprintf(tl, sizeof(tl), "    timing ux0 re-read after the load: "

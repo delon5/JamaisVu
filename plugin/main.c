@@ -302,9 +302,20 @@ static int ksceSysconSendCommandPatched(int cmd, void *buffer, uint32_t size) {
  * sleeps): request -> sleep event, wake event -> system resumed. */
 volatile int64_t g_t_request, g_t_suspend, g_t_resume, g_t_resumed;
 volatile int64_t g_t_fs_done; /* load: ux0 re-read (0 = not done) */
+/* Diagnostics: every system event during a save/load (suspend and resume
+ * phases) with its time, to see where request -> sleep goes (3.9 s). */
+volatile uint32_t g_ev_n;
+uint32_t g_ev_id[JV_EV_MAX];   /* event id, bit 31 = resume phase */
+int64_t g_ev_t[JV_EV_MAX];
 
 static int savestate_system_event(int resume, int eventid,
                                   void *args, void *opt) {
+  if (pargs.mode != JAMAISVU_MODE_NONE && g_ev_n < JV_EV_MAX) {
+    uint32_t n = g_ev_n;
+    g_ev_id[n] = (uint32_t)eventid | (resume ? 0x80000000u : 0);
+    g_ev_t[n] = ksceKernelGetSystemTimeWide();
+    g_ev_n = n + 1;
+  }
   if (pargs.mode != JAMAISVU_MODE_NONE) {
     if (!resume) {
       if (eventid == 0x4000) {
@@ -458,6 +469,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
 
   pargs.mem_bytes = pargs.mem_ms = 0;
   pargs.icache_on = pargs.delay_unit_ns = 0;
+  g_ev_n = 0;
   g_t_request = ksceKernelGetSystemTimeWide();
   g_t_suspend = g_t_resume = g_t_resumed = 0;
   int res = kscePowerRequestSoftReset();
