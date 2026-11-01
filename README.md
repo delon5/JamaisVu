@@ -59,6 +59,7 @@ Each slot shows a thumbnail of the game screen at the moment you saved, the game
 
 - **Saving** blacks out the screen for about a minute while memory is written to `data/JamaisVu/slotN.bin` on the Memory Card. Afterwards the game continues, and a message confirms the save or explains why it failed.
 - **Loading** works from inside a game and from the **LiveArea**. Saving does not: Save only appears when a running game is on screen, and this is checked again right before the save starts. A game suspended in the background doesn't count, so the LiveArea/shell can never be snapshotted.
+- **No lock screen after a save or load** (handhelds and PS TV, no NoLockScreen plugin needed). JamaisVu patches SceShell in memory just for that wake-up and removes the patch about 10 s later, so ordinary sleep still locks. Retail 3.60 and 3.65–3.74 only; on other SceShell builds the lock screen appears as usual. `log.txt` says whether it was applied.
 - During save and load **the game card LED is on**. If it **blinks rapidly**, see [If a load fails](#if-a-load-fails).
 
 A savestate contains the savedata of the games that were running. Loading a slot puts that savedata back, so progress made after the snapshot is lost.
@@ -146,5 +147,6 @@ The plugin hooks the soft reset (`kscePowerRequestSoftReset`) so that, while eve
 - Thanks to [xerpi](https://github.com/xerpi) and [motoharu](https://github.com/motoharu-gosuto) for their Memory Card research.
 - Thanks to [xerpi](https://github.com/xerpi) for [vita-libbaremetal](https://github.com/xerpi/vita-libbaremetal).
 - Thanks to [Team Molecule](https://github.com/TeamMolecule) for their prior research.
+- Lock screen skip uses the SceShell locations found by TheFloW for NoLockScreen ([VitaTweaks](https://github.com/TheOfficialFloW/VitaTweaks)).
 - Thanks to Dark_AleX for pspstates, which inspired the original project.
 - Menu font: [Inter](https://github.com/rsms/inter) (SIL Open Font License, see `plugin/gui/FONT_LICENSE.txt`).

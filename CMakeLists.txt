@@ -30,6 +30,7 @@ add_executable(JamaisVu
   plugin/slots.c
   plugin/md5.c
   plugin/remap.c
+  plugin/lockskip.c
   plugin/slot_policy.c
   plugin/menu.c
   plugin/storage.c

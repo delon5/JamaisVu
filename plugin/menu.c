@@ -25,6 +25,7 @@
 #include "trace.h"
 #include "remap.h"
 #include "prof.h"
+#include "lockskip.h"
 #include "gui/menu_view.h"
 
 int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
@@ -77,6 +78,7 @@ static MenuModel g_model;
 static volatile uint32_t g_model_seq;
 static volatile int g_menu_open;
 static volatile int64_t g_block_input_until;
+static volatile int64_t g_lockskip_until; /* 0 = no patch to remove */
 
 static char g_toast_msg[128];
 static volatile int g_toast_err;
@@ -936,6 +938,12 @@ static int input_thread(SceSize args, void *argp) {
       model_end();
     }
 
+    if (g_lockskip_until && now_us() >= g_lockskip_until) {
+      g_lockskip_until = 0;
+      lockskip_release();
+      log_queue("lock screen skip: off again (normal sleep locks)\r\n");
+    }
+
     /* nothing shown and nothing running: give the overlay memory back */
     if (g_overlay_ready && !g_menu_open && !g_busy && !g_capture_req &&
         now_us() >= g_toast_until)
@@ -1198,8 +1206,18 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     log_append(line);
   }
 
+  /* no lock screen on the way back (both the save and the load path:
+   * the snapshot is taken with this in place, too) */
+  {
+    static char ls[128], line[160];
+    lockskip_apply(ls, sizeof(ls));
+    snprintf(line, sizeof(line), "    %s\r\n", ls);
+    log_append(line);
+  }
+
   if (jv_request(mode, slot, nonce, debug_mode, trel,
                  tok ? tnonce : NULL, variant) < 0) {
+    lockskip_release();
     toast("Could not start - the system refused to reset", 1);
     return;
   }
@@ -1208,6 +1226,9 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   ksceKernelWaitEventFlag(g_evf, EVF_RESUMED,
                           SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
                           &out, NULL);
+  /* the shell has decided on the lock screen by then; afterwards normal
+   * sleep/wake locks again (removed by the input thread) */
+  g_lockskip_until = now_us() + 10000000;
 
   /* NOTE: after a successful load, this point is reached by the worker of
    * the *restored* image, which was waiting here when the snapshot was
