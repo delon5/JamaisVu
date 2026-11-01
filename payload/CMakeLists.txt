@@ -65,11 +65,12 @@ set(JamaisVu_payload_sources
 )
 set_source_files_properties(../plugin/gui/font_data.c PROPERTIES
   COMPILE_DEFINITIONS JV_NO_FONT_MEDIUM)
-# The display and drawing code only runs for the progress screen and is
-# limited by uncached video memory, not by the CPU: optimised for size,
-# so the payload fits below PAYLOAD_ARGS_PADDR with room to spare.
+# The display set-up code runs once per save/load: optimised for size, so
+# the payload fits below PAYLOAD_ARGS_PADDR. The drawing code (render.c,
+# logo.c) keeps the normal flags: with the I-cache off every instruction
+# comes from RAM and -Os made the logo take 1.9 s instead of 0.86 s
+# (log, builds 23145bf vs 5830ae3: display-showing -> filesystem).
 set_source_files_properties(
-  ../plugin/gui/render.c ../plugin/gui/logo.c
   xerpi/display_test.c xerpi/pervasive_display.c xerpi/dsi.c xerpi/iftu.c
   xerpi/lcd.c xerpi/i2c.c xerpi/utils.c
   PROPERTIES COMPILE_OPTIONS "-Os")
