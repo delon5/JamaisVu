@@ -13,4 +13,7 @@ void syscon_common_write(uint32_t data, uint16_t cmd, uint32_t length);
 int syscon_init(void);
 void syscon_msif_set_power(int enable);
 
+/* 0 if every syscon command was answered */
+int syscon_fault(void);
+
 #endif

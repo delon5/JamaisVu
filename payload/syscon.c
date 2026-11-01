@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "main.h"
 #include "syscon.h"
 #include "pervasive.h"
 #include "spi.h"
@@ -24,6 +25,13 @@
 #define SYSCON_RX_STATUS_HI 1
 #define SYSCON_RX_LENGTH 2
 #define SYSCON_RX_RESULT 3
+
+/* First syscon failure (0 = none): 1 = no answer, 2 = kept busy. */
+static int g_syscon_fault = 0;
+
+int syscon_fault(void) {
+  return g_syscon_fault;
+}
 
 struct syscon_packet {
   uint8_t tx[32]; // tx[0..1] = cmd, tx[2] = length
@@ -49,12 +57,22 @@ static void syscon_packet_start(struct syscon_packet *packet) {
 
 static uint8_t syscon_cmd_sync(struct syscon_packet *packet) {
   int i = 0;
+  uint32_t t0 = jv_time_us();
 
-  while (!gpio_query_intr(0, GPIO_PORT_SYSCON_IN));
+  /* syscon answers within milliseconds; never wait forever */
+  while (!gpio_query_intr(0, GPIO_PORT_SYSCON_IN)) {
+    if (jv_time_us() - t0 > 500000) {
+      if (!g_syscon_fault)
+        g_syscon_fault = 1;
+      spi_read_end(0);
+      gpio_port_clear(0, GPIO_PORT_SYSCON_OUT);
+      return 0xff;
+    }
+  }
 
   gpio_acquire_intr(0, GPIO_PORT_SYSCON_IN);
 
-  while (spi_read_available(0)) {
+  while (spi_read_available(0) && i < (int)sizeof(packet->rx) - 1) {
     uint32_t data = spi_read(0);
     packet->rx[i] = data & 0xff;
     packet->rx[i + 1] = (data >> 8) & 0xff;
@@ -76,10 +94,15 @@ void syscon_common_read(uint32_t *buffer, uint16_t cmd) {
 
   memset(packet.rx, -1, sizeof(packet.rx));
 
+  if (g_syscon_fault)
+    return;
   syscon_packet_start(&packet);
   syscon_cmd_sync(&packet);
+  if (g_syscon_fault)
+    return;
 
-  memcpy(buffer, &packet.rx[4], packet.rx[SYSCON_RX_LENGTH] - 2);
+  if (packet.rx[SYSCON_RX_LENGTH] >= 2 && packet.rx[SYSCON_RX_LENGTH] - 2 <= 4)
+    memcpy(buffer, &packet.rx[4], packet.rx[SYSCON_RX_LENGTH] - 2);
 }
 
 void syscon_common_write(uint32_t data, uint16_t cmd, uint32_t length) {
@@ -104,16 +127,23 @@ void syscon_common_write(uint32_t data, uint16_t cmd, uint32_t length) {
   packet.tx[2 + length] = ~hash;
   memset(&packet.tx[3 + length], -1, sizeof(packet.rx) - (3 + length));
 
-  do {
+  if (g_syscon_fault)
+    return;
+
+  /* 0x80/0x81 = busy, try again (a bounded number of times) */
+  for (i = 0; i < 1000; i++) {
     memset(packet.rx, -1, sizeof(packet.rx));
     syscon_packet_start(&packet);
 
     result = syscon_cmd_sync(&packet);
-  } while (result == 0x80 || result == 0x81);
+    if (g_syscon_fault || (result != 0x80 && result != 0x81))
+      return;
+  }
+  g_syscon_fault = 2;
 }
 
 int syscon_init(void) {
-  uint32_t syscon_version;
+  uint32_t syscon_version = 0;
 
   spi_init(0);
 

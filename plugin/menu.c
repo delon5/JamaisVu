@@ -66,6 +66,7 @@ static volatile uint32_t g_res_mode, g_res_slot;
 static volatile int32_t g_res_result;
 static volatile int g_res_stale;
 static volatile uint32_t g_res_debug, g_res_stage;
+static volatile int32_t g_res_detail;
 static volatile int g_rearm_input;
 
 static const char *g_status_text;
@@ -122,7 +123,8 @@ static void toast(const char *msg, int is_error) {
   g_toast_err = is_error;
   __sync_synchronize();
   g_toast_seq++;
-  g_toast_until = now_us() + 4000000;
+  /* errors stay up longer, so they can be read (and photographed) */
+  g_toast_until = now_us() + (is_error ? 12000000 : 4000000);
 }
 
 static const char *result_text(int32_t res) {
@@ -138,6 +140,9 @@ static const char *result_text(int32_t res) {
     case JV_ERR_MEDIAID:    return "Memory Card layout not recognised";
     case JV_ERR_SAVEDATA:   return "could not back up the savedata";
     case JV_ERR_NOT_MC:     return "slot file is not on the official Memory Card";
+    case JV_ERR_TIMER:      return "hardware timer not running";
+    case JV_ERR_HW:         return "hardware did not respond";
+    case JV_ERR_ARGS:       return "invalid request";
 
     case JV_ERR_SLOT_NO_SPACE: return "not enough free space (704 MB needed)";
     case JV_ERR_SLOT_IO:    return "could not create the slot file";
@@ -565,13 +570,60 @@ static const char *stage_name(uint32_t stage) {
     case JV_STAGE_CDRAM:      return "CDRAM";
     case JV_STAGE_MC_POWER:   return "card power";
     case JV_STAGE_MC_START:   return "card start";
-    case JV_STAGE_MC_MOUNT:   return "card auth";
+    case JV_STAGE_MC_MOUNT:   return "card mount";
+    case JV_STAGE_MC_AUTH:    return "card auth";
     case JV_STAGE_FS_MOUNT:   return "filesystem";
     case JV_STAGE_SLOT_FOUND: return "slot file found";
     case JV_STAGE_SLOT_TOKEN: return "slot token ok";
     case JV_STAGE_WRITING:    return "writing";
     default:                  return "none";
   }
+}
+
+/* Every save/load/test result is appended to data/JamaisVu/log.txt on the
+ * Memory Card (kept below 64 KB), so it can be read later in VitaShell. */
+static void log_result(const char *msg) {
+  static char path[64], line[320];
+  static const char *const modes[] = {"none", "load", "save"};
+  SceDateTime t;
+  SceIoStat st;
+
+  if (!storage_mc_root() || slots_mkdirs() < 0)
+    return;
+  jv_file_path(path, sizeof(path), "log.txt");
+
+  int flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND;
+  if (ksceIoGetstat(path, &st) >= 0 && st.st_size > 64 * 1024)
+    flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC;
+
+  memset(&t, 0, sizeof(t));
+  ksceRtcGetCurrentClockLocalTime(&t);
+  int n = snprintf(line, sizeof(line),
+                   "%04d-%02d-%02d %02d:%02d:%02d %s%s slot=%u result=%d "
+                   "stage=%u(%s) detail=%d/0x%08X | %s\r\n",
+                   t.year, t.month, t.day, t.hour, t.minute, t.second,
+                   g_res_mode <= 2 ? modes[g_res_mode] : "?",
+                   g_res_debug == JV_TEST_RESET ? " (reset test)" :
+                   g_res_debug == JV_TEST_DRYRUN ? " (dry run)" : "",
+                   (unsigned)g_res_slot + 1, (int)g_res_result,
+                   (unsigned)g_res_stage, stage_name(g_res_stage),
+                   (int)g_res_detail, (unsigned)g_res_detail, msg);
+  if (n <= 0)
+    return;
+  if (n >= (int)sizeof(line))
+    n = sizeof(line) - 1;
+
+  SceUID fd = ksceIoOpen(path, flags, 0666);
+  if (fd < 0)
+    return;
+  ksceIoWrite(fd, line, n);
+  ksceIoClose(fd);
+  slots_sync();
+}
+
+static void report(const char *msg, int is_error) {
+  toast(msg, is_error);
+  log_result(msg);
 }
 
 static void after_resume(void) {
@@ -584,10 +636,11 @@ static void after_resume(void) {
                g_res_debug == JV_TEST_RESET ? "Reset test" : "Dry run",
                (unsigned)g_res_stage, stage_name(g_res_stage));
     else
-      snprintf(msg, sizeof(msg), "Test stopped at stage %u (%s): %s",
-               (unsigned)g_res_stage, stage_name(g_res_stage),
-               result_text(g_res_result));
-    toast(msg, g_res_result != JV_TEST_DONE);
+      /* codes first: the end of a long message is cut off on screen */
+      snprintf(msg, sizeof(msg), "Stopped: stage %u, code %d/%d - %s (%s)",
+               (unsigned)g_res_stage, (int)g_res_result, (int)g_res_detail,
+               result_text(g_res_result), stage_name(g_res_stage));
+    report(msg, g_res_result != JV_TEST_DONE);
     return;
   }
 
@@ -599,11 +652,11 @@ static void after_resume(void) {
       else
         snprintf(msg, sizeof(msg), "Saved, but the slot info could not be "
                  "written - slot %u stays empty", (unsigned)g_res_slot + 1);
-      toast(msg, r != 0);
+      report(msg, r != 0);
     } else {
       snprintf(msg, sizeof(msg), "Save failed: %s",
                result_text(g_res_result));
-      toast(msg, 1);
+      report(msg, 1);
     }
   } else if (g_res_mode == JAMAISVU_MODE_LOAD) {
     if (g_res_result == JV_OK) {
@@ -612,11 +665,11 @@ static void after_resume(void) {
                  "read-only until restart", (unsigned)g_res_slot + 1);
       else
         snprintf(msg, sizeof(msg), "Loaded slot %u", (unsigned)g_res_slot + 1);
-      toast(msg, g_res_stale);
+      report(msg, g_res_stale);
     } else {
       snprintf(msg, sizeof(msg), "Load failed: %s - nothing was changed",
                result_text(g_res_result));
-      toast(msg, 1);
+      report(msg, 1);
     }
   }
 }
@@ -877,9 +930,10 @@ static int worker_thread(SceSize args, void *argp) {
 
 void menu_on_resumed(uint32_t mode, int32_t result, uint32_t slot,
                      int stale_open_files, uint32_t debug_mode,
-                     uint32_t stage) {
+                     uint32_t stage, int32_t detail) {
   g_res_debug = debug_mode;
   g_res_stage = stage;
+  g_res_detail = detail;
   g_res_mode = mode;
   g_res_result = result;
   g_res_slot = slot;

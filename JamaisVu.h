@@ -81,6 +81,7 @@ typedef struct {
   int32_t result;
   uint32_t applied; /* load: 1 once the payload started modifying anything */
   uint32_t stage;   /* last JV_STAGE_* reached (diagnostics) */
+  int32_t detail;   /* low-level error code behind result (diagnostics) */
 } PayloadArguments;
 
 enum JamaisVuModes {
@@ -102,10 +103,11 @@ enum JamaisVuModes {
 #define JV_STAGE_MC_POWER     5
 #define JV_STAGE_MC_START     6
 #define JV_STAGE_MC_MOUNT     7
-#define JV_STAGE_FS_MOUNT     8
-#define JV_STAGE_SLOT_FOUND   9
-#define JV_STAGE_SLOT_TOKEN   10
-#define JV_STAGE_WRITING      11
+#define JV_STAGE_MC_AUTH      8
+#define JV_STAGE_FS_MOUNT     9
+#define JV_STAGE_SLOT_FOUND   10
+#define JV_STAGE_SLOT_TOKEN   11
+#define JV_STAGE_WRITING      12
 
 /* Payload result codes (PayloadArguments.result) */
 #define JV_TEST_DONE            1 /* a diagnostics run finished */
@@ -122,6 +124,8 @@ enum JamaisVuModes {
 #define JV_ERR_SAVEDATA      (-10) /* savedata backup failed               */
 #define JV_ERR_ARGS          (-11) /* invalid arguments from the plugin    */
 #define JV_ERR_NOT_MC        (-12) /* ux0 is not the official Memory Card  */
+#define JV_ERR_TIMER         (-13) /* hardware timer is not running        */
+#define JV_ERR_HW            (-14) /* syscon / crypto engine did not answer */
 
 typedef struct {
   uint32_t addr; /* physical address (or special value) */

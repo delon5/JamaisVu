@@ -238,7 +238,7 @@ static int savestate_system_event(int resume, int eventid,
         }
 
         menu_on_resumed(pargs.mode, pargs.result, pargs.slot, stale,
-                        pargs.debug_mode, pargs.stage);
+                        pargs.debug_mode, pargs.stage, pargs.detail);
         pargs.mode = JAMAISVU_MODE_NONE;
       }
     }
@@ -276,6 +276,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode) {
   pargs.result = JV_ERR_ARGS;
   pargs.applied = 0;
   pargs.stage = 0;
+  pargs.detail = 0;
   __sync_synchronize();
   pargs.mode = mode;
   __sync_synchronize();

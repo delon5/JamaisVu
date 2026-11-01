@@ -39,8 +39,8 @@ int spi_init(int bus) {
 void spi_write_start(int bus) {
   volatile uint32_t *spi_regs = SPI_REGS(bus);
 
-  // Flush pending data to be read from the FIFO
-  while (spi_regs[0xa])
+  // Flush pending data to be read from the FIFO (bounded: the FIFO is small)
+  for (int n = 0; spi_regs[0xa] && n < 4096; n++)
     spi_regs[0];
 
   spi_regs[0xb];

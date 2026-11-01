@@ -13,13 +13,13 @@
 #include <stdint.h>
 
 /* Installs the display and controller hooks and starts the threads.
- * status_text is written to ux0:data/JamaisVu/status.txt once ux0 is
- * available. */
+ * status_text is written to data/JamaisVu/status.txt on the Memory Card
+ * once it is available. */
 int menu_init(const char *status_text);
 
 /* Called from the resume system event once the payload has finished. */
 void menu_on_resumed(uint32_t mode, int32_t result, uint32_t slot,
                      int stale_open_files, uint32_t debug_mode,
-                     uint32_t stage);
+                     uint32_t stage, int32_t detail);
 
 #endif

@@ -41,5 +41,7 @@ struct msif_auth_tpc_cmd4A_req {
 } __attribute__((packed));
 
 int msif_auth(void *mc_1C_key);
+/* 1 if the crypto engine timed out during msif_auth */
+int msif_auth_hw_fault(void);
 
 #endif

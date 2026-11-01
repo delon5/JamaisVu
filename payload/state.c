@@ -431,10 +431,13 @@ static int slot_open(FATFS *fs, const char *path) {
     return JV_ERR_NO_SLOT;
 
   fres = f_open(&fp, path, FA_READ);
-  if (fres != FR_OK)
+  if (fres != FR_OK) {
+    pargs->detail = 100 + fres;
     return JV_ERR_NO_SLOT;
+  }
 
   if (f_size(&fp) != pargs->slot_size) {
+    pargs->detail = 200;
     res = JV_ERR_NO_SLOT;
     goto out;
   }
@@ -443,9 +446,11 @@ static int slot_open(FATFS *fs, const char *path) {
   fp.cltbl = clmt;
   fres = f_lseek(&fp, CREATE_LINKMAP);
   if (fres == FR_NOT_ENOUGH_CORE) {
+    pargs->detail = (int32_t)clmt[0];
     res = JV_ERR_FRAGMENTED;
     goto out;
   } else if (fres != FR_OK) {
+    pargs->detail = 300 + fres;
     res = JV_ERR_IO;
     goto out;
   }
@@ -656,12 +661,21 @@ int save_state(FATFS *fs, const char *path) {
    * with the same name on a Memory Card while ux0 is SD2Vita/USB). */
   {
     uint32_t card_sec, contig;
-    if (slot_map(0, &card_sec, &contig) < 0 ||
-        ms_read_sector(io_buf, card_sec, 1) != 0) {
+    if (slot_map(0, &card_sec, &contig) < 0) {
+      pargs->detail = 400;
+      res = JV_ERR_IO;
+      goto out;
+    }
+    if (ms_read_sector(io_buf, card_sec, 1) != 0) {
+      pargs->detail = 500;
       res = JV_ERR_IO;
       goto out;
     }
     if (memcmp(io_buf, pargs->slot_nonce, sizeof(pargs->slot_nonce)) != 0) {
+      /* first bytes found, for comparison with the token */
+      pargs->detail = (int32_t)(((uint32_t)io_buf[0] << 24) |
+                                ((uint32_t)io_buf[1] << 16) |
+                                ((uint32_t)io_buf[2] << 8) | io_buf[3]);
       res = JV_ERR_NOT_MC;
       goto out;
     }

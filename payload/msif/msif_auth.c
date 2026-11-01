@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../main.h"
 #include "msif.h"
 #include "msif_auth.h"
 
@@ -27,16 +28,34 @@ static void dmac5_set_key(int keyslot, const uint32_t *key) {
     keyring[i] = key[i];
 }
 
+/* Set if the crypto engine ever failed to finish a request in time. */
+static int g_dmac5_fault = 0;
+
+int msif_auth_hw_fault(void) {
+  return g_dmac5_fault;
+}
+
 static void dmac5_submit(uint32_t cmd, void *dst, const void *src,
                          int keyslot, void *iv, uint32_t len) {
   volatile uint32_t *device = (uint32_t *)0xe0410000;
 
+  if (g_dmac5_fault)
+    return;
+
+  /* A request takes microseconds; give up after 100 ms rather than wait
+   * forever for a busy bit that never clears. */
   #define DMAC_COMMIT_WAIT \
     do { \
+      uint32_t t0; \
       device[10] = device[10]; \
       device[7] = 1; \
-      while (device[9] & 1) \
-        ; \
+      t0 = jv_time_us(); \
+      while (device[9] & 1) { \
+        if (jv_time_us() - t0 > 100000) { \
+          g_dmac5_fault = 1; \
+          break; \
+        } \
+      } \
     } while (0)
 
   device[0] = (uintptr_t)src;

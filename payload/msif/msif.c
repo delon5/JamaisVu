@@ -15,12 +15,12 @@
 #include "msif_auth.h"
 #include "msif_instr.h"
 
-static uint64_t g_timer_start_time = 0, g_timer_wait_time = 0;
+static uint32_t g_timer_start_time = 0, g_timer_wait_time = 0;
 static uint32_t g_status = 0;
 
 static void msif_timer_start(int ms) {
-  g_timer_start_time = ksceKernelGetSystemTimeWide();
-  g_timer_wait_time = ms * 1000;
+  g_timer_start_time = jv_time_us();
+  g_timer_wait_time = (uint32_t)ms * 1000;
 }
 
 static void msif_timer_end(void) {
@@ -29,7 +29,7 @@ static void msif_timer_end(void) {
 }
 
 static int msif_timer_expired(void) {
-  if (ksceKernelGetSystemTimeWide() >= (g_timer_start_time + g_timer_wait_time))
+  if (jv_time_us() - g_timer_start_time >= g_timer_wait_time)
     return -104;
   return 0;
 }
@@ -57,8 +57,8 @@ static int msproal_user_poll_flg(uint32_t flags) {
 }
 
 static int msproal_user_wait_flg(uint32_t flags, int ms) {
-  uint64_t start_time = ksceKernelGetSystemTimeWide();
-  while (ksceKernelGetSystemTimeWide() < (start_time + ms * 1000)) {
+  uint32_t start_time = jv_time_us();
+  while (jv_time_us() - start_time < (uint32_t)ms * 1000) {
     if (!msproal_user_poll_flg(flags))
       return 0;
   }
@@ -644,9 +644,6 @@ int msproal_mount(void) {
   if (res != 0)
     return res;
 
-  res = msif_auth(NULL);
-  if (res != 0)
-    return res;
-
+  /* the caller authenticates the card next (msif_auth) */
   return 0;
 }

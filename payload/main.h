@@ -35,7 +35,7 @@ typedef struct {
 extern PayloadArguments *pargs;
 
 void kscePervasiveMsifSetClock(int clock);
-uint64_t ksceKernelGetSystemTimeWide(void);
+uint32_t jv_time_us(void);
 
 int get_mediaid_sector(uint32_t *mbr_crc);
 
