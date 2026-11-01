@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "slots.h"
+#include "md5.h"
 #include "storage.h"
 #include "../payload/crc32.h"
 
@@ -424,4 +425,65 @@ int lookup_app_ver(const char *titleid, char *out, int len) {
     return o > 0 ? 0 : -1;
   }
   return -1;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Plugin configuration fingerprint                                         */
+/* ------------------------------------------------------------------------ */
+
+const char *const jv_cfg_paths[JV_CFG_FILES] = {
+  "ux0:tai/config.txt",
+  "ur0:tai/config.txt",
+};
+
+#define CFG_MAX_BYTES (1024 * 1024)
+
+static int md5_file(const char *path, uint8_t out[16]) {
+  static uint8_t buf[4096];
+  Md5 m;
+  uint32_t total = 0;
+
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  if (fd < 0)
+    return JV_CFG_ABSENT;
+  md5_init(&m);
+  while (1) {
+    int n = ksceIoRead(fd, buf, sizeof(buf));
+    if (n < 0 || total + (uint32_t)n > CFG_MAX_BYTES) {
+      ksceIoClose(fd);
+      return JV_CFG_UNREADABLE;
+    }
+    if (n == 0)
+      break;
+    md5_update(&m, buf, (uint32_t)n);
+    total += (uint32_t)n;
+  }
+  ksceIoClose(fd);
+  md5_final(&m, out);
+  return JV_CFG_PRESENT;
+}
+
+void config_fingerprint(uint8_t state[JV_CFG_FILES],
+                        uint8_t md5[JV_CFG_FILES][16]) {
+  for (int i = 0; i < JV_CFG_FILES; i++) {
+    memset(md5[i], 0, 16);
+    state[i] = (uint8_t)md5_file(jv_cfg_paths[i], md5[i]);
+  }
+}
+
+int config_matches(const SlotInfo *info, int *which) {
+  uint8_t state[JV_CFG_FILES];
+  uint8_t md5[JV_CFG_FILES][16];
+
+  config_fingerprint(state, md5);
+  for (int i = 0; i < JV_CFG_FILES; i++) {
+    /* an unreadable file can never be shown to be unchanged */
+    if (state[i] != info->cfg_state[i] || state[i] == JV_CFG_UNREADABLE ||
+        (state[i] == JV_CFG_PRESENT && memcmp(md5[i], info->cfg_md5[i], 16))) {
+      if (which)
+        *which = i;
+      return 0;
+    }
+  }
+  return 1;
 }

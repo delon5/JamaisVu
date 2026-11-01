@@ -250,6 +250,61 @@ static void test_trace(const char *mc_mount, int sd_ux0, int usb_uma0,
         "trace.bin only on the Memory Card");
 }
 
+static void put_file(const char *path, const char *text) {
+  SceUID fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  CHECK(fd >= 0, "write %s", path);
+  if (fd >= 0) {
+    ksceIoWrite(fd, text, strlen(text));
+    ksceIoClose(fd);
+  }
+}
+
+/* tai/config.txt fingerprint: stored with a snapshot, a change blocks the
+ * load. The md5 is checked against md5sum (JV_CFG_MD5, set by run.sh). */
+static void test_config(void) {
+  static SlotInfo info;
+  int which = -1;
+
+  printf("plugin configuration fingerprint (tai/config.txt)\n");
+  scenario("", "ux0:", 0, 0);
+  CHECK(detect_readonly() != NULL, "card");
+  memset(&info, 0, sizeof(info));
+
+  config_fingerprint(info.cfg_state, info.cfg_md5);
+  CHECK(info.cfg_state[0] == JV_CFG_ABSENT && info.cfg_state[1] == JV_CFG_ABSENT,
+        "no config files -> both absent");
+  CHECK(config_matches(&info, NULL), "unchanged (both absent)");
+
+  ksceIoMkdir("ux0:tai", 0777);
+  put_file("ux0:tai/config.txt", "*KERNEL\nux0:tai/JamaisVu.skprx\n");
+  CHECK(!config_matches(&info, &which) && which == 0,
+        "config.txt appeared -> mismatch on ux0 (%d)", which);
+
+  config_fingerprint(info.cfg_state, info.cfg_md5);
+  CHECK(info.cfg_state[0] == JV_CFG_PRESENT, "present");
+  char hex[33];
+  for (int i = 0; i < 16; i++)
+    sprintf(hex + i * 2, "%02x", info.cfg_md5[0][i]);
+  printf("  md5(ux0:tai/config.txt) = %s\n", hex);
+  CHECK(!strcmp(hex, getenv("JV_CFG_MD5") ? getenv("JV_CFG_MD5") : hex),
+        "md5 %s vs %s", hex, getenv("JV_CFG_MD5"));
+  CHECK(config_matches(&info, NULL), "same file -> match");
+
+  put_file("ux0:tai/config.txt", "*KERNEL\nux0:tai/JamaisVu.skprx\n"
+           "ux0:tai/other.skprx\n");
+  which = -1;
+  CHECK(!config_matches(&info, &which) && which == 0,
+        "plugin added -> mismatch (%d)", which);
+
+  put_file("ux0:tai/config.txt", "*KERNEL\nux0:tai/JamaisVu.skprx\n");
+  CHECK(config_matches(&info, NULL), "restored -> match again");
+
+  ksceIoRemove("ux0:tai/config.txt");
+  CHECK(!config_matches(&info, NULL), "removed -> mismatch");
+  CHECK(count_entries(d_ux0) == 0 && count_entries(d_uma0) == 0,
+        "fingerprint only reads");
+}
+
 static void test_versions(void) {
   char ver[8], title[64];
 
@@ -357,6 +412,7 @@ int main(int argc, char **argv) {
   test_trace("ux0:", 0, 0, 1500); /* directory spans clusters */
   test_trace("uma0:", 1, 0, 40);
   test_trace("xmc0:", 1, 1, 0);
+  test_config();
 
   CHECK(fk_blocks_in_use() == 0, "memory blocks leaked: %d", fk_blocks_in_use());
   CHECK(fk_fds_in_use() == 0, "file descriptors leaked: %d", fk_fds_in_use());

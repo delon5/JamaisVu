@@ -385,6 +385,7 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   int used = g_model.slots[sel].used;
   int locked = g_model.slots[sel].locked;
   int outdated = g_model.slots[sel].outdated;
+  int cfg_changed = g_model.slots[sel].config_changed;
   int prepared = g_model.slots[sel].prepared;
   int prepare_count = g_model.prepare_count;
   ksceKernelUnlockMutex(g_mtx, 1);
@@ -425,6 +426,9 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
       } else if ((pressed & SCE_CTRL_TRIANGLE) && !g_capture_ok &&
                  prepare_count > 1) {
         confirm_prepare(1);
+      } else if ((pressed & SCE_CTRL_SQUARE) && used && cfg_changed) {
+        set_message(MV_MESSAGE, "Plugin config (tai/config.txt) changed "
+                    "since this snapshot - it can't be loaded", -1, 1);
       } else if ((pressed & SCE_CTRL_SQUARE) && used && outdated) {
         set_message(MV_MESSAGE, "The game was updated since this snapshot "
                     "- it can't be loaded", -1, 1);
@@ -562,6 +566,7 @@ static void refresh_slots(void) {
                          sizeof(s->installed_ver)) < 0)
         s->installed_ver[0] = '\0';
       s->outdated = !app_versions_match(s->app_ver, s->installed_ver);
+      s->config_changed = !config_matches(&info, NULL);
     }
     model_end();
   }
@@ -773,6 +778,18 @@ static void do_save(int slot) {
     return;
   }
 
+  /* the plugin configuration the snapshot is taken with */
+  config_fingerprint(g_pending_info.cfg_state, g_pending_info.cfg_md5);
+  for (int i = 0; i < JV_CFG_FILES; i++) {
+    if (g_pending_info.cfg_state[i] == JV_CFG_UNREADABLE) {
+      static char err[96];
+      snprintf(err, sizeof(err), "Cannot save: %s could not be read",
+               jv_cfg_paths[i]);
+      set_message(MV_MESSAGE, err, -1, 1);
+      return;
+    }
+  }
+
   SceDateTime t;
   memset(&t, 0, sizeof(t));
   ksceRtcGetCurrentClockLocalTime(&t);
@@ -824,6 +841,17 @@ static void do_load(int slot) {
       snprintf(msg, sizeof(msg), "Game version changed (v%.7s -> v%s) - "
                "this snapshot can't be loaded", info.app_ver,
                installed[0] ? installed : "?");
+      set_message(MV_MESSAGE, msg, -1, 1);
+      return;
+    }
+  }
+
+  /* only with the plugin configuration the snapshot was taken with */
+  {
+    int which = 0;
+    if (!config_matches(&info, &which)) {
+      snprintf(msg, sizeof(msg), "%s changed since this snapshot - it "
+               "can't be loaded", jv_cfg_paths[which]);
       set_message(MV_MESSAGE, msg, -1, 1);
       return;
     }

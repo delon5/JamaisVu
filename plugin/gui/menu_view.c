@@ -335,7 +335,8 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
         labels[n] = "Prepare"; icons[n] = ICON_CROSS; n++;
       }
       if (m->can_load && m->slots[m->selected].used &&
-          !m->slots[m->selected].outdated) {
+          !m->slots[m->selected].outdated &&
+          !m->slots[m->selected].config_changed) {
         labels[n] = "Load"; icons[n] = ICON_SQUARE; n++;
       }
       if (!m->can_save && m->prepare_count > 1) {
@@ -379,7 +380,10 @@ static void draw_details(Canvas *c, const MenuModel *m) {
       if (s->used) {
         char info[96];
         info[0] = '\0';
-        if (s->outdated) {
+        if (s->config_changed) {
+          sappend(info, sizeof(info), "Plugin config (tai/config.txt) "
+                  "changed - this snapshot can't be loaded");
+        } else if (s->outdated) {
           sappend(info, sizeof(info), "Game updated: v");
           sappend(info, sizeof(info), s->app_ver);
           sappend(info, sizeof(info), " -> v");
@@ -401,7 +405,9 @@ static void draw_details(Canvas *c, const MenuModel *m) {
                          s->title[0] ? s->title : s->titleid, C_TEXT,
                          MENU_W - 48);
         cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y, info,
-                         s->outdated ? C_ERROR : C_TEXT_DIM, MENU_W - 48);
+                         s->outdated || s->config_changed ? C_ERROR
+                                                          : C_TEXT_DIM,
+                         MENU_W - 48);
       } else if (s->locked) {
         cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y,
                          "Not enough free space", C_TEXT_DIM, MENU_W - 48);

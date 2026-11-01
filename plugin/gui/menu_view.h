@@ -41,6 +41,7 @@ typedef struct {
   char app_ver[8];        /* game version of the snapshot, e.g. "01.02" */
   char installed_ver[8];  /* game version installed now ("" = unknown) */
   int outdated;           /* versions differ: the slot cannot be loaded */
+  int config_changed;     /* tai/config.txt differs: cannot be loaded */
   const uint32_t *thumb;  /* JV_THUMB_W * JV_THUMB_H pixels, or NULL */
 } MenuSlot;
 

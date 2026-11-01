@@ -65,7 +65,7 @@ objcopy --redefine-syms="$SO/rename.txt" "$SO/ff_os.o"
 objcopy --redefine-syms="$SO/rename.txt" "$SO/ffuni_os.o"
 for src in "$ROOT/plugin/storage.c" "$ROOT/plugin/slots.c" \
            "$ROOT/plugin/slot_policy.c" "$ROOT/payload/crc32.c" \
-           "$ROOT/plugin/trace.c" \
+           "$ROOT/plugin/trace.c" "$ROOT/plugin/md5.c" \
            "$ROOT/tests/host/fake_kernel.c" "$ROOT/tests/host/test_storage.c"; do
   gcc $CF $SZ -c -I"$ROOT/tests/host/fake_sdk" -I"$ROOT/tests/host" \
     -I"$ROOT/plugin" -I"$WORK/fatfs" -o "$SO/$(basename "$src" .c).o" "$src"
@@ -75,7 +75,8 @@ echo "=== plugin storage (Memory Card only, read-only detection, versions) ==="
 mkdir -p "$WORK/img/storage"
 truncate -s 64M "$WORK/img/storage/card.img"
 mkfs.exfat -q -c 32K "$WORK/img/storage/card.img" >/dev/null
-"$WORK/test_storage" "$WORK/img/storage/card.img" "$WORK/img/storage" || rc=1
+JV_CFG_MD5=$(printf '*KERNEL\nux0:tai/JamaisVu.skprx\n' | md5sum | cut -d' ' -f1) \
+  "$WORK/test_storage" "$WORK/img/storage/card.img" "$WORK/img/storage" || rc=1
 echo
 
 gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_slot_policy" \

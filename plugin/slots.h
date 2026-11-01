@@ -34,7 +34,12 @@ int64_t slot_file_size(const char *path); /* -1 if missing */
 #include "slot_policy.h"
 
 #define SLOT_INFO_MAGIC   0x4956534a /* "JSVI" */
-#define SLOT_INFO_VERSION 2
+#define SLOT_INFO_VERSION 3
+
+#define JV_CFG_FILES 2
+#define JV_CFG_ABSENT     0 /* the file does not exist */
+#define JV_CFG_PRESENT    1 /* md5 is valid */
+#define JV_CFG_UNREADABLE 2 /* exists but could not be read (or too big) */
 
 typedef struct {
   uint32_t magic;
@@ -46,6 +51,11 @@ typedef struct {
   uint32_t thumb_w, thumb_h;
   uint32_t has_thumb;
   char app_ver[8];    /* game version when the snapshot was taken */
+  /* taiHEN plugin configuration when the snapshot was taken (see
+   * config_fingerprint): ux0:tai/config.txt and ur0:tai/config.txt */
+  uint8_t cfg_state[JV_CFG_FILES];
+  uint8_t cfg_pad[4 - JV_CFG_FILES];
+  uint8_t cfg_md5[JV_CFG_FILES][16];
   uint32_t crc; /* crc32 of this struct up to crc, then the thumbnail */
 } SlotInfo;
 
@@ -85,6 +95,16 @@ void lookup_title(const char *titleid, char *out, int len);
 /* Installed game version (param.sfo APP_VER of the update if one is
  * installed, else of the game). 0 on success, < 0 if it cannot be read. */
 int lookup_app_ver(const char *titleid, char *out, int len);
+
+/* MD5 of ux0:tai/config.txt and ur0:tai/config.txt (read-only). A snapshot
+ * holds every plugin that was loaded; it may only be loaded again with the
+ * same plugin configuration. */
+extern const char *const jv_cfg_paths[JV_CFG_FILES];
+void config_fingerprint(uint8_t state[JV_CFG_FILES],
+                        uint8_t md5[JV_CFG_FILES][16]);
+/* 1 if the current configuration equals the one stored in info; else 0
+ * and *which is the index of the first file that differs. */
+int config_matches(const SlotInfo *info, int *which);
 
 int slots_mkdirs(void);    /* data/JamaisVu on the Memory Card */
 
