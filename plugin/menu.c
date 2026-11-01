@@ -41,6 +41,7 @@ static SceUID g_evf = -1;
 static SceUID g_mtx = -1;
 static volatile int g_op, g_op_slot;
 static volatile int g_busy;
+static volatile int g_cancel_req; /* ○ while preparing a slot */
 
 /* Memory for the overlay: panel, toast, thumbnails, one framebuffer row */
 static SceUID g_mem_blk = -1;
@@ -595,7 +596,6 @@ static SlotInfo g_pending_info;
 static int g_progress_slot;
 
 static const char *g_progress_note = " (first use only)";
-static volatile int g_cancel_req;
 
 /* Progress of a slot being prepared; ○ cancels (see handle_buttons). */
 static int prepare_progress(int pct) {
