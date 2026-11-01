@@ -33,7 +33,12 @@ jobs:
         run: |
           mkdir -p build && cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release
-          make -j"$(nproc)"
+          # on a failure, show the plugin's segments (vita-elf-create needs
+          # room for its SCE data between segment 0 and segment 1)
+          make -j"$(nproc)" || {
+            "$VITASDK/bin/arm-vita-eabi-readelf" -lSW JamaisVu || true
+            exit 1
+          }
 
       - name: Payload ARM/Thumb interworking
         run: |
