@@ -208,12 +208,43 @@ static const char *g_status_text;
  * cache lines. */
 static int (*g_dcache_clean_inv)(void *addr, unsigned int size);
 
-static void fb_cache_sync(void *addr, unsigned int size) {
+/* What the game hands to the display while JamaisVu draws on it, for
+ * log.txt (menu distortion in Dead Nation: blocks of the game showing
+ * through the menu - cache, or the game writing into a shown frame?) */
+static struct {
+  uint32_t frames, same_as_prev, copy_fail, cleans, sync_counts[3];
+  int clean_ret;
+  uint32_t w, h, pitch, nbases;
+  uintptr_t prev, bases[4];
+} g_fbd;
+
+static int fb_cache_sync(void *addr, unsigned int size) {
   if (!g_dcache_clean_inv || !size)
-    return;
+    return -1;
   uintptr_t a = (uintptr_t)addr & ~(uintptr_t)63;
   uintptr_t e = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
-  g_dcache_clean_inv((void *)a, e - a);
+  return g_dcache_clean_inv((void *)a, e - a);
+}
+
+static void fbd_frame(const SceDisplayFrameBuf *p, int sync) {
+  uintptr_t b = (uintptr_t)p->base;
+  g_fbd.frames++;
+  if (b == g_fbd.prev)
+    g_fbd.same_as_prev++;
+  g_fbd.prev = b;
+  uint32_t k;
+  for (k = 0; k < g_fbd.nbases && k < 4; k++)
+    if (g_fbd.bases[k] == b)
+      break;
+  if (k == g_fbd.nbases) {
+    if (k < 4)
+      g_fbd.bases[k] = b;
+    g_fbd.nbases++;
+  }
+  g_fbd.sync_counts[sync == 0 ? 0 : sync == 1 ? 1 : 2]++;
+  g_fbd.w = p->width;
+  g_fbd.h = p->height;
+  g_fbd.pitch = p->pitch;
 }
 
 static int64_t now_us(void) {
@@ -457,8 +488,10 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
        * ~9.5 ms per frame in Trails (log.txt, compose-build). */
       uint32_t t1 = prof_now();
       t_build += t1 - t;
-      if (jv_copy_to_user(dst, src, fw * 4) < 0)
+      if (jv_copy_to_user(dst, src, fw * 4) < 0) {
+        g_fbd.copy_fail++;
         return;
+      }
       t_write += prof_now() - t1;
       continue;
     } else {
@@ -467,14 +500,17 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
     }
     uint32_t t1 = prof_now();
     t_build += t1 - t;
-    if (jv_copy_to_user(dst, g_rowbuf, fw * 4) < 0)
+    if (jv_copy_to_user(dst, g_rowbuf, fw * 4) < 0) {
+      g_fbd.copy_fail++;
       return;
+    }
     t_write += prof_now() - t1;
   }
   /* one cache clean for the whole area (was two per row) */
   t = prof_now();
   uint32_t *first = (uint32_t *)p->base + fy0 * p->pitch + fx0;
-  fb_cache_sync(first, ((fh - 1) * p->pitch + fw) * 4);
+  g_fbd.clean_ret = fb_cache_sync(first, ((fh - 1) * p->pitch + fw) * 4);
+  g_fbd.cleans++;
   prof_add(PROF_C_SYNC, t);
   prof_add_us(PROF_C_READ, t_read);
   prof_add_us(PROF_C_BUILD, t_build);
@@ -642,8 +678,11 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
     if (g_overlay_ready) { /* re-check: a release may have started */
       if (g_capture_req)
         capture(p);
-      if (g_menu_open || now_us() < g_toast_until)
+      if (g_menu_open || now_us() < g_toast_until) {
+        if (g_menu_open)
+          fbd_frame(p, sync);
         draw_overlays(p);
+      }
     }
     __sync_fetch_and_sub(&g_overlay_users, 1);
   }
@@ -768,6 +807,25 @@ static void perf_report(void) {
   snprintf(line + n, sizeof(line) - n, "\r\n");
   g_perf_since = now;
   log_queue(line);
+
+  if (g_fbd.frames) {
+    snprintf(line, sizeof(line),
+             "    frames with the menu: %u, %ux%u pitch %u, buffers %u "
+             "(%08X %08X %08X %08X), same buffer twice in a row %u, sync "
+             "immediate/next-frame/other %u/%u/%u; cache clean %s, last "
+             "result 0x%08X (%u); copy failures %u\r\n",
+             (unsigned)g_fbd.frames, (unsigned)g_fbd.w, (unsigned)g_fbd.h,
+             (unsigned)g_fbd.pitch, (unsigned)g_fbd.nbases,
+             (unsigned)g_fbd.bases[0], (unsigned)g_fbd.bases[1],
+             (unsigned)g_fbd.bases[2], (unsigned)g_fbd.bases[3],
+             (unsigned)g_fbd.same_as_prev, (unsigned)g_fbd.sync_counts[0],
+             (unsigned)g_fbd.sync_counts[1], (unsigned)g_fbd.sync_counts[2],
+             g_dcache_clean_inv ? "resolved" : "MISSING",
+             (unsigned)g_fbd.clean_ret, (unsigned)g_fbd.cleans,
+             (unsigned)g_fbd.copy_fail);
+    log_queue(line);
+    memset(&g_fbd, 0, sizeof(g_fbd));
+  }
 }
 
 static int open_menu(void) {
@@ -799,6 +857,8 @@ static int open_menu(void) {
 }
 
 static void close_menu(void) {
+  if (g_menu_open)
+    perf_report(); /* this menu session's numbers, frames included */
   g_menu_open = 0;
   g_capture_req = 0;
   g_block_input_until = now_us() + 300000;
