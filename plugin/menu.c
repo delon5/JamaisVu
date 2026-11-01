@@ -356,9 +356,15 @@ static void confirm_prepare(int all) {
   set_message(MV_CONFIRM_PREPARE, "", -1, 0);
 }
 
+/* Menu combo: START + UP (SELECT + UP clashed with another plugin). Inside
+ * the menu, SELECT opens Diagnostics, so that pressing START to close the
+ * menu never triggers anything. */
+#define JV_COMBO_BUTTON SCE_CTRL_START
+#define JV_DIAG_BUTTON  SCE_CTRL_SELECT
+
 static void handle_buttons(uint32_t held, uint32_t pressed) {
-  int combo = (held & SCE_CTRL_SELECT) && (held & SCE_CTRL_UP) &&
-              (pressed & (SCE_CTRL_SELECT | SCE_CTRL_UP));
+  int combo = (held & JV_COMBO_BUTTON) && (held & SCE_CTRL_UP) &&
+              (pressed & (JV_COMBO_BUTTON | SCE_CTRL_UP));
 
   if (!g_menu_open) {
     if (!combo)
@@ -434,7 +440,7 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
                     "- it can't be loaded", -1, 1);
       } else if ((pressed & SCE_CTRL_SQUARE) && used) {
         set_message(MV_CONFIRM_LOAD, "", -1, 0);
-      } else if (pressed & SCE_CTRL_START) {
+      } else if (pressed & JV_DIAG_BUTTON) {
         set_message(MV_DIAG, "", -1, 0);
       } else if (pressed & SCE_CTRL_CIRCLE) {
         close_menu();

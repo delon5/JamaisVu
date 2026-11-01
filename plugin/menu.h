@@ -1,6 +1,6 @@
 /* JamaisVu savestate plugin
  *
- * In-game slot menu (SELECT + UP): input, overlay drawing, and the worker
+ * In-game slot menu (START + UP): input, overlay drawing, and the worker
  * thread that prepares slots and starts save/load.
  *
  * This software may be modified and distributed under the terms

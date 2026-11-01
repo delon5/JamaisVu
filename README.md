@@ -14,7 +14,7 @@
 | 3.67, 3.68, 3.69–3.73 | Offsets present but **unverified**. Disabled unless built with `-DJAMAISVU_ALLOW_UNVERIFIED_FW=ON` |
 | 3.60 | **Testing build only** (`JamaisVu-testing.skprx`): offsets checked against a dump of a retail 3.60 console ([details](docs/porting-3.60.md)), not yet tested on hardware |
 
-On any firmware without a verified offset table, the plugin installs no filesystem hooks and changes nothing. SELECT + UP still opens the menu in **preview mode**, so the interface can be tried, but Save and Load explain why they are unavailable. `ux0:data/JamaisVu/status.txt` records the reason and the module NIDs it found. To help add 3.60, run the read-only [jvdump](tools/jvdump/README.md) plugin once and share its output.
+On any firmware without a verified offset table, the plugin installs no filesystem hooks and changes nothing. START + UP still opens the menu in **preview mode**, so the interface can be tried, but Save and Load explain why they are unavailable. `ux0:data/JamaisVu/status.txt` records the reason and the module NIDs it found. To help add 3.60, run the read-only [jvdump](tools/jvdump/README.md) plugin once and share its output.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ On any firmware without a verified offset table, the plugin installs no filesyst
 
 ## Usage
 
-Press **SELECT + UP** to open the slot menu. The game keeps running underneath but no longer receives input.
+Press **START + UP** to open the slot menu (and again to close it). The game keeps running underneath but no longer receives input. Tip: hold **UP first, then press START**, so the game never sees START on its own (many games pause on START).
 
 | Button | Action |
 | --- | --- |
@@ -47,7 +47,7 @@ Press **SELECT + UP** to open the slot menu. The game keeps running underneath b
 | ○ | Close |
 | ✕ (LiveArea, empty slot) | Prepare the selected slot now |
 | △ (LiveArea) | Prepare all empty slots there is space for |
-| START | Diagnostics (reset test / dry run) |
+| SELECT | Diagnostics (reset test / dry run) |
 
 Each slot shows a thumbnail of the game screen at the moment you saved, the game's name, its title ID, its version and the date.
 
