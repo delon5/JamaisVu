@@ -43,11 +43,43 @@
 static int g_clocks[4];
 static int g_clocks_valid;
 
+/* ScePowerForDriver (0x1590166F), resolved by NID as PSV-Shell-Plus does
+ * (not all of these are in the SDK headers). The GPU clock is the "ES4"
+ * pair (both values set to the same frequency). */
+static int (*p_get_arm)(void), (*p_get_bus)(void), (*p_get_xbar)(void);
+static int (*p_get_gpu)(int *a, int *b);
+static int (*p_set_arm)(int), (*p_set_bus)(int), (*p_set_xbar)(int);
+static int (*p_set_gpu)(int a, int b);
+
+static void clocks_resolve(void) {
+  static int done;
+  if (done)
+    return;
+  done = 1;
+#define RES(var, nid) \
+  if (module_get_export_func(KERNEL_PID, "ScePower", 0x1590166F, nid, \
+                             (uintptr_t *)&var) < 0) \
+    var = NULL
+  RES(p_get_arm, 0xABC6F88F);
+  RES(p_get_bus, 0x478FE6F5);
+  RES(p_get_gpu, 0x475BCC82);
+  RES(p_get_xbar, 0x0A750DEE);
+  RES(p_set_arm, 0x74DB5AE5);
+  RES(p_set_bus, 0xB8D7B3FB);
+  RES(p_set_gpu, 0x264C24FC);
+  RES(p_set_xbar, 0xA7739DBE);
+#undef RES
+}
+
 static void clocks_read(int c[4]) {
-  c[0] = kscePowerGetArmClockFrequency();
-  c[1] = kscePowerGetBusClockFrequency();
-  c[2] = kscePowerGetGpuClockFrequency();
-  c[3] = kscePowerGetGpuXbarClockFrequency();
+  int a = 0, b = 0;
+  clocks_resolve();
+  c[0] = p_get_arm ? p_get_arm() : 0;
+  c[1] = p_get_bus ? p_get_bus() : 0;
+  if (p_get_gpu)
+    p_get_gpu(&a, &b);
+  c[2] = a;
+  c[3] = p_get_xbar ? p_get_xbar() : 0;
 }
 
 static void clocks_fmt(char *out, int len, const int c[4]) {
@@ -70,14 +102,14 @@ void jv_clocks_restore(char *out, int len) {
     snprintf(out, len, "clocks now %s (none recorded)", a);
     return;
   }
-  if (now[0] != g_clocks[0] && g_clocks[0] > 0)
-    kscePowerSetArmClockFrequency(g_clocks[0]);
-  if (now[1] != g_clocks[1] && g_clocks[1] > 0)
-    kscePowerSetBusClockFrequency(g_clocks[1]);
-  if (now[2] != g_clocks[2] && g_clocks[2] > 0)
-    kscePowerSetGpuClockFrequency(g_clocks[2]);
-  if (now[3] != g_clocks[3] && g_clocks[3] > 0)
-    kscePowerSetGpuXbarClockFrequency(g_clocks[3]);
+  if (now[0] != g_clocks[0] && g_clocks[0] > 0 && p_set_arm)
+    p_set_arm(g_clocks[0]);
+  if (now[1] != g_clocks[1] && g_clocks[1] > 0 && p_set_bus)
+    p_set_bus(g_clocks[1]);
+  if (now[2] != g_clocks[2] && g_clocks[2] > 0 && p_set_gpu)
+    p_set_gpu(g_clocks[2], g_clocks[2]);
+  if (now[3] != g_clocks[3] && g_clocks[3] > 0 && p_set_xbar)
+    p_set_xbar(g_clocks[3]);
   clocks_read(after);
   clocks_fmt(b, sizeof(b), g_clocks);
   clocks_fmt(c, sizeof(c), after);
