@@ -52,6 +52,7 @@ volatile uint32_t g_ignore_writedevice = FS_WRITES_ALLOWED;
 static tai_hook_ref_t UVFAT_WriteDevice_Ref;
 static SceUID g_write_hook = -1;
 static SceUID g_mgmt_patch = -1;
+static SceUID g_exfat_modid = -1;
 
 #define SCE_ERROR_ERRNO_EROFS 0x8001001E
 
@@ -198,10 +199,36 @@ static void remount_filesystems(void) {
   }
 }
 
+/* The 2-NOP patch in UVFAT_ReadManagementArea lets UVFAT_Mount re-read
+ * the management area on a remount. It is only applied around the remount
+ * after a load: as a permanent patch (the original did that) it changed
+ * the driver for everything else too, and games doing many file lookups
+ * (e.g. through rePatch) became very slow on 3.60. */
+static int mgmt_patch_apply(void) {
+  uint32_t nop_nop_opcode = 0xbf00bf00;
+  if (g_exfat_modid < 0)
+    return -1;
+  g_mgmt_patch = taiInjectDataForKernel(KERNEL_PID, g_exfat_modid, 0,
+                                        g_off->exfat_read_mgmt_patch,
+                                        &nop_nop_opcode, 4);
+  return g_mgmt_patch < 0 ? -1 : 0;
+}
+
+static void mgmt_patch_remove(void) {
+  if (g_mgmt_patch >= 0)
+    taiInjectReleaseForKernel(g_mgmt_patch);
+  g_mgmt_patch = -1;
+}
+
 int update_filesystem(void) {
   invalidate_buff_caches();
   invalidate_file_caches();
+  if (mgmt_patch_apply() < 0) {
+    /* cannot remount safely: keep the card read-only until restart */
+    return 1;
+  }
   remount_filesystems();
+  mgmt_patch_remove();
   int stale_open = update_vnodes();
   update_fnodes();
   return stale_open;
@@ -289,16 +316,17 @@ int fs_init(const FwOffsets *o) {
   if (g_write_hook < 0)
     return -1;
 
-  // Allow UVFAT_ReadManagementArea
-  uint32_t nop_nop_opcode = 0xbf00bf00;
-  g_mgmt_patch = taiInjectDataForKernel(KERNEL_PID, ex_info.modid, 0,
-                                        o->exfat_read_mgmt_patch,
-                                        &nop_nop_opcode, 4);
-  if (g_mgmt_patch < 0) {
+  /* The UVFAT_ReadManagementArea patch is only applied during a remount
+   * (mgmt_patch_apply). Check here that it can be applied, then remove it
+   * again, so an unsuitable driver is refused at startup as before. */
+  g_exfat_modid = ex_info.modid;
+  if (mgmt_patch_apply() < 0) {
     taiHookReleaseForKernel(g_write_hook, UVFAT_WriteDevice_Ref);
     g_write_hook = -1;
+    g_exfat_modid = -1;
     return -1;
   }
+  mgmt_patch_remove();
 
   return 0;
 }
