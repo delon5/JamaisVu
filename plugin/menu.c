@@ -1833,8 +1833,9 @@ static void do_test(int kind, int slot, int variant) {
       log_append(tr);
     }
     if (why[0]) {
-      log_append(why);
-      log_append("\r\n");
+      static char line2[144];
+      snprintf(line2, sizeof(line2), "%s\r\n", why); /* one log line */
+      log_append(line2);
       set_message(MV_MESSAGE, why, -1, 1);
       return;
     }
