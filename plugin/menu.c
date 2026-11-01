@@ -24,6 +24,7 @@
 #include "storage.h"
 #include "trace.h"
 #include "remap.h"
+#include "prof.h"
 #include "gui/menu_view.h"
 
 int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
@@ -156,6 +157,12 @@ static void fb_cache_sync(void *addr, unsigned int size) {
 
 static int64_t now_us(void) {
   return ksceKernelGetSystemTimeWide();
+}
+
+volatile JvProfStat g_prof[PROF_N];
+
+uint32_t prof_now(void) {
+  return (uint32_t)ksceKernelGetSystemTimeWide();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -392,6 +399,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
 
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
+  uint32_t t0 = prof_now();
   if (g_overlay_ready && p && p->base && p->pixelformat == 0 &&
       p->width >= 480 && p->width <= 960 && p->height >= 272 &&
       p->height <= 544 && p->pitch >= p->width) {
@@ -405,6 +413,7 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
     }
     __sync_fetch_and_sub(&g_overlay_users, 1);
   }
+  prof_add(PROF_DISPLAY, t0);
 
   return TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
 }
@@ -454,8 +463,13 @@ static SceUID g_ctrl_hooks[N_CTRL_HOOKS];
 
 #define DEFINE_CTRL_HOOK(idx, nid, neg)                                   \
   static int ctrl_hook_##idx(int port, SceCtrlData *pad, int count) {     \
+    uint32_t t0 = prof_now();                                             \
     int ret = TAI_CONTINUE(int, g_ctrl_refs[idx], port, pad, count);      \
-    return mask_input(pad, ret, neg);                                     \
+    uint32_t t1 = prof_now();                                             \
+    ret = mask_input(pad, ret, neg);                                      \
+    prof_add(PROF_CTRL, t1);                                              \
+    prof_add(PROF_CTRL_TOTAL, t0);                                        \
+    return ret;                                                           \
   }
 CTRL_HOOKS(DEFINE_CTRL_HOOK)
 
@@ -478,8 +492,35 @@ static void start_op(int op, int slot) {
   ksceKernelSetEventFlag(g_evf, EVF_WORK);
 }
 
+/* Diagnostics: counts and own time of everything JamaisVu runs during
+ * gameplay, since the previous report; written when the menu opens. */
+static void perf_report(void) {
+  static JvProfStat last[PROF_N];
+  static uint32_t last_t;
+  static char line[320];
+  static const char *const names[PROF_N] = {
+    "display", "ctrl", "ctrl-incl-original", "syscon", "exfat-write", "input"
+  };
+  uint32_t now = prof_now();
+  uint32_t secs = last_t ? (now - last_t) / 1000000 : 0;
+  int n = snprintf(line, sizeof(line), "perf over %u s (calls / ms of "
+                   "JamaisVu's own time):", (unsigned)secs);
+  for (int i = 0; i < PROF_N && n < (int)sizeof(line) - 48; i++) {
+    uint32_t c = g_prof[i].calls - last[i].calls;
+    uint32_t us = g_prof[i].us - last[i].us;
+    n += snprintf(line + n, sizeof(line) - n, " %s %u/%u", names[i],
+                  (unsigned)c, (unsigned)(us / 1000));
+    last[i].calls = g_prof[i].calls;
+    last[i].us = g_prof[i].us;
+  }
+  snprintf(line + n, sizeof(line) - n, "\r\n");
+  last_t = now;
+  log_append(line);
+}
+
 static int open_menu(void) {
   static int warned;
+  perf_report();
   if (overlay_acquire() < 0) {
     /* like reVita's "Buy more RAM": refuse rather than take memory the
      * system needs; noted once per boot */
@@ -667,6 +708,7 @@ static int input_thread(SceSize args, void *argp) {
 
   while (1) {
     ksceKernelDelayThread(16 * 1000);
+    uint32_t t0 = prof_now();
 
     memset(&pad, 0, sizeof(pad));
     if (ksceCtrlPeekBufferPositive(0, &pad, 1) < 0)
@@ -691,6 +733,7 @@ static int input_thread(SceSize args, void *argp) {
 
     uint32_t pressed = pad.buttons & ~prev;
     prev = pad.buttons;
+    prof_add(PROF_INPUT, t0); /* the poll itself, not the menu actions */
     if (pressed)
       handle_buttons(pad.buttons, pressed);
   }

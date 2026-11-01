@@ -16,6 +16,7 @@
 
 #include "main.h"
 #include "fs.h"
+#include "prof.h"
 
 int ksceVopInactive(void *vp);
 /* Resolved at runtime: its stub name differs between VitaSDK versions
@@ -237,6 +238,7 @@ int update_filesystem(void) {
 static int UVFAT_WriteDevice_Patched(void *fileSystem, int unused,
                                      uint64_t sector, int size, void *buf) {
   uint32_t mode = g_ignore_writedevice;
+  prof_add(PROF_WRITE, prof_now());
 
   if (mode == FS_WRITES_DROPPED)
     return 0; /* restored OS before remount: stale caches, discard */

@@ -28,6 +28,7 @@
 #include "offsets.h"
 #include "slots.h"
 #include "menu.h"
+#include "prof.h"
 #include "storage.h"
 
 #define JV_VERSION "2.0-dev"
@@ -281,6 +282,7 @@ static void get_fattime(void) {
 
 static int ksceSysconSendCommandPatched(int cmd, void *buffer, uint32_t size) {
   SceSysconResumeContext *resume_ctx;
+  uint32_t t0 = prof_now();
 
   if (pargs.mode != JAMAISVU_MODE_NONE) {
     if (cmd == SCE_SYSCON_CMD_RESET_DEVICE && size == sizeof(uintptr_t)) {
@@ -292,6 +294,7 @@ static int ksceSysconSendCommandPatched(int cmd, void *buffer, uint32_t size) {
     }
   }
 
+  prof_add(PROF_SYSCON, t0);
   return TAI_CONTINUE(int, ksceSysconSendCommandRef, cmd, buffer, size);
 }
 
