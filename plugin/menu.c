@@ -1134,8 +1134,10 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
       else if (pressed & SCE_CTRL_SQUARE)
         start_op(OP_TEST_DRY, sel);
       else if (pressed & SCE_CTRL_TRIANGLE) {
-        /* L held: display timing B (A/B test of the screen edges) */
-        g_disp_vic = (held & SCE_CTRL_LTRIGGER) ? 0x20 : 0;
+        /* PCH-2000 LCD: timing B (vic 0x20). A/B on hardware: timing A
+         * (vic 0, libbaremetal's choice, the OLED timing) left garbage
+         * along the screen edges, B is clean. L + triangle still runs A. */
+        g_disp_vic = (held & SCE_CTRL_LTRIGGER) ? 0 : 0x20;
         start_op(OP_TEST_DISPLAY, sel);
       }
       else if (pressed & SCE_CTRL_CIRCLE)

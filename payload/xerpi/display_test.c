@@ -135,7 +135,9 @@ static void plane_setup(uint32_t paddr) {
 int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
                     uint32_t (*now_us)(void)) {
 	uint32_t pixelclock = 0;
-	uint32_t vic = a->vic == 0x20 ? 0x20 : 0; /* nothing else */
+	/* 0x20 for the PCH-2000 LCD (clean on hardware; 0 = the OLED timing
+	 * libbaremetal used, garbage along the edges); nothing else */
+	uint32_t vic = a->vic == 0x20 ? 0x20 : 0;
 
 	/* only what the test was written for: a 960x544 frame in CDRAM or
 	 * main memory, as the plugin checked */
