@@ -507,12 +507,24 @@ static int sfo_get_title(const char *path, char *out, int len) {
 static const char *const k_sfo_roots[] = { "ux0:patch", "ux0:app", "gro0:app",
                                            "ur0:app" };
 
+/* Game names: ux0:appmeta first - that copy is what people edit to give a
+ * game an English name (it is only read, like the others). Versions never
+ * come from there (lookup_app_ver uses k_sfo_roots only). */
+static const char *const k_title_paths[] = {
+  "ux0:appmeta/%s/param.sfo",
+  "ux0:appmeta/%s/sce_sys/param.sfo",
+  "ux0:patch/%s/sce_sys/param.sfo",
+  "ux0:app/%s/sce_sys/param.sfo",
+  "gro0:app/%s/sce_sys/param.sfo",
+  "ur0:app/%s/sce_sys/param.sfo",
+};
+#define N_TITLE_PATHS (sizeof(k_title_paths) / sizeof(k_title_paths[0]))
+
 void lookup_title(const char *titleid, char *out, int len) {
   static char path[96];
 
-  for (size_t i = 0; i < sizeof(k_sfo_roots) / sizeof(k_sfo_roots[0]); i++) {
-    snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", k_sfo_roots[i],
-             titleid);
+  for (size_t i = 0; i < N_TITLE_PATHS; i++) {
+    snprintf(path, sizeof(path), k_title_paths[i], titleid);
     if (sfo_get_title(path, out, len) == 0)
       return;
   }
@@ -526,9 +538,8 @@ int lookup_title_utf8(const char *titleid, char *out, int len) {
   static char path[96];
   uint32_t vlen;
 
-  for (size_t i = 0; i < sizeof(k_sfo_roots) / sizeof(k_sfo_roots[0]); i++) {
-    snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", k_sfo_roots[i],
-             titleid);
+  for (size_t i = 0; i < N_TITLE_PATHS; i++) {
+    snprintf(path, sizeof(path), k_title_paths[i], titleid);
     int n = sfo_read(path, g_sfo_buf, sizeof(g_sfo_buf));
     const uint8_t *p = sfo_find(g_sfo_buf, n, "TITLE", &vlen);
     if (!p)

@@ -458,6 +458,24 @@ static void test_versions(void) {
   CHECK(lookup_title_utf8("PCSE00000", title, sizeof(title)) < 0,
         "not installed -> no name");
 
+  /* a name edited in ux0:appmeta (e.g. Japanese -> English) wins, for
+   * the menu and for the name stored with a new slot; the version still
+   * comes from the game itself */
+  write_sfo("ux0:appmeta/PCSG01179/param.sfo", "Catherine Full Body",
+            "09.99");
+  CHECK(lookup_title_utf8("PCSG01179", title, sizeof(title)) == 0 &&
+        !strcmp(title, "Catherine Full Body"), "appmeta name: %s", title);
+  lookup_title("PCSG01179", title, sizeof(title));
+  CHECK(!strcmp(title, "Catherine Full Body"), "appmeta name stored: %s",
+        title);
+  CHECK(lookup_app_ver("PCSG01179", ver, sizeof(ver)) == 0 &&
+        !strcmp(ver, "01.03"), "version not from appmeta: %s", ver);
+  write_sfo("ux0:appmeta/PCSG00490/sce_sys/param.sfo", "Trails: Sky the 3rd",
+            "01.01");
+  CHECK(lookup_title_utf8("PCSG00490", title, sizeof(title)) == 0 &&
+        !strcmp(title, "Trails: Sky the 3rd"), "appmeta sce_sys name: %s",
+        title);
+
   write_sfo("ux0:patch/PCSE00123/sce_sys/param.sfo", "Test Game", "01.02");
   CHECK(lookup_app_ver("PCSE00123", ver, sizeof(ver)) == 0 &&
         !strcmp(ver, "01.02"), "installed update wins: %s", ver);
