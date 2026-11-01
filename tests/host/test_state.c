@@ -30,6 +30,47 @@
 #include "ms.h"
 #include "ff.h"
 
+/* Compatibility guard: snapshots saved by earlier builds (format 2) must
+ * still load after an update. If the format changes, keep a load path for
+ * version 2 and extend this check instead of just bumping the number. */
+_Static_assert(SAVESTATE_VERSION == 2,
+               "snapshot format changed: old slots must stay loadable");
+
+/* PayloadArguments is read after a load by the plugin build *inside the
+ * snapshot* (the restored memory), which may be older than the payload.
+ * Fields may only be appended; these offsets must never change. */
+#define JV_PIN(f, off) \
+  _Static_assert(offsetof(PayloadArguments, f) == (off), \
+                 "PayloadArguments." #f " moved: old snapshots would break")
+JV_PIN(mode, 0);
+JV_PIN(fattime, 4);
+JV_PIN(process_num, 8);
+JV_PIN(ttbs, 12);
+JV_PIN(titleid, 144);
+JV_PIN(rtc_ctx, 1168);
+JV_PIN(path, 1616);
+JV_PIN(slot, 1872);
+JV_PIN(backup_savedata, 1876);
+JV_PIN(slot_size, 1880);
+JV_PIN(slot_nonce, 1884);
+JV_PIN(ignore_flag_paddr, 1900);
+JV_PIN(debug_mode, 1904);
+JV_PIN(result, 1908);
+JV_PIN(applied, 1912);
+JV_PIN(stage, 1916);
+JV_PIN(detail, 1920);
+JV_PIN(soc_timer_10ms, 1924);
+JV_PIN(trace_n, 1928);
+JV_PIN(trace_stage, 1932);
+JV_PIN(trace_ms, 1956);
+JV_PIN(fault_type, 2052);
+JV_PIN(fault_addr, 2056);
+JV_PIN(fault_lr, 2060);
+JV_PIN(trace_rel_lba, 2064);
+JV_PIN(trace_nonce, 2068);
+_Static_assert(sizeof(PayloadArguments) >= 2084,
+               "PayloadArguments shrank: old snapshots would break");
+
 /* ------------------------------------------------------------------------ */
 /* Fake hardware                                                            */
 /* ------------------------------------------------------------------------ */

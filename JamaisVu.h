@@ -214,9 +214,13 @@ typedef struct {
 } SaveStateHeader;
 
 #define SAVESTATE_MAGIC   0x54535653
-/* Bump whenever the file format, PayloadArguments or the plugin's
- * resume handling changes: a restored memory image contains the plugin
- * build that made the snapshot, and it must agree with the payload. */
+/* Snapshot format. Snapshots must keep loading after a plugin update:
+ * changing this requires the load path to still accept every older
+ * version (tests/host/test_state.c fails the build otherwise).
+ * A restored memory image also contains the plugin build that made the
+ * snapshot, and that old plugin reads PayloadArguments after the load:
+ * PayloadArguments is append-only (existing fields never move or change
+ * meaning; the layout is pinned in tests/host/test_state.c). */
 #define SAVESTATE_VERSION 2
 
 #define SAVESTATE_MEDIAID_OFFSET 0x200
