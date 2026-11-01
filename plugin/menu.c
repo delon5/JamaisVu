@@ -238,15 +238,46 @@ static volatile uint32_t g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h;
 static volatile uint32_t g_fb_va, g_fb_pa0, g_fb_bad_off;
 static volatile int g_fb_game; /* recorded from a game's frame */
 
-static uint32_t user_va2pa(uintptr_t va) {
+/* Four ways to translate a game address, tried in order; the log shows
+ * each one's raw result (on hardware the CPU translation alone failed for
+ * 0x62320000 in 1001 Spikes, even with the domains open). */
+static int (*g_va2pa_hw)(const void *va, uintptr_t *pa); /* VAtoPA */
+static int (*g_va2pa_sw)(const void *va, void **pa);      /* VAtoPABySW */
+static volatile uint32_t g_fb_par_priv, g_fb_par_user;
+static volatile int32_t g_fb_hw_ret, g_fb_sw_ret;
+static volatile uint32_t g_fb_hw_pa, g_fb_sw_pa;
+static volatile int g_fb_method; /* 0 none, 1-4 as below */
+
+/* CPU translation (ATS1CPR / ATS1CUR); returns the raw PAR */
+static uint32_t ats(uintptr_t va, int user) {
   uint32_t par;
-  __asm__ volatile("mcr p15, 0, %1, c7, c8, 0\n\t"
-                   "isb\n\t"
-                   "mrc p15, 0, %0, c7, c4, 0\n\t"
-                   : "=r"(par) : "r"(va));
-  if (par & 1)
-    return 0;
-  return (par & 0xfffff000) | (va & 0xfff);
+  if (user)
+    __asm__ volatile("mcr p15, 0, %0, c7, c8, 2\n\tisb" :: "r"(va));
+  else
+    __asm__ volatile("mcr p15, 0, %0, c7, c8, 0\n\tisb" :: "r"(va));
+  __asm__ volatile("mrc p15, 0, %0, c7, c4, 0" : "=r"(par));
+  return par;
+}
+
+static uint32_t par_to_pa(uint32_t par, uintptr_t va) {
+  return (par & 1) ? 0 : ((par & 0xfffff000) | (va & 0xfff));
+}
+
+/* physical address of va by method m, 0 if it fails; methods 1-2 need the
+ * domains open (see record_frame) */
+static uint32_t translate(int m, uintptr_t va) {
+  if (m == 1 || m == 2)
+    return par_to_pa(ats(va, m == 2), va);
+  if (m == 3 && g_va2pa_hw) {
+    uintptr_t pa = 0;
+    return g_va2pa_hw((const void *)va, &pa) >= 0 ? (uint32_t)pa : 0;
+  }
+  if (m == 4 && g_va2pa_sw) {
+    void *pa = NULL;
+    return g_va2pa_sw((const void *)va, &pa) >= 0 ? (uint32_t)(uintptr_t)pa
+                                                    : 0;
+  }
+  return 0;
 }
 
 static int valid_game_titleid(const char *tid);
@@ -254,40 +285,74 @@ static int valid_game_titleid(const char *tid);
 static void record_frame(const SceDisplayFrameBuf *p) {
   uintptr_t base = (uintptr_t)p->base;
   uint32_t size = p->pitch * p->height * 4;
-  /* The kernel normally runs with the user memory domain set to "no
-   * access" (it reaches game memory only through its copy functions), so
-   * a translation of a game address faults: 0x00000000 on hardware, in a
-   * game and in the LiveArea. Open the domains just for the translations
-   * (as PSV-Shell-Plus does around its framebuffer copies), with
-   * interrupts off so nothing else runs meanwhile, then restore. */
-  uint32_t dacr, cpsr, pa0;
+  uint32_t dacr, cpsr;
   char tid[32];
+
   memset(tid, 0, sizeof(tid));
   g_fb_game = ksceKernelGetProcessTitleId(ksceKernelGetProcessId(), tid,
                                           sizeof(tid)) >= 0 &&
               valid_game_titleid(tid);
-  /* no kernel calls from here until the domains are restored */
+  g_fb_pa = 0;
+  g_fb_va = base;
+  g_fb_pa0 = 0;
+  g_fb_bad_off = 0;
+  g_fb_method = 0;
+
+  /* CPU translations with the domains open (the kernel keeps the user
+   * domain at "no access"), interrupts off, no kernel calls meanwhile */
   __asm__ volatile("mrs %0, cpsr\n\tcpsid if" : "=r"(cpsr) :: "memory");
   __asm__ volatile("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
   __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(0xFFFF0000u)
                    : "memory");
-  pa0 = user_va2pa(base);
-  g_fb_pa = 0;
-  g_fb_va = base;
-  g_fb_pa0 = pa0;
-  g_fb_bad_off = 0;
-  if (pa0 != 0) {
-    uint32_t off;
-    for (off = 4096 - (base & 0xfff); off < size; off += 4096)
-      if (user_va2pa(base + off) != pa0 + off)
+  g_fb_par_priv = ats(base, 0);
+  g_fb_par_user = ats(base, 1);
+  __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(dacr) : "memory");
+  __asm__ volatile("msr cpsr_c, %0" :: "r"(cpsr) : "memory");
+
+  /* the kernel's own translations */
+  {
+    uintptr_t pa = 0;
+    void *spa = NULL;
+    g_fb_hw_ret = g_va2pa_hw ? g_va2pa_hw((const void *)base, &pa) : -1;
+    g_fb_hw_pa = (uint32_t)pa;
+    g_fb_sw_ret = g_va2pa_sw ? g_va2pa_sw((const void *)base, &spa) : -1;
+    g_fb_sw_pa = (uint32_t)(uintptr_t)spa;
+  }
+
+  int m = 0;
+  if (!(g_fb_par_priv & 1))
+    m = 1;
+  else if (!(g_fb_par_user & 1))
+    m = 2;
+  else if (g_fb_hw_ret >= 0 && g_fb_hw_pa)
+    m = 3;
+  else if (g_fb_sw_ret >= 0 && g_fb_sw_pa)
+    m = 4;
+  g_fb_method = m;
+
+  if (m) {
+    int open = m <= 2;
+    if (open) {
+      __asm__ volatile("mrs %0, cpsr\n\tcpsid if" : "=r"(cpsr) :: "memory");
+      __asm__ volatile("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
+      __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb"
+                       :: "r"(0xFFFF0000u) : "memory");
+    }
+    uint32_t pa0 = translate(m, base), off;
+    for (off = 4096 - (base & 0xfff); pa0 && off < size; off += 4096)
+      if (translate(m, base + off) != pa0 + off)
         break;
-    if (off >= size)
+    if (open) {
+      __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(dacr)
+                       : "memory");
+      __asm__ volatile("msr cpsr_c, %0" :: "r"(cpsr) : "memory");
+    }
+    g_fb_pa0 = pa0;
+    if (pa0 && off >= size)
       g_fb_pa = pa0;
     else
       g_fb_bad_off = off;
   }
-  __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(dacr) : "memory");
-  __asm__ volatile("msr cpsr_c, %0" :: "r"(cpsr) : "memory");
   g_fb_pitch = p->pitch;
   g_fb_w = p->width;
   g_fb_h = p->height;
@@ -1756,6 +1821,17 @@ static void do_test(int kind, int slot, int variant) {
              (g_fb_pa & 0xfff))
       snprintf(why, sizeof(why), "Display test: frame at an unexpected "
                "address (PA 0x%08X)", (unsigned)g_fb_pa);
+    if (g_fb_rec) {
+      static char tr[256];
+      snprintf(tr, sizeof(tr), "display test: frame VA 0x%08X: CPU priv PAR "
+               "0x%08X, CPU user PAR 0x%08X, VAtoPA %s 0x%08X/0x%08X, BySW "
+               "%s 0x%08X/0x%08X, used method %d\r\n", (unsigned)g_fb_va,
+               (unsigned)g_fb_par_priv, (unsigned)g_fb_par_user,
+               g_va2pa_hw ? "ret" : "missing", (unsigned)g_fb_hw_ret,
+               (unsigned)g_fb_hw_pa, g_va2pa_sw ? "ret" : "missing",
+               (unsigned)g_fb_sw_ret, (unsigned)g_fb_sw_pa, g_fb_method);
+      log_append(tr);
+    }
     if (why[0]) {
       log_append(why);
       log_append("\r\n");
@@ -2023,6 +2099,15 @@ int menu_init(const char *status_text) {
 
   g_status_text = status_text;
   g_perf_since = prof_now();
+
+  /* SceSysmemForDriver ksceKernelVAtoPA / ksceKernelVAtoPABySW (display
+   * test: where the game's frame is in physical memory) */
+  if (module_get_export_func(KERNEL_PID, "SceSysmem", 0x6F25E18A, 0x8D160E65,
+                             (uintptr_t *)&g_va2pa_hw) < 0)
+    g_va2pa_hw = NULL;
+  if (module_get_export_func(KERNEL_PID, "SceSysmem", 0x6F25E18A, 0x65419BD3,
+                             (uintptr_t *)&g_va2pa_sw) < 0)
+    g_va2pa_sw = NULL;
 
   if (module_get_export_func(KERNEL_PID, "SceSysmem", 0x40ECDB0E, 0x364E68A4,
                              (uintptr_t *)&g_dcache_clean_inv) < 0)
