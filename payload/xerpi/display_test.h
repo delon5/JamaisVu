@@ -28,6 +28,17 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 #define JV_DISP_STEP_PLANE_OFF 7
 #define JV_DISP_STEP_OFF   8 /* display link stopped: all done */
 
+/* Progress screen for saves, loads and dry runs: switches the display on
+ * with a title (returns < 0 and does nothing if the frame is unusable),
+ * updates the status line and the bar (percent < 0: bar unchanged, line
+ * NULL: line unchanged), switches it off. Drawn into the given frame
+ * only. */
+int jv_screen_begin(const JvDisplayArgs *a, void (*mark)(int step),
+                    const char *title);
+void jv_screen_status(const char *line, int percent);
+void jv_screen_end(void);
+int jv_screen_is_on(void);
+
 /* hardware waits that gave up (see JV_WAIT_WHILE in utils.h) */
 uint32_t jv_display_wait_timeouts(void);
 

@@ -85,25 +85,10 @@ static int text_w(const char *s, int scale) {
 #define BAR_W 600
 #define BAR_H 28
 
-static void draw_screen(void) {
-	static const char *const l1 = "JamaisVu";
-	static const char *const l2 = "Display test - nothing is written";
-	static const char *const ta = "Timing A";
-	static const char *const tb = "Timing B";
-	static const char *const l3 = "If you can read this, the screen works.";
-	fill(0, 0, g_w, g_h, RGB(16, 20, 28));
-	text((g_w - text_w(l1, 5)) / 2, 120, 5, RGB(34, 178, 226), l1);
-	text((g_w - text_w(l2, 3)) / 2, 200, 3, RGB(240, 240, 240), l2);
-	text((g_w - text_w(l3, 2)) / 2, 250, 2, RGB(170, 180, 195), l3);
-	text((g_w - text_w(ta, 3)) / 2, 470, 3, RGB(240, 240, 240),
-	     g_vic == 0x20 ? tb : ta);
-	fill(BAR_X - 4, BAR_Y - 4, BAR_W + 8, BAR_H + 8, RGB(90, 100, 115));
-	fill(BAR_X, BAR_Y, BAR_W, BAR_H, RGB(16, 20, 28));
-	/* colour check: red, green, blue, white */
-	static const uint32_t sw[4] = { RGB(220, 40, 40), RGB(40, 200, 60),
-	                                RGB(40, 90, 230), RGB(255, 255, 255) };
-	for (int k = 0; k < 4; k++)
-		fill(330 + k * 80, 400, 60, 40, sw[k]);
+static void (*g_mark)(int step);
+static void mark(int step) {
+	if (g_mark)
+		g_mark(step);
 }
 
 static void plane_setup(uint32_t paddr) {
@@ -132,26 +117,29 @@ static void plane_setup(uint32_t paddr) {
 	iftu_bus_enable(IFTU_BUS_0);
 }
 
-int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
-                    uint32_t (*now_us)(void)) {
+/* only what this was written for: a 960x544 frame in CDRAM or main
+ * memory, as the plugin checked */
+static int args_ok(const JvDisplayArgs *a) {
+	return a->width == 960 && a->height == 544 && a->pitch >= 960 &&
+	       a->pitch <= 1024 && !(a->fb_paddr & 0xFFF) &&
+	       a->fb_paddr >= 0x20000000u &&
+	       (uint64_t)a->fb_paddr + (uint64_t)a->pitch * a->height * 4 <=
+	           0x60000000u;
+}
+
+/* Switches the display on showing whatever draw() put into the frame. */
+static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
 	uint32_t pixelclock = 0;
+
 	/* 0x20 for the PCH-2000 LCD (clean on hardware; 0 = the OLED timing
 	 * libbaremetal used, garbage along the edges); nothing else */
 	uint32_t vic = a->vic == 0x20 ? 0x20 : 0;
-
-	/* only what the test was written for: a 960x544 frame in CDRAM or
-	 * main memory, as the plugin checked */
-	if (a->width != 960 || a->height != 544 || a->pitch < 960 ||
-	    a->pitch > 1024 || (a->fb_paddr & 0xFFF) ||
-	    a->fb_paddr < 0x20000000u ||
-	    (uint64_t)a->fb_paddr + (uint64_t)a->pitch * a->height * 4 > 0x60000000u)
-		return -1;
 
 	g_fb = (volatile uint32_t *)(uintptr_t)a->fb_paddr;
 	/* The display controller reads rows exactly as wide as the picture
 	 * (libbaremetal's iftu.c: "TODO: Properly use pitch instead of
 	 * width"), but games may use a wider pitch (1001 Spikes: 1024 -
-	 * diagonal stripes on hardware). This screen covers the whole frame
+	 * diagonal stripes on hardware). The screen covers the whole frame
 	 * anyway, so lay it out with rows of 960; the frame is big enough
 	 * (pitch >= width). */
 	g_pitch = a->width;
@@ -177,7 +165,7 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 	dsi_start_display(DSI_BUS_OLED_LCD, vic, 1);
 	mark(JV_DISP_STEP_DSI);
 
-	draw_screen(); /* before the panel lights up: no stale picture */
+	draw(); /* before the panel lights up: no stale picture */
 	mark(JV_DISP_STEP_DRAWN);
 
 	lcd_init();
@@ -185,23 +173,12 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 
 	plane_setup(a->fb_paddr);
 	mark(JV_DISP_STEP_PLANE);
+}
 
-	/* ~6 s: a bar filling up, like save/load progress would */
-	uint32_t t0 = now_us();
-	for (;;) {
-		uint32_t el = now_us() - t0;
-		if (el >= 6000000)
-			break;
-		fill(BAR_X, BAR_Y, (int)((uint64_t)BAR_W * el / 6000000), BAR_H,
-		     RGB(34, 178, 226));
-		delay(2000);
-	}
-	fill(BAR_X, BAR_Y, BAR_W, BAR_H, RGB(34, 178, 226));
-	mark(JV_DISP_STEP_SHOWN);
-
-	/* back to how it was: panel and backlight off, link stopped - each
-	 * step recorded on its own (on hardware the screen stayed on and the
-	 * system hung after the picture had been shown) */
+/* back to how it was: panel and backlight off, link stopped - each step
+ * recorded on its own (on hardware the link stop never confirmed: its
+ * bounded wait gives up after ~1 s) */
+static void hw_off(void) {
 	lcd_off();
 	mark(JV_DISP_STEP_LCD_OFF);
 	iftu_plane_config_set_enabled(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0, false);
@@ -211,7 +188,116 @@ int jv_display_test(const JvDisplayArgs *a, void (*mark)(int step),
 	pervasive_reset_enter_dsi(0, 7);
 	pervasive_clock_disable_dsi(0, 0xF);
 	mark(JV_DISP_STEP_OFF);
+}
+
+#define C_BG    RGB(16, 20, 28)
+#define C_TITLE RGB(34, 178, 226)
+#define C_TEXT  RGB(240, 240, 240)
+#define C_DIM   RGB(170, 180, 195)
+#define C_FRAME RGB(90, 100, 115)
+
+static void centred(int y, int scale, uint32_t c, const char *s) {
+	fill(0, y, g_w, 8 * scale, C_BG);
+	text((g_w - text_w(s, scale)) / 2, y, scale, c, s);
+}
+
+static void bar_frame(void) {
+	fill(BAR_X - 4, BAR_Y - 4, BAR_W + 8, BAR_H + 8, C_FRAME);
+	fill(BAR_X, BAR_Y, BAR_W, BAR_H, C_BG);
+}
+
+/* --- Diagnostics display test ------------------------------------------- */
+
+static void draw_test(void) {
+	fill(0, 0, g_w, g_h, C_BG);
+	text((g_w - text_w("JamaisVu", 5)) / 2, 120, 5, C_TITLE, "JamaisVu");
+	centred(200, 3, C_TEXT, "Display test - nothing is written");
+	centred(250, 2, C_DIM, "If you can read this, the screen works.");
+	centred(470, 3, C_TEXT, g_vic == 0x20 ? "Timing B" : "Timing A");
+	bar_frame();
+	/* colour check: red, green, blue, white */
+	static const uint32_t sw[4] = { RGB(220, 40, 40), RGB(40, 200, 60),
+	                                RGB(40, 90, 230), RGB(255, 255, 255) };
+	for (int k = 0; k < 4; k++)
+		fill(330 + k * 80, 400, 60, 40, sw[k]);
+}
+
+int jv_display_test(const JvDisplayArgs *a, void (*markfn)(int step),
+                    uint32_t (*now_us)(void)) {
+	if (!args_ok(a))
+		return -1;
+	g_mark = markfn;
+	hw_on(a, draw_test);
+
+	/* ~6 s: a bar filling up, like save/load progress would */
+	uint32_t t0 = now_us();
+	for (;;) {
+		uint32_t el = now_us() - t0;
+		if (el >= 6000000)
+			break;
+		fill(BAR_X, BAR_Y, (int)((uint64_t)BAR_W * el / 6000000), BAR_H,
+		     C_TITLE);
+		delay(2000);
+	}
+	fill(BAR_X, BAR_Y, BAR_W, BAR_H, C_TITLE);
+	mark(JV_DISP_STEP_SHOWN);
+
+	hw_off();
+	g_mark = 0;
 	return 0;
+}
+
+/* --- Progress screen for saves, loads and dry runs ---------------------- */
+
+static const char *g_title;
+static int g_screen_on, g_last_fill;
+
+static void draw_progress(void) {
+	fill(0, 0, g_w, g_h, C_BG);
+	text((g_w - text_w("JamaisVu", 5)) / 2, 110, 5, C_TITLE, "JamaisVu");
+	centred(190, 3, C_TEXT, g_title);
+	bar_frame();
+	centred(420, 2, C_DIM, "Do not turn off the system");
+	g_last_fill = 0;
+}
+
+int jv_screen_begin(const JvDisplayArgs *a, void (*markfn)(int step),
+                    const char *title) {
+	if (g_screen_on || !args_ok(a))
+		return -1;
+	g_mark = markfn;
+	g_title = title;
+	hw_on(a, draw_progress);
+	g_screen_on = 1;
+	return 0;
+}
+
+void jv_screen_status(const char *line, int percent) {
+	if (!g_screen_on)
+		return;
+	if (line)
+		centred(260, 2, C_DIM, line);
+	if (percent >= 0) {
+		if (percent > 100)
+			percent = 100;
+		int w = BAR_W * percent / 100;
+		if (w < g_last_fill) /* never goes back */
+			w = g_last_fill;
+		fill(BAR_X + g_last_fill, BAR_Y, w - g_last_fill, BAR_H, C_TITLE);
+		g_last_fill = w;
+	}
+}
+
+void jv_screen_end(void) {
+	if (!g_screen_on)
+		return;
+	g_screen_on = 0;
+	hw_off();
+	g_mark = 0;
+}
+
+int jv_screen_is_on(void) {
+	return g_screen_on;
 }
 
 uint32_t jv_display_wait_timeouts(void) {

@@ -417,7 +417,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   pargs.soc_timer_10ms = 0;
   pargs.trace_n = 0;
   pargs.fault_type = pargs.fault_addr = pargs.fault_lr = 0;
-  if (debug_mode == JV_TEST_DISPLAY) {
+  if (debug_mode == JV_TEST_DISPLAY || debug_mode == JV_TEST_DRYRUN) {
     uint8_t flags[16];
     memset(flags, 0, sizeof(flags));
     resolve_hw_fns();

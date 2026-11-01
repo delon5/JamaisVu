@@ -1778,6 +1778,60 @@ static void do_load(int slot) {
  * the payload before touching any hardware, the dry run stops right before
  * the first write (the slot file is only created/stamped, like before a
  * save, and the selected slot must be empty). */
+/* Display test / progress screen: is the recorded frame usable? Logs the
+ * details either way; why = the reason if not. */
+static int display_frame_check(char *why, int len) {
+  uint32_t hw = jv_hw_info();
+  why[0] = '\0';
+  /* PCH-2000 (LCD): hardware info 0x80xxxx and up - e.g. 0x822238 on
+   * the user's console (libbaremetal's model check only knew 0x80xxxx,
+   * but its LCD backlight code handles boards up to 0x90xxxx). PCH-1000
+   * (OLED) and PS TV report lower values. */
+  if ((hw & 0xFF0000) < 0x800000)
+    snprintf(why, len, "Display test: PCH-2000 only for now (hardware "
+             "0x%08X)", (unsigned)hw);
+  else if (!g_fb_rec)
+    snprintf(why, len, "Display test: no frame seen yet - try again");
+  else if (g_fb_w != 960 || g_fb_h != 544 || g_fb_pitch < 960 ||
+           g_fb_pitch > 1024)
+    snprintf(why, len, "Display test: frame %ux%u pitch %u is not supported "
+             "yet", (unsigned)g_fb_w, (unsigned)g_fb_h, (unsigned)g_fb_pitch);
+  else if (g_fb_pa0 == 0)
+    snprintf(why, len, "Display test: frame address 0x%08X could not be "
+             "translated", (unsigned)g_fb_va);
+  else if (g_fb_pa == 0)
+    snprintf(why, len, "Display test: frame not in one piece of memory (PA "
+             "0x%08X, breaks at +0x%X)", (unsigned)g_fb_pa0,
+             (unsigned)g_fb_bad_off);
+  else if (g_fb_pa < 0x20000000u || g_fb_pa >= 0x60000000u ||
+           (g_fb_pa & 0xfff))
+    snprintf(why, len, "Display test: frame at an unexpected address (PA "
+             "0x%08X)", (unsigned)g_fb_pa);
+
+  static char line[256];
+  if (g_fb_rec) {
+    snprintf(line, sizeof(line), "display: frame VA 0x%08X: CPU priv PAR "
+             "0x%08X, CPU user PAR 0x%08X, VAtoPA %s 0x%08X/0x%08X, BySW "
+             "%s 0x%08X/0x%08X, used method %d\r\n", (unsigned)g_fb_va,
+             (unsigned)g_fb_par_priv, (unsigned)g_fb_par_user,
+             g_va2pa_hw ? "ret" : "missing", (unsigned)g_fb_hw_ret,
+             (unsigned)g_fb_hw_pa, g_va2pa_sw ? "ret" : "missing",
+             (unsigned)g_fb_sw_ret, (unsigned)g_fb_sw_pa, g_fb_method);
+    log_append(line);
+  }
+  if (why[0]) {
+    snprintf(line, sizeof(line), "%s\r\n", why); /* one log line */
+    log_append(line);
+    return 0;
+  }
+  snprintf(line, sizeof(line), "display: frame at 0x%08X, %ux%u pitch %u "
+           "(%s), hardware 0x%08X\r\n", (unsigned)g_fb_pa, (unsigned)g_fb_w,
+           (unsigned)g_fb_h, (unsigned)g_fb_pitch,
+           g_fb_game ? "game" : "LiveArea", (unsigned)hw);
+  log_append(line);
+  return 1;
+}
+
 /* kind: 0 reset test, 1 dry run, 2 display test */
 static void do_test(int kind, int slot, int variant) {
   static uint8_t nonce[16];
@@ -1793,65 +1847,21 @@ static void do_test(int kind, int slot, int variant) {
     return;
   }
 
-  if (kind == 2) {
-    static char why[128];
-    uint32_t hw = jv_hw_info();
-    why[0] = '\0';
-    /* PCH-2000 (LCD): hardware info 0x80xxxx and up - e.g. 0x822238 on
-     * the user's console (libbaremetal's model check only knew 0x80xxxx,
-     * but its LCD backlight code handles boards up to 0x90xxxx). PCH-1000
-     * (OLED) and PS TV report lower values. */
-    if ((hw & 0xFF0000) < 0x800000)
-      snprintf(why, sizeof(why), "Display test: PCH-2000 only for now "
-               "(hardware 0x%08X)", (unsigned)hw);
-    else if (!g_fb_rec)
-      snprintf(why, sizeof(why), "Display test: no frame seen yet - "
-               "try again");
-    else if (g_fb_w != 960 || g_fb_h != 544 || g_fb_pitch < 960 ||
-             g_fb_pitch > 1024)
-      snprintf(why, sizeof(why), "Display test: frame %ux%u pitch %u is not "
-               "supported yet", (unsigned)g_fb_w, (unsigned)g_fb_h,
-               (unsigned)g_fb_pitch);
-    else if (g_fb_pa0 == 0)
-      snprintf(why, sizeof(why), "Display test: frame address 0x%08X could "
-               "not be translated", (unsigned)g_fb_va);
-    else if (g_fb_pa == 0)
-      snprintf(why, sizeof(why), "Display test: frame not in one piece of "
-               "memory (PA 0x%08X, breaks at +0x%X)", (unsigned)g_fb_pa0,
-               (unsigned)g_fb_bad_off);
-    else if (g_fb_pa < 0x20000000u || g_fb_pa >= 0x60000000u ||
-             (g_fb_pa & 0xfff))
-      snprintf(why, sizeof(why), "Display test: frame at an unexpected "
-               "address (PA 0x%08X)", (unsigned)g_fb_pa);
-    if (g_fb_rec) {
-      static char tr[256];
-      snprintf(tr, sizeof(tr), "display test: frame VA 0x%08X: CPU priv PAR "
-               "0x%08X, CPU user PAR 0x%08X, VAtoPA %s 0x%08X/0x%08X, BySW "
-               "%s 0x%08X/0x%08X, used method %d\r\n", (unsigned)g_fb_va,
-               (unsigned)g_fb_par_priv, (unsigned)g_fb_par_user,
-               g_va2pa_hw ? "ret" : "missing", (unsigned)g_fb_hw_ret,
-               (unsigned)g_fb_hw_pa, g_va2pa_sw ? "ret" : "missing",
-               (unsigned)g_fb_sw_ret, (unsigned)g_fb_sw_pa, g_fb_method);
-      log_append(tr);
+  /* Display test and dry run: the frame to draw into. The display test
+   * refuses without one; a dry run then just runs without its progress
+   * screen, as before. */
+  if (kind == 2 || kind == 1) {
+    static char why[160];
+    if (display_frame_check(why, sizeof(why))) {
+      jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h,
+                           kind == 2 ? g_disp_vic : 0x20);
+    } else {
+      jv_set_display_frame(0, 0, 0, 0, 0);
+      if (kind == 2) {
+        set_message(MV_MESSAGE, why, -1, 1);
+        return;
+      }
     }
-    if (why[0]) {
-      static char line2[144];
-      snprintf(line2, sizeof(line2), "%s\r\n", why); /* one log line */
-      log_append(line2);
-      set_message(MV_MESSAGE, why, -1, 1);
-      return;
-    }
-    static char line[160];
-    /* the LiveArea's frame is display memory too (loads start there) */
-    snprintf(line, sizeof(line), "display test: frame at 0x%08X, %ux%u pitch "
-             "%u (%s), hardware 0x%08X\r\n", (unsigned)g_fb_pa,
-             (unsigned)g_fb_w, (unsigned)g_fb_h, (unsigned)g_fb_pitch,
-             g_fb_game ? "game" : "LiveArea", (unsigned)hw);
-    log_append(line);
-    snprintf(line, sizeof(line), "display test: timing %s (vic 0x%X)\r\n",
-             g_disp_vic == 0x20 ? "B" : "A", (unsigned)g_disp_vic);
-    log_append(line);
-    jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h, g_disp_vic);
   }
 
   if (dry) {

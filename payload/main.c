@@ -195,6 +195,8 @@ static int trace_locate(void) {
 /* Diagnostics: record step n (a JV_STAGE_*) with a timestamp, in the
  * arguments (read by the plugin after resuming) and in the persistent
  * trace sector once the card is usable. */
+static void screen_step(int n);
+
 void stage_mark(int n) {
   if (n != JV_STAGE_DONE)
     pargs->stage = n; /* the last real step, reported if a run fails */
@@ -204,6 +206,8 @@ void stage_mark(int n) {
     pargs->trace_n++;
   }
   trace_flush();
+  if (jv_screen_is_on())
+    screen_step(n);
 }
 
 static uint32_t g_old_vbar;
@@ -263,15 +267,46 @@ static void display_mark(int step) {
   stage_mark(JV_STAGE_DISP_I2C + step);
 }
 
+static void display_args(JvDisplayArgs *a) {
+  a->fb_paddr = pargs->disp_fb_paddr;
+  a->pitch = pargs->disp_fb_pitch;
+  a->width = pargs->disp_fb_width;
+  a->height = pargs->disp_fb_height;
+  a->hw_info = pargs->disp_hw_info;
+  a->hw_flags0 = pargs->disp_hw_flags0;
+  a->vic = pargs->disp_vic;
+}
+
+/* Progress screen: what each step means on screen, and how far along */
+static void screen_step(int n) {
+  switch (n) {
+    case JV_STAGE_FS_MOUNT:
+      jv_screen_status("Reading the Memory Card", 45);
+      break;
+    case JV_STAGE_SLOT_FOUND:
+      jv_screen_status("Slot file found", 65);
+      break;
+    case JV_STAGE_SLOT_TOKEN:
+      jv_screen_status("Slot file checked", 85);
+      break;
+  }
+}
+
+/* holds the result on screen for a moment, then switches off */
+static void screen_finish(int result) {
+  if (!jv_screen_is_on())
+    return;
+  jv_screen_status(result == JV_TEST_DONE ? "Dry run passed - nothing was "
+                   "written" : "Stopped - details in log.txt", 100);
+  uint32_t t0 = jv_time_us();
+  while (jv_time_us() - t0 < 2000000)
+    ;
+  jv_screen_end();
+}
+
 static int display_test(void) {
   JvDisplayArgs a;
-  a.fb_paddr = pargs->disp_fb_paddr;
-  a.pitch = pargs->disp_fb_pitch;
-  a.width = pargs->disp_fb_width;
-  a.height = pargs->disp_fb_height;
-  a.hw_info = pargs->disp_hw_info;
-  a.hw_flags0 = pargs->disp_hw_flags0;
-  a.vic = pargs->disp_vic;
+  display_args(&a);
   int r = jv_display_test(&a, display_mark, jv_time_us);
   /* detail: hardware waits that timed out (0 = every device answered) */
   pargs->detail = (int32_t)jv_display_wait_timeouts();
@@ -315,6 +350,16 @@ static int run(void) {
    * needs no filesystem and writes nothing else. */
   if (pargs->debug_mode == JV_TEST_DISPLAY)
     return display_test();
+
+  /* Progress screen (step 1: dry runs only) - from here on, so every
+   * display step is in trace.bin too. If the frame is unusable it stays
+   * off and the run goes on exactly as without it. */
+  if (pargs->debug_mode == JV_TEST_DRYRUN && pargs->disp_fb_paddr) {
+    JvDisplayArgs a;
+    display_args(&a);
+    if (jv_screen_begin(&a, display_mark, "Dry run - nothing is written") == 0)
+      jv_screen_status("Memory Card ready", 30);
+  }
 
   fres = f_mount(&fs, "ux0:", 1);
   if (fres != FR_OK) {
@@ -403,6 +448,7 @@ static int payload_main(void) {
   } else {
     stage_mark(JV_STAGE_MC_POWER);
     pargs->result = run();
+    screen_finish(pargs->result);
   }
 
   guard_deny_all();
@@ -440,6 +486,8 @@ int main(void) {
  * main() set up, then start.S resumes the OS exactly like after main(). */
 void payload_cleanup(void) {
   guard_deny_all();
+  if (jv_screen_is_on())
+    jv_screen_end(); /* bounded: cannot hang */
   stage_mark(JV_STAGE_DONE);
   if (pargs->stage >= JV_STAGE_MC_POWER) {
     pervasive_clock_disable_msif();
