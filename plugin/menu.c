@@ -1610,6 +1610,10 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
    * the snapshot is taken with this in place, too) */
   {
     static char ls[128], line[160];
+    /* a release still pending from the last wake-up (10 s) would remove
+     * this patch again before the sleep: seen at 21:58:49, one second
+     * after a load started within 10 s of the save before it */
+    g_lockskip_until = 0;
     lockskip_apply(ls, sizeof(ls));
     snprintf(line, sizeof(line), "    %s\r\n", ls);
     log_append(line);
