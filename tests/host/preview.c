@@ -109,6 +109,27 @@ int main(int argc, char **argv) {
   frame(argv[3], "8_livearea_empty_slot", &m);
   m.selected = 0;
   frame(argv[3], "9_livearea_load", &m);
+
+  /* LiveArea: prepare slot files ahead of time (slot 5 already ready) */
+  m.slots[4].prepared = 1;
+  m.prepare_count = 1;
+  m.selected = 4;
+  frame(argv[3], "12_livearea_ready_slot", &m);
+  m.slots[4].prepared = 0;
+  m.prepare_count = 2;
+  m.selected = 2;
+  frame(argv[3], "13_livearea_prepare", &m);
+  m.mode = MV_CONFIRM_PREPARE;
+  m.prepare_all = 1;
+  frame(argv[3], "14_confirm_prepare_all", &m);
+  m.mode = MV_BUSY;
+  strcpy(m.message, "Preparing slot 3  42%");
+  m.progress = 42;
+  frame(argv[3], "15_preparing_from_livearea", &m);
+  m.mode = MV_BROWSE;
+  m.progress = -1;
+  m.prepare_all = 0;
+  m.prepare_count = 0;
   m.can_save = 1;
 
   /* free-space safeguard: ~1.5 GB free -> slots 3 and 5 locked */

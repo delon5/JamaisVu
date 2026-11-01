@@ -20,7 +20,7 @@ On any firmware without a verified offset table, the plugin installs no filesyst
 
 - **An official Sony Memory Card.** JamaisVu writes **only** to the official Memory Card: slot files, slot info, thumbnails and `status.txt`. It never writes to an SD2Vita, PSVSD, USB stick or the internal storage. Ideally use a card dedicated to savestates, so the worst a failure can cost is savestates. The card may be mounted as ux0, or as uma0/xmc0 when a storage plugin (StorageMgr, YAMT, gamesd) put an SD2Vita/PSVSD/USB stick on ux0. JamaisVu reads the system's mount table to find which mount is the card (device `sdstor0:xmc-…`); finding it writes nothing.
   - Savedata is only rolled back by a load when it lives on the Memory Card, i.e. when the card is ux0. With an SD2Vita/PSVSD as ux0, a load restores the game but **not** its savedata (the load prompt says so).
-- **704 MB of free space on the Memory Card per slot.** Each slot is a fixed-size file that is created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free.
+- **704 MB of free space on the Memory Card per slot.** Each slot is a fixed-size file that is created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free. To avoid the wait in a game, open the menu from the **LiveArea** and prepare slots ahead of time: ✕ prepares the selected slot, △ all slots that fit. Prepared but unused slots show **READY**.
 - **Slots unlock with free space** on the Memory Card. Slots you have already used stay available. Each new slot needs 704 MB: about 1 GB free unlocks one slot, 1.5 GB two, and so on. Locked slots show a padlock.
 
 ## Installation
@@ -45,6 +45,9 @@ Press **SELECT + UP** to open the slot menu. The game keeps running underneath b
 | ✕ | Save to the selected slot (asks before overwriting) |
 | □ | Load the selected slot (asks first) |
 | ○ | Close |
+| ✕ (LiveArea, empty slot) | Prepare the selected slot now |
+| △ (LiveArea) | Prepare all empty slots there is space for |
+| START | Diagnostics (reset test / dry run) |
 
 Each slot shows a thumbnail of the game screen at the moment you saved, the game's name, its title ID, its version and the date.
 

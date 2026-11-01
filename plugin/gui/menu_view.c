@@ -288,7 +288,8 @@ static void draw_slot(Canvas *c, const MenuModel *m, int i) {
     } else {
       cv_text_centered(c, &font_small, x + JV_THUMB_W / 2,
                        y + (JV_THUMB_H - font_small.height) / 2,
-                       s->used ? "NO PREVIEW" : "EMPTY", C_TEXT_DIM,
+                       s->used ? "NO PREVIEW" : s->prepared ? "READY" : "EMPTY",
+                       C_TEXT_DIM,
                        JV_THUMB_W);
     }
   }
@@ -319,23 +320,30 @@ static int hints_width(const char *const *labels, const int *two, int n) {
 
 static void draw_footer(Canvas *c, const MenuModel *m) {
   int y = FOOTER_Y + (MENU_H - FOOTER_Y - font_small.height) / 2;
-  const char *labels[4];
-  IconType icons[4];
-  int two[4] = { 0, 0, 0, 0 };
+  const char *labels[6];
+  IconType icons[6];
+  int two[6] = { 0, 0, 0, 0, 0, 0 };
   int n = 0;
+  const MenuSlot *cur = &m->slots[m->selected];
 
   switch (m->mode) {
     case MV_BROWSE:
       labels[n] = "Select"; icons[n] = ICON_LEFT; two[n] = 1; n++;
-      if (m->can_save && !m->slots[m->selected].locked) {
+      if (m->can_save && !cur->locked) {
         labels[n] = "Save"; icons[n] = ICON_CROSS; n++;
+      } else if (!m->can_save && !cur->locked && !cur->prepared) {
+        labels[n] = "Prepare"; icons[n] = ICON_CROSS; n++;
       }
       if (m->can_load && m->slots[m->selected].used &&
           !m->slots[m->selected].outdated) {
         labels[n] = "Load"; icons[n] = ICON_SQUARE; n++;
       }
+      if (!m->can_save && m->prepare_count > 1) {
+        labels[n] = "Prepare all"; icons[n] = ICON_TRIANGLE; n++;
+      }
       labels[n] = "Close";  icons[n] = ICON_CIRCLE; n++;
       break;
+    case MV_CONFIRM_PREPARE:
     case MV_CONFIRM_SAVE:
     case MV_CONFIRM_LOAD:
       labels[n] = "Confirm"; icons[n] = ICON_CROSS; n++;
@@ -401,11 +409,19 @@ static void draw_details(Canvas *c, const MenuModel *m) {
                          "Each slot needs 704 MB free on the Memory Card",
                          C_TEXT_DIM, MENU_W - 48);
       } else {
-        cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y, "Empty slot",
+        const char *info;
+        if (m->can_save)
+          info = s->prepared ? "Press X to save your game here"
+                             : "Press X to save your game here (the first "
+                               "save prepares the slot)";
+        else
+          info = s->prepared ? "Ready - start a game to save here"
+                             : "Press X to prepare this slot now (704 MB), "
+                               "so saving starts right away";
+        cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y,
+                         s->prepared ? "Empty slot - ready" : "Empty slot",
                          C_TEXT_DIM, MENU_W - 48);
-        cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y,
-                         m->can_save ? "Press X to save your game here"
-                                     : "Start a game to save here",
+        cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y, info,
                          C_TEXT_DIM, MENU_W - 48);
       }
       break;
@@ -421,6 +437,31 @@ static void draw_details(Canvas *c, const MenuModel *m) {
                                : "The screen stays black for about a minute.",
                        C_TEXT_DIM, MENU_W - 48);
       break;
+
+    case MV_CONFIRM_PREPARE: {
+      char info[96];
+      prompt[0] = 0;
+      info[0] = 0;
+      if (m->prepare_all && m->prepare_count > 1) {
+        char cnt[2] = { (char)('0' + m->prepare_count), '\0' };
+        sappend(prompt, sizeof(prompt), "Prepare ");
+        sappend(prompt, sizeof(prompt), cnt);
+        sappend(prompt, sizeof(prompt), " slots?");
+        sappend(info, sizeof(info), "Uses 704 MB each on the Memory Card. "
+                "Takes a while per slot.");
+      } else {
+        sappend(prompt, sizeof(prompt), "Prepare slot ");
+        sappend(prompt, sizeof(prompt), m->prepare_all ? "" : num);
+        sappend(prompt, sizeof(prompt), "?");
+        sappend(info, sizeof(info), "Uses 704 MB on the Memory Card. "
+                "Takes a while.");
+      }
+      cv_text_centered(c, &font_large, MENU_W / 2, TITLE_Y, prompt, C_TEXT,
+                       MENU_W - 48);
+      cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y, info,
+                       C_TEXT_DIM, MENU_W - 48);
+      break;
+    }
 
     case MV_CONFIRM_LOAD:
       prompt[0] = 0, sappend(prompt, sizeof(prompt), "Load slot ");

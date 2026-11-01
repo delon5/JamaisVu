@@ -34,6 +34,7 @@
 typedef struct {
   int used;
   int locked;             /* not enough free space to create this slot */
+  int prepared;           /* slot file exists: saving starts right away */
   char titleid[16];
   char title[128];
   char date[32];          /* preformatted, e.g. "2026-10-31  21:40" */
@@ -50,6 +51,7 @@ typedef enum {
   MV_BUSY,
   MV_MESSAGE,
   MV_DIAG,      /* diagnostics: reset test / dry run */
+  MV_CONFIRM_PREPARE, /* create slot file(s) ahead of time */
 } MenuMode;
 
 typedef struct {
@@ -61,6 +63,8 @@ typedef struct {
   int is_error;       /* MESSAGE: red text */
   int can_load;       /* 0 hides the load hint */
   int can_save;       /* 0 in the LiveArea: no game on screen to save */
+  int prepare_count;  /* slots that could be prepared now */
+  int prepare_all;    /* CONFIRM_PREPARE: all of them, not just the selected */
   int savedata_rolls_back; /* 0 when slots are on uma0: ux0 savedata is
                               not part of the snapshot */
 } MenuModel;

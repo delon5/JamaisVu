@@ -28,7 +28,8 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 #define EVF_WORK    1
 #define EVF_RESUMED 2
 
-enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY };
+enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY,
+       OP_PREPARE, OP_PREPARE_ALL };
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
 #define PENDING  JV_NUM_SLOTS /* thumbnail index of the live capture */
@@ -367,6 +368,13 @@ static void close_menu(void) {
   g_block_input_until = now_us() + 300000;
 }
 
+static void confirm_prepare(int all) {
+  model_begin();
+  g_model.prepare_all = all;
+  model_end();
+  set_message(MV_CONFIRM_PREPARE, "", -1, 0);
+}
+
 static void handle_buttons(uint32_t held, uint32_t pressed) {
   int combo = (held & SCE_CTRL_SELECT) && (held & SCE_CTRL_UP) &&
               (pressed & (SCE_CTRL_SELECT | SCE_CTRL_UP));
@@ -396,6 +404,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   int used = g_model.slots[sel].used;
   int locked = g_model.slots[sel].locked;
   int outdated = g_model.slots[sel].outdated;
+  int prepared = g_model.slots[sel].prepared;
+  int prepare_count = g_model.prepare_count;
   ksceKernelUnlockMutex(g_mtx, 1);
 
   if (combo && mode != MV_BUSY) {
@@ -412,8 +422,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         else
           g_model.selected = (sel + 1) % JV_NUM_SLOTS;
         model_end();
-      } else if ((pressed & (SCE_CTRL_CROSS | SCE_CTRL_SQUARE)) &&
-                 !jv_armed()) {
+      } else if ((pressed & (SCE_CTRL_CROSS | SCE_CTRL_SQUARE |
+                             SCE_CTRL_TRIANGLE)) && !jv_armed()) {
         static char msg[128];
         snprintf(msg, sizeof(msg), "Disabled on this firmware: %s",
                  jv_disabled_reason());
@@ -424,9 +434,16 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
                       "704 MB", -1, 1);
         else if (g_capture_ok)
           set_message(MV_CONFIRM_SAVE, "", -1, 0);
+        else if (!prepared)
+          /* LiveArea: create the slot file now, so a save later in a
+           * game starts right away */
+          confirm_prepare(0);
         else
-          set_message(MV_MESSAGE, "Start a game first - the LiveArea "
-                      "cannot be saved", -1, 1);
+          set_message(MV_MESSAGE, "This slot is ready - start a game to "
+                      "save here", -1, 0);
+      } else if ((pressed & SCE_CTRL_TRIANGLE) && !g_capture_ok &&
+                 prepare_count > 1) {
+        confirm_prepare(1);
       } else if ((pressed & SCE_CTRL_SQUARE) && used && outdated) {
         set_message(MV_MESSAGE, "The game was updated since this snapshot "
                     "- it can't be loaded", -1, 1);
@@ -443,6 +460,12 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_RESET, sel);
       else if (pressed & SCE_CTRL_SQUARE)
         start_op(OP_TEST_DRY, sel);
+      else if (pressed & SCE_CTRL_CIRCLE)
+        set_message(MV_BROWSE, "", -1, 0);
+      break;
+    case MV_CONFIRM_PREPARE:
+      if (pressed & SCE_CTRL_CROSS)
+        start_op(g_model.prepare_all ? OP_PREPARE_ALL : OP_PREPARE, sel);
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
       break;
@@ -500,10 +523,12 @@ static int input_thread(SceSize args, void *argp) {
 static SlotInfo g_pending_info;
 static int g_progress_slot;
 
+static const char *g_progress_note = " (first use only)";
+
 static void prepare_progress(int pct) {
   static char msg[96];
-  snprintf(msg, sizeof(msg), "Preparing slot %d (first use only)  %d%%",
-           g_progress_slot + 1, pct);
+  snprintf(msg, sizeof(msg), "Preparing slot %d%s  %d%%",
+           g_progress_slot + 1, g_progress_note, pct);
   set_message(MV_BUSY, msg, pct, 0);
 }
 
@@ -527,6 +552,14 @@ static void refresh_slots(void) {
     slot_policy(slot_free_space(), exists, locked, JV_NUM_SLOTS);
   }
 
+  int prepare_count = 0;
+  for (int i = 0; i < JV_NUM_SLOTS; i++)
+    if (!exists[i] && !locked[i])
+      prepare_count++;
+  model_begin();
+  g_model.prepare_count = prepare_count;
+  model_end();
+
   for (int i = 0; i < JV_NUM_SLOTS; i++) {
     int ok = exists[i] && slot_info_read(i, &info, g_thumbs[i]) == 0;
 
@@ -534,6 +567,7 @@ static void refresh_slots(void) {
     MenuSlot *s = &g_model.slots[i];
     memset(s, 0, sizeof(*s));
     s->locked = locked[i];
+    s->prepared = exists[i];
     if (ok) {
       s->used = 1;
       strncpy(s->titleid, info.titleid, sizeof(s->titleid) - 1);
@@ -863,6 +897,63 @@ static void do_test(int dry, int slot) {
                dry ? JV_TEST_DRYRUN : JV_TEST_RESET);
 }
 
+/* Creates slot files ahead of time (from the LiveArea), so that a save
+ * later in a game does not have to. Only the OS writes here, exactly as
+ * when a save prepares its slot, and the free-space safeguard is checked
+ * again before each slot. */
+static void do_prepare(int all, int slot) {
+  static char msg[96];
+  int done = 0;
+
+  storage_detect();
+  if (storage_problem()) {
+    set_message(MV_MESSAGE, storage_problem(), -1, 1);
+    return;
+  }
+  slots_mkdirs();
+  g_progress_note = "";
+
+  for (int i = all ? 0 : slot; i < (all ? JV_NUM_SLOTS : slot + 1); i++) {
+    refresh_slots(); /* current free space -> which slots may be created */
+    ksceKernelLockMutex(g_mtx, 1, NULL);
+    int prepared = g_model.slots[i].prepared;
+    int locked = g_model.slots[i].locked;
+    ksceKernelUnlockMutex(g_mtx, 1);
+    if (prepared)
+      continue;
+    if (locked) {
+      if (!all) {
+        g_progress_note = " (first use only)";
+        set_message(MV_MESSAGE, "Not enough free space - each slot needs "
+                    "704 MB", -1, 1);
+        return;
+      }
+      continue;
+    }
+
+    g_progress_slot = i;
+    prepare_progress(0);
+    int res = slot_prepare(i, prepare_progress);
+    if (res < 0) {
+      g_progress_note = " (first use only)";
+      snprintf(msg, sizeof(msg), "Slot %d: %s", i + 1, result_text(res));
+      set_message(MV_MESSAGE, msg, -1, 1);
+      return;
+    }
+    done++;
+  }
+  g_progress_note = " (first use only)";
+
+  if (done == 0)
+    snprintf(msg, sizeof(msg), all ? "Nothing to prepare" :
+             "Slot %d is already ready", slot + 1);
+  else if (!all)
+    snprintf(msg, sizeof(msg), "Slot %d is ready", slot + 1);
+  else
+    snprintf(msg, sizeof(msg), "%d slot%s ready", done, done == 1 ? "" : "s");
+  set_message(MV_MESSAGE, msg, -1, 0);
+}
+
 static void write_status(void) {
   static char path[64], old[1024];
 
@@ -915,6 +1006,12 @@ static int worker_thread(SceSize args, void *argp) {
         break;
       case OP_TEST_DRY:
         do_test(1, g_op_slot);
+        break;
+      case OP_PREPARE:
+        do_prepare(0, g_op_slot);
+        break;
+      case OP_PREPARE_ALL:
+        do_prepare(1, g_op_slot);
         break;
     }
 
