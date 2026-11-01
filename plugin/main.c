@@ -298,11 +298,16 @@ static int ksceSysconSendCommandPatched(int cmd, void *buffer, uint32_t size) {
   return TAI_CONTINUE(int, ksceSysconSendCommandRef, cmd, buffer, size);
 }
 
+/* Timing around the payload (system time, which stops while the system
+ * sleeps): request -> sleep event, wake event -> system resumed. */
+volatile int64_t g_t_request, g_t_suspend, g_t_resume, g_t_resumed;
+
 static int savestate_system_event(int resume, int eventid,
                                   void *args, void *opt) {
   if (pargs.mode != JAMAISVU_MODE_NONE) {
     if (!resume) {
       if (eventid == 0x4000) {
+        g_t_suspend = ksceKernelGetSystemTimeWide();
         memcpy(pargs.rtc_ctx, g_rtc_ctx, SCE_RTC_CTX_SIZE);
 
         map_memory();
@@ -319,9 +324,11 @@ static int savestate_system_event(int resume, int eventid,
       }
     } else {
       if (eventid == 0x10000) {
+        g_t_resume = ksceKernelGetSystemTimeWide();
         memcpy(&pargs, (void *)PAYLOAD_ARGS_PADDR, sizeof(PayloadArguments));
         memcpy(g_rtc_ctx, pargs.rtc_ctx, SCE_RTC_CTX_SIZE);
       } else if (eventid == 0x100000) {
+        g_t_resumed = ksceKernelGetSystemTimeWide();
         int stale = 0;
 
         if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK) {
@@ -445,6 +452,9 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   pargs.mode = mode;
   __sync_synchronize();
 
+  pargs.mem_bytes = pargs.mem_ms = 0;
+  g_t_request = ksceKernelGetSystemTimeWide();
+  g_t_suspend = g_t_resume = g_t_resumed = 0;
   int res = kscePowerRequestSoftReset();
   if (res < 0) {
     pargs.mode = JAMAISVU_MODE_NONE;

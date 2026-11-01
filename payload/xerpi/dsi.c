@@ -544,7 +544,10 @@ void dsi_stop_master(enum dsi_bus bus)
 	volatile uint32_t *dsi_regs = DSI_REGS(bus);
 	int lanes = dsi_lanes_for_bus[bus];
 
-	JV_WAIT_WHILE((dsi_regs[0x12] & 0xF) != 0); /* JamaisVu: bounded */
+	/* JamaisVu: on the PCH-2000 this never clears (every run on hardware
+	 * timed out here, ~1.1 s of black screen); what follows runs either
+	 * way, so wait ~10 ms at most */
+	JV_WAIT_WHILE_N((dsi_regs[0x12] & 0xF) != 0, 20000);
 
 	dsi_regs[0x145] = 0xffffffff;
 	dsi_regs[0x250] = 1;

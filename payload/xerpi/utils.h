@@ -93,12 +93,13 @@ void delay(uint32_t n);
  * answers cannot hang the payload with the screen on (seen on hardware). */
 #define JV_WAIT_MAX 2000000u
 extern volatile uint32_t g_jv_wait_timeouts;
-#define JV_WAIT_WHILE(cond)                                   \
+#define JV_WAIT_WHILE(cond) JV_WAIT_WHILE_N(cond, JV_WAIT_MAX)
+#define JV_WAIT_WHILE_N(cond, max)                            \
 	do {                                                  \
 		uint32_t jv_n_ = 0;                           \
-		while ((cond) && ++jv_n_ < JV_WAIT_MAX)       \
+		while ((cond) && ++jv_n_ < (max))             \
 			;                                     \
-		if (jv_n_ >= JV_WAIT_MAX)                     \
+		if (jv_n_ >= (max))                           \
 			g_jv_wait_timeouts++;                 \
 	} while (0)
 uint32_t get_cpu_id(void);

@@ -285,6 +285,8 @@ static int g_prog_shown_pct = -1;
 
 void progress_total(uint32_t total) {
   g_prog_total = total;
+  pargs->mem_bytes = total;
+  pargs->mem_ms = jv_time_us() / 1000; /* start; the end is subtracted */
 }
 
 static char *put_u(char *p, uint32_t v) {
@@ -359,6 +361,8 @@ static char *put_u(char *p, uint32_t v);
 
 void progress_load_begin(uint32_t total) {
   g_load_total = total;
+  pargs->mem_bytes = total;
+  pargs->mem_ms = jv_time_us() / 1000;
   if (!jv_screen_is_on())
     return;
   uint32_t y = pargs->disp_fb2_paddr, pitch = pargs->disp_fb2_pitch;
@@ -459,7 +463,7 @@ static void screen_finish(int result) {
     msg = "Not loaded - nothing was changed (details in log.txt)";
   jv_screen_status(msg, result >= 0 ? 100 : -1);
   uint32_t t0 = jv_time_us();
-  while (jv_time_us() - t0 < 2000000)
+  while (jv_time_us() - t0 < 500000) /* the game shows its own message */
     ;
   jv_screen_end();
 }
@@ -623,7 +627,10 @@ static int payload_main(void) {
     pargs->result = JV_ERR_HW;
   } else {
     stage_mark(JV_STAGE_MC_POWER);
+    pargs->mem_bytes = 0;
     pargs->result = run();
+    if (pargs->mem_bytes) /* start time -> duration */
+      pargs->mem_ms = jv_time_us() / 1000 - pargs->mem_ms;
     if (pargs->mode == JAMAISVU_MODE_LOAD && pargs->applied &&
         pargs->result != JV_OK) {
       /* cannot go back (halt_blink below): the message stays up */

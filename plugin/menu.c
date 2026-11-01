@@ -809,9 +809,17 @@ static int overlay_target(int head, int index) {
   return index == 1;
 }
 
+/* time of the first frame on the display after a save/load (0 = waiting) */
+static volatile int64_t g_t_first_frame;
+static volatile int g_wait_first_frame;
+
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
+  if (g_wait_first_frame && p && p->base && overlay_target(head, index)) {
+    g_t_first_frame = ksceKernelGetSystemTimeWide();
+    g_wait_first_frame = 0;
+  }
   if (g_overlay_ready && p && p->base && p->pixelformat == 0 &&
       overlay_target(head, index) &&
       p->width >= 480 && p->width <= 960 && p->height >= 272 &&
@@ -1614,10 +1622,13 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     return;
   }
 
+  g_t_first_frame = 0;
+  g_wait_first_frame = 1;
   unsigned int out;
   ksceKernelWaitEventFlag(g_evf, EVF_RESUMED,
                           SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
                           &out, NULL);
+
   /* the shell has decided on the lock screen by then; afterwards normal
    * sleep/wake locks again (removed by the input thread) */
   g_lockskip_until = now_us() + 10000000;
@@ -1626,6 +1637,37 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
    * the *restored* image, which was waiting here when the snapshot was
    * taken. after_resume() looks only at the payload's result. */
   after_resume();
+
+  /* Timing, after everything else (clocks, result, slot info): how long
+   * the Vita took to wake and show the first frame (up to 10 s). After a
+   * load this is the snapshot's JamaisVu: "request -> sleep" would be the
+   * save's, so only the wake-up is logged. */
+  for (int i = 0; i < 1000 && g_wait_first_frame; i++)
+    ksceKernelDelayThread(10000);
+  g_wait_first_frame = 0;
+  {
+    static char tl[256];
+    int64_t now = ksceKernelGetSystemTimeWide();
+    int n = 0;
+    if (g_res_mode == JAMAISVU_MODE_SAVE)
+      n = snprintf(tl, sizeof(tl), "    timing: request -> sleep %d ms;",
+                   (int)((g_t_suspend - g_t_request) / 1000));
+    else
+      n = snprintf(tl, sizeof(tl), "    timing:");
+    if (g_res_pa.mem_bytes && g_res_pa.mem_ms)
+      n += snprintf(tl + n, sizeof(tl) - n, " memory %u MB in %u ms (%u MB/s);",
+                    (unsigned)(g_res_pa.mem_bytes >> 20),
+                    (unsigned)g_res_pa.mem_ms,
+                    (unsigned)((uint64_t)(g_res_pa.mem_bytes >> 20) * 1000 /
+                               g_res_pa.mem_ms));
+    snprintf(tl + n, sizeof(tl) - n, " wake -> system resumed %d ms; -> "
+             "first frame %s%d ms\r\n",
+             (int)((g_t_resumed - g_t_resume) / 1000),
+             g_t_first_frame ? "" : "none within 10 s, waited ",
+             (int)(((g_t_first_frame ? g_t_first_frame : now) - g_t_resume)
+                   / 1000));
+    log_append(tl);
+  }
 }
 
 static int display_frame_check(char *why, int len);

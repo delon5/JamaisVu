@@ -109,6 +109,9 @@ typedef struct {
    * the progress screen continues once memory is being restored. 0 = none:
    * the screen goes dark for the restore. */
   uint32_t disp_fb2_paddr, disp_fb2_pitch;
+  /* Filled in by the payload: memory written (save) or restored (load), in
+   * bytes, and the ms the memory part took - for comparing speeds. */
+  uint32_t mem_bytes, mem_ms;
 } PayloadArguments;
 
 /* First sector of data/JamaisVu/trace.bin on the Memory Card. The plugin
