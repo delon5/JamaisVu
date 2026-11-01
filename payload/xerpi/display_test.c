@@ -121,7 +121,7 @@ static void plane_setup(uint32_t paddr) {
  * memory, as the plugin checked */
 static int args_ok(const JvDisplayArgs *a) {
 	return a->width == 960 && a->height == 544 && a->pitch >= 960 &&
-	       a->pitch <= 1024 && !(a->fb_paddr & 0xFFF) &&
+	       a->pitch <= 1024 && !(a->fb_paddr & 0xFF) &&
 	       a->fb_paddr >= 0x20000000u &&
 	       (uint64_t)a->fb_paddr + (uint64_t)a->pitch * a->height * 4 <=
 	           0x60000000u;
