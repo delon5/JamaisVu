@@ -482,13 +482,26 @@ CTRL_HOOKS(DEFINE_CTRL_HOOK)
 /* Input thread                                                             */
 /* ------------------------------------------------------------------------ */
 
+/* A press that arrives while a job runs (e.g. the slot refresh right after
+ * the menu opened, which is slow in heavy games) is kept and runs right
+ * after it, instead of being dropped (one is kept). */
+static volatile int g_next_op = OP_NONE, g_next_slot;
+
 static void start_op(int op, int slot) {
-  if (g_busy)
+  ksceKernelLockMutex(g_mtx, 1, NULL);
+  if (g_busy) {
+    if (g_next_op == OP_NONE && op != OP_REFRESH) {
+      g_next_slot = slot;
+      g_next_op = op;
+    }
+    ksceKernelUnlockMutex(g_mtx, 1);
     return;
+  }
   g_busy = 1;
   g_cancel_req = 0;
   g_op = op;
   g_op_slot = slot;
+  ksceKernelUnlockMutex(g_mtx, 1);
   ksceKernelSetEventFlag(g_evf, EVF_WORK);
 }
 
@@ -679,15 +692,22 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         set_message(MV_BROWSE, "", -1, 0);
       break;
     case MV_CONFIRM_PREPARE:
-      if (pressed & SCE_CTRL_CROSS)
-        start_op(g_model.prepare_all ? OP_PREPARE_ALL : OP_PREPARE, sel);
+      if (pressed & SCE_CTRL_CROSS) {
+        int all = g_model.prepare_all;
+        set_message(MV_BUSY, "Please wait...", -1, 0); /* before: no race */
+        start_op(all ? OP_PREPARE_ALL : OP_PREPARE, sel);
+      }
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
       break;
     case MV_CONFIRM_SAVE:
     case MV_CONFIRM_LOAD:
-      if (pressed & SCE_CTRL_CROSS)
+      if (pressed & SCE_CTRL_CROSS) {
+        /* visible at once, even if the job waits for the slot refresh;
+         * set before starting it, so the job's own messages win */
+        set_message(MV_BUSY, "Please wait...", -1, 0);
         start_op(mode == MV_CONFIRM_SAVE ? OP_SAVE : OP_LOAD, sel);
+      }
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
       break;
@@ -1320,10 +1340,24 @@ static int worker_thread(SceSize args, void *argp) {
         break;
     }
 
-    if (g_menu_open)
+    /* after a job that changed slots (not after a refresh itself) */
+    if (g_menu_open && g_op != OP_REFRESH)
       refresh_slots();
+
+    ksceKernelLockMutex(g_mtx, 1, NULL);
+    if (g_next_op != OP_NONE) {
+      /* a press queued while this job ran: run it now, still busy */
+      g_op = g_next_op;
+      g_op_slot = g_next_slot;
+      g_next_op = OP_NONE;
+      g_cancel_req = 0;
+      ksceKernelUnlockMutex(g_mtx, 1);
+      ksceKernelSetEventFlag(g_evf, EVF_WORK);
+      continue;
+    }
     g_op = OP_NONE;
     g_busy = 0;
+    ksceKernelUnlockMutex(g_mtx, 1);
   }
   return 0;
 }
