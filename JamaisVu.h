@@ -82,6 +82,7 @@ typedef struct {
   uint32_t applied; /* load: 1 once the payload started modifying anything */
   uint32_t stage;   /* last JV_STAGE_* reached (diagnostics) */
   int32_t detail;   /* low-level error code behind result (diagnostics) */
+  uint32_t soc_timer_10ms; /* SoC timer ticks in 10 ms (diagnostics) */
 } PayloadArguments;
 
 enum JamaisVuModes {
@@ -124,7 +125,7 @@ enum JamaisVuModes {
 #define JV_ERR_SAVEDATA      (-10) /* savedata backup failed               */
 #define JV_ERR_ARGS          (-11) /* invalid arguments from the plugin    */
 #define JV_ERR_NOT_MC        (-12) /* ux0 is not the official Memory Card  */
-#define JV_ERR_TIMER         (-13) /* hardware timer is not running        */
+#define JV_ERR_TIMER         (-13) /* CPU cycle counter is not running     */
 #define JV_ERR_HW            (-14) /* syscon / crypto engine did not answer */
 
 typedef struct {

@@ -68,6 +68,7 @@ static volatile int32_t g_res_result;
 static volatile int g_res_stale;
 static volatile uint32_t g_res_debug, g_res_stage;
 static volatile int32_t g_res_detail;
+static volatile uint32_t g_res_timer;
 static volatile int g_rearm_input;
 
 static const char *g_status_text;
@@ -141,7 +142,7 @@ static const char *result_text(int32_t res) {
     case JV_ERR_MEDIAID:    return "Memory Card layout not recognised";
     case JV_ERR_SAVEDATA:   return "could not back up the savedata";
     case JV_ERR_NOT_MC:     return "slot file is not on the official Memory Card";
-    case JV_ERR_TIMER:      return "hardware timer not running";
+    case JV_ERR_TIMER:      return "CPU cycle counter not running";
     case JV_ERR_HW:         return "hardware did not respond";
     case JV_ERR_ARGS:       return "invalid request";
 
@@ -634,14 +635,15 @@ static void log_result(const char *msg) {
   ksceRtcGetCurrentClockLocalTime(&t);
   int n = snprintf(line, sizeof(line),
                    "%04d-%02d-%02d %02d:%02d:%02d %s%s slot=%u result=%d "
-                   "stage=%u(%s) detail=%d/0x%08X | %s\r\n",
+                   "stage=%u(%s) detail=%d/0x%08X timer=%u | %s\r\n",
                    t.year, t.month, t.day, t.hour, t.minute, t.second,
                    g_res_mode <= 2 ? modes[g_res_mode] : "?",
                    g_res_debug == JV_TEST_RESET ? " (reset test)" :
                    g_res_debug == JV_TEST_DRYRUN ? " (dry run)" : "",
                    (unsigned)g_res_slot + 1, (int)g_res_result,
                    (unsigned)g_res_stage, stage_name(g_res_stage),
-                   (int)g_res_detail, (unsigned)g_res_detail, msg);
+                   (int)g_res_detail, (unsigned)g_res_detail,
+                   (unsigned)g_res_timer, msg);
   if (n <= 0)
     return;
   if (n >= (int)sizeof(line))
@@ -1027,10 +1029,12 @@ static int worker_thread(SceSize args, void *argp) {
 
 void menu_on_resumed(uint32_t mode, int32_t result, uint32_t slot,
                      int stale_open_files, uint32_t debug_mode,
-                     uint32_t stage, int32_t detail) {
+                     uint32_t stage, int32_t detail,
+                     uint32_t soc_timer_10ms) {
   g_res_debug = debug_mode;
   g_res_stage = stage;
   g_res_detail = detail;
+  g_res_timer = soc_timer_10ms;
   g_res_mode = mode;
   g_res_result = result;
   g_res_slot = slot;
