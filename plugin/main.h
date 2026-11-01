@@ -35,6 +35,7 @@ uint32_t jv_hw_info(void);
 /* system time at: save/load requested, sleep event, wake event, system
  * resumed (main.c); the first game frame after it is timed in menu.c */
 extern volatile int64_t g_t_request, g_t_suspend, g_t_resume, g_t_resumed;
+extern volatile int64_t g_t_fs_done;
 /* loads: the snapshot's own frame (slotN.jvf), drawn into once the memory
  * restore starts; 0 = none */
 void jv_set_display_frame2(uint32_t paddr, uint32_t pitch);

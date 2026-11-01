@@ -53,4 +53,13 @@ volatile uint32_t *fs_write_mode_addr(void);
  * open but no longer exist (see update_vnodes). */
 int update_filesystem(void);
 
+/* Diagnostics: ms each part of the last update_filesystem() took
+ * (buffer caches, file caches, remount, vnodes, fnodes) and how many
+ * vnodes/fnodes it went through. */
+typedef struct {
+  uint32_t ms[5];
+  uint32_t vnodes, fnodes;
+} FsUpdateTiming;
+extern FsUpdateTiming g_fs_update_timing;
+
 #endif

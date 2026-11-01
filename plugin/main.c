@@ -301,6 +301,7 @@ static int ksceSysconSendCommandPatched(int cmd, void *buffer, uint32_t size) {
 /* Timing around the payload (system time, which stops while the system
  * sleeps): request -> sleep event, wake event -> system resumed. */
 volatile int64_t g_t_request, g_t_suspend, g_t_resume, g_t_resumed;
+volatile int64_t g_t_fs_done; /* load: ux0 re-read (0 = not done) */
 
 static int savestate_system_event(int resume, int eventid,
                                   void *args, void *opt) {
@@ -325,10 +326,12 @@ static int savestate_system_event(int resume, int eventid,
     } else {
       if (eventid == 0x10000) {
         g_t_resume = ksceKernelGetSystemTimeWide();
+        menu_arm_first_frame();
         memcpy(&pargs, (void *)PAYLOAD_ARGS_PADDR, sizeof(PayloadArguments));
         memcpy(g_rtc_ctx, pargs.rtc_ctx, SCE_RTC_CTX_SIZE);
       } else if (eventid == 0x100000) {
         g_t_resumed = ksceKernelGetSystemTimeWide();
+        g_t_fs_done = 0;
         int stale = 0;
 
         if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK) {
@@ -338,6 +341,7 @@ static int savestate_system_event(int resume, int eventid,
            * exist, in which case ux0 stays read-only until reboot rather
            * than risk writing through stale cluster chains. */
           stale = update_filesystem();
+          g_t_fs_done = ksceKernelGetSystemTimeWide();
           fs_set_write_mode(stale ? FS_WRITES_READ_ONLY : FS_WRITES_ALLOWED);
         } else if (fs_get_write_mode() == FS_WRITES_DROPPED) {
           fs_set_write_mode(FS_WRITES_ALLOWED);

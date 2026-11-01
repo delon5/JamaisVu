@@ -20,5 +20,6 @@ int menu_init(const char *status_text);
 
 /* Called from the resume system event once the payload has finished. */
 void menu_on_resumed(const PayloadArguments *pa, int stale_open_files);
+void menu_arm_first_frame(void);
 
 #endif

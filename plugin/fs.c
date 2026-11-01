@@ -112,13 +112,17 @@ static int update_fnode(void *fnode) {
   return res;
 }
 
-static void update_fnodes(void) {
+/* returns how many fnodes were in use (looked up again on the card) */
+static uint32_t update_fnodes(void) {
+  uint32_t used = 0;
   int num = *(int *)(g_shared_resource + g_off->sr_num_fnodes);
   for (int i = 0; i < num; i++) {
     void *fnode = (void *)(g_shared_resource + g_off->sr_fnodes +
                            i * g_off->fnode_size);
-    update_fnode(fnode);
+    if (update_fnode(fnode) != FNODE_UNUSED)
+      used++;
   }
+  return used;
 }
 
 /* Returns the number of files that are still open but no longer exist on
@@ -221,17 +225,35 @@ static void mgmt_patch_remove(void) {
   g_mgmt_patch = -1;
 }
 
+FsUpdateTiming g_fs_update_timing;
+
+static uint32_t fs_ms_since(int64_t *t) {
+  int64_t now = ksceKernelGetSystemTimeWide();
+  uint32_t ms = (uint32_t)((now - *t) / 1000);
+  *t = now;
+  return ms;
+}
+
 int update_filesystem(void) {
+  FsUpdateTiming *tm = &g_fs_update_timing;
+  int64_t t = ksceKernelGetSystemTimeWide();
+  memset(tm, 0, sizeof(*tm));
+  tm->vnodes = (uint32_t)*g_num_vnodes;
   invalidate_buff_caches();
+  tm->ms[0] = fs_ms_since(&t);
   invalidate_file_caches();
+  tm->ms[1] = fs_ms_since(&t);
   if (mgmt_patch_apply() < 0) {
     /* cannot remount safely: keep the card read-only until restart */
     return 1;
   }
   remount_filesystems();
   mgmt_patch_remove();
+  tm->ms[2] = fs_ms_since(&t);
   int stale_open = update_vnodes();
-  update_fnodes();
+  tm->ms[3] = fs_ms_since(&t);
+  tm->fnodes = update_fnodes();
+  tm->ms[4] = fs_ms_since(&t);
   return stale_open;
 }
 

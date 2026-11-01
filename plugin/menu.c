@@ -27,6 +27,7 @@
 #include "prof.h"
 #include "lockskip.h"
 #include "appdb.h"
+#include "fs.h"
 #include "gui/menu_view.h"
 
 int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
@@ -1704,6 +1705,19 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
                "screen; JamaisVu's own work after the wake-up done at %d ms"
                "\r\n", (int)((t_after - g_t_resume) / 1000));
     log_append(tl);
+    if (g_t_fs_done) {
+      const FsUpdateTiming *f = &g_fs_update_timing;
+      snprintf(tl, sizeof(tl), "    timing ux0 re-read after the load: "
+               "%d -> %d ms after the wake-up; buffer caches %u ms, file "
+               "caches %u ms, remount %u ms, open files %u ms (%u vnodes), "
+               "file entries %u ms (%u in use)\r\n",
+               (int)((g_t_resumed - g_t_resume) / 1000),
+               (int)((g_t_fs_done - g_t_resume) / 1000),
+               (unsigned)f->ms[0], (unsigned)f->ms[1], (unsigned)f->ms[2],
+               (unsigned)f->ms[3], (unsigned)f->vnodes, (unsigned)f->ms[4],
+               (unsigned)f->fnodes);
+      log_append(tl);
+    }
   }
 }
 
@@ -2219,11 +2233,17 @@ static int worker_thread(SceSize args, void *argp) {
 
 /* ------------------------------------------------------------------------ */
 
-void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
+/* Timing: watch for the first frame from the wake-up event on. Armed in
+ * menu_on_resumed it only started after the remount of a load, so frames
+ * during the remount could not have been seen. */
+void menu_arm_first_frame(void) {
   g_t_first_frame = 0;
-  g_wait_first_frame = 1; /* timing: first frame after the wake-up */
   g_t_first_any = 0;
+  g_wait_first_frame = 1;
   g_wait_first_any = 1;
+}
+
+void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
   memcpy(&g_res_pa, pa, sizeof(g_res_pa));
   g_res_debug = pa->debug_mode;
   g_res_stage = pa->stage;
