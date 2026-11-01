@@ -10,7 +10,6 @@
 #include <psp2kern/kernel/modulemgr.h>
 #include <psp2kern/kernel/suspend.h>
 #include <psp2kern/kernel/sysmem.h>
-#include <psp2kern/kernel/sysroot.h>
 #include <psp2kern/kernel/threadmgr.h>
 #include <psp2kern/io/fcntl.h>
 #include <psp2kern/io/dirent.h>
@@ -355,8 +354,25 @@ void jv_set_display_frame(uint32_t paddr, uint32_t pitch, uint32_t width,
   pargs.disp_fb_height = height;
 }
 
+/* SceSysrootForDriver (0x2ED7F97A) GetHardwareInfo / GetHardwareFlags,
+ * resolved by NID: not every SDK declares them */
+static uint32_t (*g_hw_info_fn)(void);
+static int (*g_hw_flags_fn)(void *flags);
+
+static void resolve_hw_fns(void) {
+  if (!g_hw_info_fn &&
+      module_get_export_func(KERNEL_PID, "SceSysmem", 0x2ED7F97A, 0x930B1342,
+                             (uintptr_t *)&g_hw_info_fn) < 0)
+    g_hw_info_fn = NULL;
+  if (!g_hw_flags_fn &&
+      module_get_export_func(KERNEL_PID, "SceSysmem", 0x2ED7F97A, 0x46E72428,
+                             (uintptr_t *)&g_hw_flags_fn) < 0)
+    g_hw_flags_fn = NULL;
+}
+
 uint32_t jv_hw_info(void) {
-  return ksceSysrootGetHardwareInfo();
+  resolve_hw_fns();
+  return g_hw_info_fn ? g_hw_info_fn() : 0;
 }
 
 /* Starts a save or load of a slot: fills in the payload arguments and
@@ -403,8 +419,10 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   if (debug_mode == JV_TEST_DISPLAY) {
     uint8_t flags[16];
     memset(flags, 0, sizeof(flags));
-    ksceSysrootGetHardwareFlags(flags);
-    pargs.disp_hw_info = ksceSysrootGetHardwareInfo();
+    resolve_hw_fns();
+    if (g_hw_flags_fn)
+      g_hw_flags_fn(flags);
+    pargs.disp_hw_info = jv_hw_info();
     pargs.disp_hw_flags0 = flags[0];
   } else {
     pargs.disp_fb_paddr = 0; /* only the display test draws */
