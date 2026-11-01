@@ -145,6 +145,27 @@ static void log_queue(const char *text) {
   ksceKernelSetEventFlag(g_io_evf, IOEV_LOG);
 }
 
+/* The system events recorded by main.c, as runs: S/R (suspend/resume
+ * phase), id, ms of the first..last one, count. System time stops while
+ * the Vita sleeps, so S and R are relative to their own first event. */
+static void format_events(char *buf, int cap, const char *title) {
+  int m = snprintf(buf, cap, "%s", title);
+  uint32_t cnt = g_ev_n < JV_EV_MAX ? g_ev_n : JV_EV_MAX;
+  for (uint32_t i = 0; i < cnt && m < cap - 32; i++) {
+    uint32_t id = g_ev_id[i];
+    int r = (id & 0x80000000u) != 0;
+    int64_t base = r ? g_ev_r0 : g_ev_t0;
+    m += snprintf(buf + m, cap - m, " %s%X@%d", r ? "R" : "S",
+                  (unsigned)(id & 0x7FFFFFFFu),
+                  base ? (int)((g_ev_t[i] - base) / 1000) : -1);
+    if (g_ev_cnt[i] > 1 && m < cap - 32)
+      m += snprintf(buf + m, cap - m, "..%d(x%u)",
+                    base ? (int)((g_ev_last[i] - base) / 1000) : -1,
+                    (unsigned)g_ev_cnt[i]);
+  }
+  snprintf(buf + m, cap - m, "\r\n");
+}
+
 static int read_small(const char *path, void *buf, int cap) {
   SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
   if (fd < 0)
@@ -1226,6 +1247,17 @@ static int input_thread(SceSize args, void *argp) {
       model_end();
     }
 
+    if (g_ev_normal_ready) {
+      /* a sleep JamaisVu did not request (power button): for comparison
+       * with the request -> sleep time of a save */
+      static char el[1536];
+      g_ev_normal_ready = 0;
+      format_events(el, sizeof(el), "normal sleep/wake, system events (S: "
+                    "ms after the first suspend event, R: ms after the first "
+                    "resume event):");
+      log_queue(el);
+    }
+
     if (g_lockskip_until && now_us() >= g_lockskip_until) {
       g_lockskip_until = 0;
       lockskip_release();
@@ -1706,25 +1738,12 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
                "\r\n", (int)((t_after - g_t_resume) / 1000));
     log_append(tl);
     if (g_res_mode == JAMAISVU_MODE_SAVE && g_ev_n) {
-      /* suspend events in ms after the request, resume events in ms after
-       * the wake-up (system time stops while the Vita sleeps). After a
-       * load the restored image holds its own save's events: not shown. */
-      int m = snprintf(tl, sizeof(tl), "    system events:");
-      uint32_t cnt = g_ev_n < JV_EV_MAX ? g_ev_n : JV_EV_MAX;
-      for (uint32_t i = 0; i < cnt && m < (int)sizeof(tl) - 24; i++) {
-        uint32_t id = g_ev_id[i];
-        int r = (id & 0x80000000u) != 0;
-        int64_t base = r ? g_t_resume : g_t_request;
-        m += snprintf(tl + m, sizeof(tl) - m, " %s%X@%d", r ? "R" : "S",
-                      (unsigned)(id & 0x7FFFFFFFu),
-                      base ? (int)((g_ev_t[i] - base) / 1000) : -1);
-        if (g_ev_cnt[i] > 1 && m < (int)sizeof(tl) - 24)
-          m += snprintf(tl + m, sizeof(tl) - m, "..%d(x%u)",
-                        base ? (int)((g_ev_last[i] - base) / 1000) : -1,
-                        (unsigned)g_ev_cnt[i]);
-      }
-      snprintf(tl + m, sizeof(tl) - m, "\r\n");
-      log_append(tl);
+      /* After a load the restored image holds its own save's events: not
+       * shown. */
+      static char el[1536];
+      format_events(el, sizeof(el), "    system events (S: ms after the "
+                    "request, R: ms after the first resume event):");
+      log_append(el);
     }
     if (g_t_fs_done) {
       const FsUpdateTiming *f = &g_fs_update_timing;

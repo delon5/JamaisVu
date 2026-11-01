@@ -311,11 +311,31 @@ int64_t g_ev_last[JV_EV_MAX];  /* last time of that run */
 uint32_t g_ev_cnt[JV_EV_MAX];  /* how often in a row (0x401 repeats every
                                 * 10 ms: ac9acfb filled the list at 280 ms) */
 
+/* recording state: open from the request (or, for a sleep JamaisVu did not
+ * ask for, the first suspend event) until the 0x100000 resume event */
+volatile int g_ev_open, g_ev_normal, g_ev_normal_ready;
+int64_t g_ev_t0, g_ev_r0; /* first suspend / first resume event */
+
 static int savestate_system_event(int resume, int eventid,
                                   void *args, void *opt) {
-  if (pargs.mode != JAMAISVU_MODE_NONE) {
+  {
     uint32_t id = (uint32_t)eventid | (resume ? 0x80000000u : 0);
     int64_t now = ksceKernelGetSystemTimeWide();
+    if (!resume && pargs.mode == JAMAISVU_MODE_NONE &&
+        (!g_ev_open ||
+         (g_ev_n && (g_ev_id[g_ev_n - 1] & 0x80000000u)))) {
+      /* a normal sleep (power button / auto standby): recorded too, to
+       * compare with the 3.6 s of 0x401 seen before every save */
+      g_ev_n = 0;
+      g_ev_t0 = now;
+      g_ev_r0 = 0;
+      g_ev_normal = 1;
+      g_ev_open = 1;
+    }
+    if (!g_ev_open)
+      goto ev_done;
+    if (resume && !g_ev_r0)
+      g_ev_r0 = now;
     uint32_t n = g_ev_n;
     if (n && g_ev_id[n - 1] == id) {
       g_ev_cnt[n - 1]++;
@@ -326,7 +346,13 @@ static int savestate_system_event(int resume, int eventid,
       g_ev_cnt[n] = 1;
       g_ev_n = n + 1;
     }
+    if (resume && eventid == 0x100000) {
+      g_ev_open = 0;
+      if (g_ev_normal && pargs.mode == JAMAISVU_MODE_NONE)
+        g_ev_normal_ready = 1; /* menu.c logs it */
+    }
   }
+ev_done:
   if (pargs.mode != JAMAISVU_MODE_NONE) {
     if (!resume) {
       if (eventid == 0x4000) {
@@ -480,8 +506,14 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
 
   pargs.mem_bytes = pargs.mem_ms = 0;
   pargs.icache_on = pargs.delay_unit_ns = 0;
+  g_ev_open = 0;
   g_ev_n = 0;
   g_t_request = ksceKernelGetSystemTimeWide();
+  g_ev_t0 = g_t_request;
+  g_ev_r0 = 0;
+  g_ev_normal = 0;
+  g_ev_normal_ready = 0;
+  g_ev_open = 1;
   g_t_suspend = g_t_resume = g_t_resumed = 0;
   int res = kscePowerRequestSoftReset();
   if (res < 0) {

@@ -36,7 +36,9 @@ uint32_t jv_hw_info(void);
  * resumed (main.c); the first game frame after it is timed in menu.c */
 extern volatile int64_t g_t_request, g_t_suspend, g_t_resume, g_t_resumed;
 extern volatile int64_t g_t_fs_done;
-#define JV_EV_MAX 32
+#define JV_EV_MAX 64
+extern volatile int g_ev_open, g_ev_normal, g_ev_normal_ready;
+extern int64_t g_ev_t0, g_ev_r0;
 extern volatile uint32_t g_ev_n;
 extern uint32_t g_ev_id[JV_EV_MAX];
 extern int64_t g_ev_t[JV_EV_MAX], g_ev_last[JV_EV_MAX];
