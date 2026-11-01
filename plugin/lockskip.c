@@ -22,6 +22,7 @@
  */
 
 #include <psp2kern/kernel/sysroot.h>
+#include <psp2kern/kernel/sysmem.h>
 #include <psp2kern/kernel/threadmgr.h>
 #include <taihen.h>
 
@@ -98,15 +99,27 @@ int lockskip_apply(char *out, int len) {
     goto done;
   }
 
+  /* For a user process taiHEN reports the module ID as the process sees
+   * it; injecting needs the kernel's ID for it (taiHEN's own user-side
+   * taiInjectData converts it the same way). Without this: 0x8002D082
+   * (LIBRARYDB_NO_MOD), seen in log.txt on a 3.60 PCH-2000. */
+  SceUID kmodid = ksceKernelKernelUidForUserUid(pid, info.modid);
+  if (kmodid < 0) {
+    snprintf(out, len, "lock screen skip: SceShell module ID not found "
+             "(0x%08X)", (unsigned)kmodid);
+    goto done;
+  }
+
   for (int i = 0; i < 2; i++)
-    g_inject[i] = taiInjectDataForKernel(pid, info.modid, 0, b->off[i],
+    g_inject[i] = taiInjectDataForKernel(pid, kmodid, 0, b->off[i],
                                          &movs_r0_1_nop,
                                          sizeof(movs_r0_1_nop));
   if (g_inject[0] < 0 || g_inject[1] < 0) {
-    /* e.g. NoLockScreen is installed and already patched these */
-    snprintf(out, len, "lock screen skip: not applied (0x%08X/0x%08X) - "
-             "NoLockScreen installed?", (unsigned)g_inject[0],
-             (unsigned)g_inject[1]);
+    int exists = g_inject[0] == (SceUID)0x90010005 ||
+                 g_inject[1] == (SceUID)0x90010005; /* TAI_ERROR_PATCH_EXISTS */
+    snprintf(out, len, "lock screen skip: not applied (0x%08X/0x%08X)%s",
+             (unsigned)g_inject[0], (unsigned)g_inject[1],
+             exists ? " - already patched (NoLockScreen installed?)" : "");
     release_locked();
     goto done;
   }

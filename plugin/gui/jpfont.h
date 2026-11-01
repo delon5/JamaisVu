@@ -15,8 +15,8 @@
 #include <stdint.h>
 #include "font.h"
 
-#define EXT_MAX_GLYPHS 160
-#define EXT_BITMAP_SIZE (64 * 1024)
+#define EXT_MAX_GLYPHS 128
+#define EXT_BITMAP_SIZE (48 * 1024) /* ~100 glyphs of 22 px */
 
 /* Glyphs for code points >= 0x80, drawn next to an ASCII Font on the
  * same baseline (8-bit coverage, like Font). Sorted by code point. */

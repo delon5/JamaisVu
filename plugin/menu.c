@@ -75,11 +75,22 @@ static void model_clear_thumbs(void);
 
 /* Glyphs for Japanese (non-ASCII) game names, read from jpfont.bin on
  * the Memory Card when the slot list is read; part of the overlay memory.
- * Drawing counts itself in g_ext_users, so the set is only changed while
- * nothing draws with it. */
-static ExtGlyphs *g_ext;
-static uint32_t g_ext_gen;
-static volatile int g_ext_users;
+ * Two sets: the worker fills the one the model does not point to, then
+ * switches the model to it. Drawing counts itself in g_ext_users[set]
+ * (after taking its copy of the model, then re-checking the model), so a
+ * set is only refilled once nothing draws with it. (One set, with the
+ * worker waiting for drawing to finish, failed in games: the menu is drawn
+ * at the lowest priority and the worker gave up waiting - no Japanese
+ * names in game, only in the LiveArea.) */
+static ExtGlyphs *g_ext_set[2];
+static volatile int g_ext_users[2];
+
+/* which set m->ext points to, or -1 */
+static int ext_index(const ExtGlyphs *e) {
+  if (!e)
+    return -1;
+  return e == g_ext_set[0] ? 0 : e == g_ext_set[1] ? 1 : -1;
+}
 
 /* Menu model: written by the input and worker threads under g_mtx,
  * read lock-free by the display hook (seqlock: odd = being written). */
@@ -259,7 +270,7 @@ static int overlay_acquire(void) {
   if (!g_overlay_ready) {
     uint32_t size = MENU_W * MENU_H * 4 + TOAST_W * TOAST_H * 4 +
                     (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_SCREEN_W * 4 +
-                    MENU_W * BAND_ROWS * 4 + ((sizeof(ExtGlyphs) + 3) & ~3u);
+                    MENU_W * BAND_ROWS * 4 + 2 * ((sizeof(ExtGlyphs) + 3) & ~3u);
     size = (size + 0xfff) & ~0xfff;
     g_mem_blk = ksceKernelAllocMemBlock("JamaisVuMenu",
                                         SCE_KERNEL_MEMBLOCK_TYPE_KERNEL_RW,
@@ -274,9 +285,12 @@ static int overlay_acquire(void) {
       }
       g_rowbuf = p;    p += JV_SCREEN_W;
       g_band_px = p;   p += MENU_W * BAND_ROWS;
-      g_ext = (ExtGlyphs *)p;
-      g_ext->n = 0;
-      g_ext->used = 0;
+      for (int k = 0; k < 2; k++) {
+        g_ext_set[k] = (ExtGlyphs *)p;
+        g_ext_set[k]->n = 0;
+        g_ext_set[k]->used = 0;
+        p += ((sizeof(ExtGlyphs) + 3) & ~3u) / 4;
+      }
       g_overlay_gen++;
       __sync_synchronize();
       g_overlay_ready = 1;
@@ -306,7 +320,7 @@ static void overlay_release(void) {
       ksceKernelFreeMemBlock(g_mem_blk);
       g_mem_blk = -1;
       g_panel_px = g_toast_px = g_rowbuf = g_band_px = NULL;
-      g_ext = NULL;
+      g_ext_set[0] = g_ext_set[1] = NULL;
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = NULL;
     } else {
@@ -436,6 +450,17 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
       t_read += t1 - t;
       t = t1;
       cv_compose_row(g_rowbuf, src, xmap, fw);
+    } else if (fw == c->w) {
+      /* opaque row at full size (the usual case): every pixel already has
+       * alpha 255, so the panel row is exactly what goes on screen - copy
+       * it straight from there. Building a copy of each row first cost
+       * ~9.5 ms per frame in Trails (log.txt, compose-build). */
+      uint32_t t1 = prof_now();
+      t_build += t1 - t;
+      if (jv_copy_to_user(dst, src, fw * 4) < 0)
+        return;
+      t_write += prof_now() - t1;
+      continue;
     } else {
       for (int i = 0; i < fw; i++)
         g_rowbuf[i] = 0xff000000u | (src[xmap[i]] & 0x00ffffffu);
@@ -473,12 +498,16 @@ static void render_panel(void) {
     }
     if (s1 == g_panel_seq && gen == g_panel_gen)
       break; /* up to date */
-    __sync_fetch_and_add(&g_ext_users, 1);
     __sync_synchronize();
     memcpy(&local, &g_model, sizeof(local));
     __sync_synchronize();
-    if (g_model_seq != s1) {
-      __sync_fetch_and_sub(&g_ext_users, 1);
+    int xi = ext_index(local.ext);
+    if (xi >= 0)
+      __sync_fetch_and_add(&g_ext_users[xi], 1);
+    __sync_synchronize();
+    if (g_model_seq != s1) { /* changed meanwhile (maybe its glyph set) */
+      if (xi >= 0)
+        __sync_fetch_and_sub(&g_ext_users[xi], 1);
       continue;
     }
 
@@ -497,7 +526,8 @@ static void render_panel(void) {
       memcpy(&g_panel_blend[y0], blend, rows);
       __sync_synchronize();
     }
-    __sync_fetch_and_sub(&g_ext_users, 1);
+    if (xi >= 0)
+      __sync_fetch_and_sub(&g_ext_users[xi], 1);
     if (stopped)
       break;
     prof_add(PROF_RENDER, t0);
@@ -545,9 +575,12 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
   } else if (g_menu_open) { /* no render thread: draw here */
     uint32_t s1 = g_model_seq;
     if (!(s1 & 1) && s1 != rendered_seq) {
-      __sync_fetch_and_add(&g_ext_users, 1);
       __sync_synchronize();
       memcpy(&local, &g_model, sizeof(local));
+      __sync_synchronize();
+      int xi = ext_index(local.ext);
+      if (xi >= 0)
+        __sync_fetch_and_add(&g_ext_users[xi], 1);
       __sync_synchronize();
       if (g_model_seq == s1) {
         uint32_t t0 = prof_now();
@@ -559,7 +592,8 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
          * model changed meanwhile, the next frame renders again */
         rendered_seq = s1;
       }
-      __sync_fetch_and_sub(&g_ext_users, 1);
+      if (xi >= 0)
+        __sync_fetch_and_sub(&g_ext_users[xi], 1);
     }
     if (!(rendered_seq & 1)) {
       uint32_t t0 = prof_now();
@@ -1077,28 +1111,25 @@ static const ExtGlyphs *resolve_names(MenuSlot *fresh) {
     }
     strs[n++] = names[i];
   }
-  if (n == 0 || !g_ext)
+  if (n == 0 || !g_ext_set[0])
     return NULL;
 
-  /* nothing may draw with the set while it changes */
-  model_begin();
-  g_model.ext = NULL;
-  model_end();
-  for (int i = 0; i < 500 && g_ext_users; i++)
+  /* fill the set the model does not use; drawing that started with it
+   * before the last switch has to finish first (normally long done) */
+  int t = ext_index(g_model.ext) == 0 ? 1 : 0;
+  ExtGlyphs *ext = g_ext_set[t];
+  for (int i = 0; i < 3000 && g_ext_users[t]; i++)
     ksceKernelDelayThread(1000);
-  if (g_ext_users)
-    return NULL; /* try again with the next refresh */
-  if (g_ext_gen != g_overlay_gen || g_ext->n > EXT_MAX_GLYPHS - 64) {
-    g_ext->n = 0;
-    g_ext->used = 0;
-    g_ext_gen = g_overlay_gen;
-  }
+  if (g_ext_users[t])
+    return (ExtGlyphs *)g_model.ext; /* keep what is shown */
+  ext->n = 0;
+  ext->used = 0;
 
   jv_file_path(path, sizeof(path), "jpfont.bin");
   SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
   int r = -1;
   if (fd >= 0) {
-    r = jpfont_load(jf_read, &fd, strs, n, g_ext);
+    r = jpfont_load(jf_read, &fd, strs, n, ext);
     ksceIoClose(fd);
   }
   if (r < 0) {
@@ -1110,11 +1141,11 @@ static const ExtGlyphs *resolve_names(MenuSlot *fresh) {
     return NULL;
   }
   for (int i = 0; i < JV_NUM_SLOTS; i++)
-    if (has[i] && drawable_chars(names[i], g_ext) >= 2) {
+    if (has[i] && drawable_chars(names[i], ext) >= 2) {
       memcpy(fresh[i].title, names[i], sizeof(fresh[i].title) - 1);
       fresh[i].title[sizeof(fresh[i].title) - 1] = '\0';
     }
-  return g_ext;
+  return ext;
 }
 
 static void refresh_slots(void) {
