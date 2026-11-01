@@ -2,7 +2,7 @@
 
 *JamaisVu* is a kernel plugin for the PlayStation Vita that takes a snapshot of the whole system's memory at any point and restores it later, so you can save in games where it is officially not possible. It is based on TheFloW's savestate plugin, with a new on-screen slot menu and a rewritten save/load path designed so that it cannot damage your Memory Card.
 
-![Slot menu](docs/menu-preview/1_browse.png)
+![Slot menu in the LiveArea (screenshot from a PCH-2000)](docs/screenshots/menu-livearea.jpg)
 
 ## Status
 
@@ -62,11 +62,9 @@ Each slot shows a thumbnail of the game screen at the moment you saved, the game
 
 **Japanese game names** (kana and kanji, e.g. キャサリン・ＦＢ) need `jpfont.bin` (from the release, ~1.7 MB) in `ux0:data/JamaisVu/`. It stays on the Memory Card: when the menu opens, only the characters the five names need are read (at most ~70 KB, and only while the menu is shown). Without the file, such names show only their Latin letters, or the title ID.
 
-![Japanese name](docs/menu-preview/18_japanese_name.png)
-
 **A snapshot only loads into the exact game version it was taken with.** The version (`APP_VER` from the game's `param.sfo`, or from its installed update) is stored with the slot. If the game has been updated (e.g. 01.01 → 01.02) or downgraded since, the slot is marked and cannot be loaded.
 
-- **Saving** blacks out the screen for about a minute while memory is written to `data/JamaisVu/slotN.bin` on the Memory Card. Afterwards the game continues, and a message confirms the save or explains why it failed.
+- **Saving** takes about a minute while memory is written to `data/JamaisVu/slotN.bin` on the Memory Card. On a PCH-2000 a progress screen shows how far it is (saves and loads); on other models the screen stays black for now. Afterwards the game continues, and a message confirms the save or explains why it failed.
 - **Loading** works from inside a game and from the **LiveArea**. Saving does not: Save only appears when a running game is on screen, and this is checked again right before the save starts. A game suspended in the background doesn't count, so the LiveArea/shell can never be snapshotted.
 - **No lock screen after a save or load** (handhelds and PS TV, no NoLockScreen plugin needed). JamaisVu patches SceShell in memory just for that wake-up and removes the patch about 10 s later, so ordinary sleep still locks. Retail 3.60 and 3.65–3.74 only; on other SceShell builds the lock screen appears as usual. `log.txt` says whether it was applied.
 - During save and load **the game card LED is on**. If it **blinks rapidly**, see [If a load fails](#if-a-load-fails).
