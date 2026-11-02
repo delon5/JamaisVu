@@ -312,10 +312,10 @@ static struct {
 } g_fbd;
 
 /* where the last menu compose put a few of its pixels, and their values */
-#define CHK_N 32
+#define CHK_N 96
 static struct {
   uintptr_t base;
-  int n;
+  int n, crossed;
   int64_t t;
   uint32_t off[CHK_N], val[CHK_N];
 } g_chk;
@@ -778,21 +778,24 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
     }
   }
   g_fbd.cleans++;
-  /* drawn-over check: 8 opaque rows x 4 columns, values as written */
+  /* drawn-over check: 12 opaque rows x 8 columns, values as written (was
+   * 8 x 4: the blocks in the user's video were at the panel's lower left,
+   * between the old sample points) */
   if (record && fw == c->w) {
     int n = 0;
-    for (int k = 1; k <= 8; k++) {
-      int j = k * fh / 9, sy = j * c->h / fh;
+    for (int k = 1; k <= 12; k++) {
+      int j = k * fh / 13, sy = j * c->h / fh;
       if (blend_rows[sy])
         continue;
-      for (int q = 1; q <= 4 && n < CHK_N; q++) {
-        int x = q * fw / 5;
+      for (int q = 1; q <= 8 && n < CHK_N; q++) {
+        int x = q * fw / 9;
         g_chk.off[n] = (uint32_t)((fy0 + j) * p->pitch + fx0 + x);
         g_chk.val[n] = c->px[sy * c->w + x];
         n++;
       }
     }
     g_chk.base = (uintptr_t)p->base;
+    g_chk.crossed = 0; /* set by display_hook once drawing has finished */
     g_chk.t = now_us();
     __sync_synchronize();
     g_chk.n = n;
@@ -961,6 +964,28 @@ static volatile int64_t g_t_first_any;
 static volatile int g_first_any_head, g_first_any_index;
 static volatile int g_wait_first_any;
 
+/* Dead Nation (user's video): rectangles of the game over the menu's lower
+ * left AND lighter rectangles of a different game frame outside the menu -
+ * the shown frame is a mix of two of the game's frames, tile by tile. Is
+ * the game's GPU drawing into a frame that is already on screen because
+ * the menu holds the game's display call (~8.5 ms per frame there)?
+ * Measured here: vblanks between the game's frames with the menu closed
+ * and open, how often the menu's drawing runs past a vblank, and whether
+ * drawn-over hits follow those frames. The slow-frame test (Diagnostics,
+ * R) holds every game frame for as long as the menu does while the menu
+ * is closed - if the game itself breaks up then, the time is the cause,
+ * not the menu's pixels. */
+static int (*g_vcount)(int head);
+static volatile int g_slow_test; /* until switched off or restart */
+#define JV_SLOW_TEST_US 9000
+static struct {
+  uint32_t n[2][5]; /* [menu open][vblanks since the last game frame] */
+  uint32_t crossed, drawn, slow_frames;
+  uint32_t chk_x_frames, chk_x_hit;
+  uint32_t last_vc;
+  int have_last;
+} g_pace;
+
 /* Reads back the menu pixels of the frame drawn last time. Called when the
  * next frame arrives: the old one is still on screen until the flip, so a
  * game that has finished with it must not have written there. */
@@ -984,6 +1009,11 @@ static void drawn_over_check(uintptr_t next_base) {
   g_fbd.chk_frames++;
   g_fbd.chk_px += n;
   g_fbd.chk_changed += changed;
+  if (g_chk.crossed) {
+    g_pace.chk_x_frames++;
+    if (changed)
+      g_pace.chk_x_hit++;
+  }
   if (changed)
     g_fbd.chk_hit++;
   if (us > g_fbd.chk_us_max)
@@ -994,6 +1024,24 @@ static void drawn_over_check(uintptr_t next_base) {
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
+  int game_frame = index == 0 && p && p->base && g_vcount &&
+                   head == ksceDisplayGetPrimaryHead() &&
+                   ksceAppMgrIsExclusiveProcessRunning();
+  if (game_frame) {
+    uint32_t vc = (uint32_t)g_vcount(head);
+    if (g_pace.have_last) {
+      uint32_t d = vc - g_pace.last_vc;
+      g_pace.n[g_menu_open ? 1 : 0][d > 4 ? 4 : d]++;
+    }
+    g_pace.last_vc = vc;
+    g_pace.have_last = 1;
+    if (g_slow_test && !g_menu_open) {
+      int64_t until = now_us() + JV_SLOW_TEST_US;
+      while (now_us() < until)
+        ;
+      g_pace.slow_frames++;
+    }
+  }
   if (g_menu_open && head == ksceDisplayGetPrimaryHead() &&
       ksceAppMgrIsExclusiveProcessRunning()) {
     if (index == 0)
@@ -1030,6 +1078,7 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
       if (g_capture_req)
         capture(p);
       if (g_menu_open || now_us() < g_toast_until) {
+        uint32_t v0 = game_frame ? (uint32_t)g_vcount(head) : 0;
         if (g_menu_open) {
           drawn_over_check((uintptr_t)p->base);
           fbd_frame(p, sync);
@@ -1037,6 +1086,13 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
             record_frame(p);
         }
         draw_overlays(p);
+        if (game_frame && g_menu_open) {
+          g_pace.drawn++;
+          if ((uint32_t)g_vcount(head) != v0) {
+            g_pace.crossed++;
+            g_chk.crossed = 1;
+          }
+        }
       }
     }
     __sync_fetch_and_sub(&g_overlay_users, 1);
@@ -1162,6 +1218,32 @@ static void perf_report(void) {
   snprintf(line + n, sizeof(line) - n, "\r\n");
   g_perf_since = now;
   log_queue(line);
+
+  if (g_pace.n[0][1] + g_pace.n[0][2] + g_pace.n[0][3] + g_pace.n[0][4] +
+      g_pace.n[1][1] + g_pace.n[1][2] + g_pace.n[1][3] + g_pace.n[1][4]) {
+    snprintf(line, sizeof(line),
+             "    game frames, vblanks since the previous one (0/1/2/3/4+): "
+             "menu closed %u/%u/%u/%u/%u, menu open %u/%u/%u/%u/%u; menu "
+             "drawing ran past a vblank in %u of %u frames, drawn over after "
+             "those %u of %u; slow-frame test %s, frames held %u ms: %u\r\n",
+             (unsigned)g_pace.n[0][0], (unsigned)g_pace.n[0][1],
+             (unsigned)g_pace.n[0][2], (unsigned)g_pace.n[0][3],
+             (unsigned)g_pace.n[0][4], (unsigned)g_pace.n[1][0],
+             (unsigned)g_pace.n[1][1], (unsigned)g_pace.n[1][2],
+             (unsigned)g_pace.n[1][3], (unsigned)g_pace.n[1][4],
+             (unsigned)g_pace.crossed, (unsigned)g_pace.drawn,
+             (unsigned)g_pace.chk_x_hit, (unsigned)g_pace.chk_x_frames,
+             g_slow_test ? "ON" : "off", JV_SLOW_TEST_US / 1000,
+             (unsigned)g_pace.slow_frames);
+    log_queue(line);
+  }
+  {
+    uint32_t vc = g_pace.last_vc;
+    int have = g_pace.have_last;
+    memset(&g_pace, 0, sizeof(g_pace));
+    g_pace.last_vc = vc;
+    g_pace.have_last = have;
+  }
 
   if (g_fbd.frames) {
     snprintf(line, sizeof(line),
@@ -1367,6 +1449,16 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_RESET, sel);
       else if (pressed & SCE_CTRL_SQUARE)
         start_op(OP_TEST_DRY, sel);
+      else if (pressed & SCE_CTRL_RTRIGGER) {
+        /* slow-frame test on/off (applies while the menu is closed) */
+        g_slow_test = !g_slow_test;
+        model_begin();
+        g_model.slow_test = g_slow_test;
+        model_end();
+        log_queue(g_slow_test ? "slow-frame test: ON (each game frame held "
+                                "9 ms while the menu is closed)\r\n"
+                              : "slow-frame test: off\r\n");
+      }
       else if (pressed & SCE_CTRL_TRIANGLE) {
         /* PCH-2000 LCD: timing B (vic 0x20). A/B on hardware: timing A
          * (vic 0, libbaremetal's choice, the OLED timing) left garbage
@@ -2644,6 +2736,10 @@ int menu_init(const char *status_text) {
                              (uintptr_t *)&g_va2pa_sw) < 0)
     g_va2pa_sw = NULL;
 
+  /* ksceDisplayGetVcountInternal, for the frame pacing numbers */
+  if (module_get_export_func(KERNEL_PID, "SceDisplay", TAI_ANY_LIBRARY,
+                             0x8B5DA27B, (uintptr_t *)&g_vcount) < 0)
+    g_vcount = NULL;
   if (module_get_export_func(KERNEL_PID, "SceSysmem", 0x40ECDB0E, 0x364E68A4,
                              (uintptr_t *)&g_dcache_clean_inv) < 0)
     g_dcache_clean_inv = NULL;

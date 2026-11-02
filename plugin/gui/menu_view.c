@@ -345,6 +345,11 @@ static void draw_details(Canvas *c, const MenuModel *m) {
       cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y,
                        "Dry run uses the selected slot; it must be empty",
                        C_TEXT_DIM, MENU_W - 48);
+      cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y + 26,
+                       m->slow_test ? "R: slow-frame test - ON (game frames "
+                                      "held 9 ms, menu closed)"
+                                    : "R: slow-frame test - off",
+                       m->slow_test ? C_ACCENT : C_TEXT_DIM, MENU_W - 48);
       break;
 
     case MV_MESSAGE:
