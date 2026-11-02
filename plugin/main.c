@@ -434,6 +434,10 @@ static void resolve_hw_fns(void) {
     g_hw_flags_fn = NULL;
 }
 
+void jv_set_appdb_changed(uint32_t v) {
+  pargs.appdb_changed = v;
+}
+
 void jv_set_display_frame2(uint32_t paddr, uint32_t pitch) {
   pargs.disp_fb2_paddr = paddr;
   pargs.disp_fb2_pitch = pitch;

@@ -66,6 +66,8 @@ static uint32_t *g_panel_px, *g_toast_px, *g_rowbuf, *g_band_px;
  * it everywhere; it is only one row). */
 #define JV_MAX_FB_W 1920
 static int g_fb_max_w = 960, g_fb_max_h = 544;
+static SlotEnv g_pending_env; /* plugin folders + app.db when the current
+                                 save started (slotN.jve) */
 static int g_dolce; /* PS TV: also controller port 1 */
 
 /* The menu image is drawn by its own low-priority thread, not in the
@@ -1347,7 +1349,7 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
                  prepare_count > 1) {
         confirm_prepare(1);
       } else if ((pressed & SCE_CTRL_SQUARE) && used && cfg_changed) {
-        set_message(MV_MESSAGE, "Plugin config (tai/config.txt) changed "
+        set_message(MV_MESSAGE, "Plugins (tai folder or config.txt) changed "
                     "since this snapshot - it can't be loaded", -1, 1);
       } else if ((pressed & SCE_CTRL_SQUARE) && used && outdated) {
         set_message(MV_MESSAGE, "The game was updated since this snapshot "
@@ -1630,7 +1632,10 @@ static void refresh_slots(void) {
   /* current plugin configuration, read once for all slots */
   static uint8_t cfg_state[JV_CFG_FILES];
   static uint8_t cfg_md5[JV_CFG_FILES][16];
+  static TaiPrint tai_now[JV_TAI_DIRS];
+  static SlotEnv env;
   config_fingerprint(cfg_state, cfg_md5);
+  tai_fingerprint(tai_now);
 
   int prepare_count = 0;
   for (int i = 0; i < JV_NUM_SLOTS; i++)
@@ -1664,7 +1669,9 @@ static void refresh_slots(void) {
                          sizeof(s->installed_ver)) < 0)
         s->installed_ver[0] = '\0';
       s->outdated = !app_versions_match(s->app_ver, s->installed_ver);
-      s->config_changed = !config_matches_fp(&info, cfg_state, cfg_md5, NULL);
+      s->config_changed = !config_matches_fp(&info, cfg_state, cfg_md5, NULL) ||
+                          (slot_env_read(i, info.crc, &env) == 0 &&
+                           !tai_matches(env.tai, tai_now, NULL));
     }
   }
 
@@ -1786,6 +1793,10 @@ static void after_resume(void) {
   if (g_res_mode == JAMAISVU_MODE_SAVE) {
     if (g_res_result == JV_OK) {
       int r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
+      if (r == 0) {
+        g_pending_env.info_crc = g_pending_info.crc;
+        slot_env_write(g_res_slot, &g_pending_env);
+      }
       if (r == 0 && g_save_frame.valid &&
           slot_frame_write(g_res_slot, g_pending_info.crc, g_save_frame.pa,
                            g_save_frame.pitch, g_save_frame.w,
@@ -1812,6 +1823,10 @@ static void after_resume(void) {
       if (g_res_stale)
         snprintf(msg, sizeof(msg), "Loaded slot %u - Memory Card is "
                  "read-only until restart", (unsigned)g_res_slot + 1);
+      else if (g_res_pa.appdb_changed == 2)
+        snprintf(msg, sizeof(msg), "Loaded slot %u - apps changed since this "
+                 "save: restart if the LiveArea looks out of date",
+                 (unsigned)g_res_slot + 1);
       else
         snprintf(msg, sizeof(msg), "Loaded slot %u", (unsigned)g_res_slot + 1);
       report(msg, g_res_stale);
@@ -2086,6 +2101,30 @@ static void do_save(int slot) {
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
 
+  /* the plugin folders and the LiveArea's app database now: recorded
+   * with the slot (slotN.jve) once the save succeeded, compared when it is
+   * loaded (see slots.h, SlotEnv) */
+  {
+    static char line[224];
+    int64_t t0 = ksceKernelGetSystemTimeWide();
+    memset(&g_pending_env, 0, sizeof(g_pending_env));
+    tai_fingerprint(g_pending_env.tai);
+    int64_t t1 = ksceKernelGetSystemTimeWide();
+    g_pending_env.appdb_state = (uint32_t)appdb_fingerprint(
+        g_pending_env.appdb_md5, &g_pending_env.appdb_size);
+    int64_t t2 = ksceKernelGetSystemTimeWide();
+    snprintf(line, sizeof(line), "    environment: ux0:tai %u files %u KB, "
+             "ur0:tai %u files %u KB (%d ms); app.db %u KB (%d ms)\r\n",
+             (unsigned)g_pending_env.tai[0].files,
+             (unsigned)(g_pending_env.tai[0].bytes >> 10),
+             (unsigned)g_pending_env.tai[1].files,
+             (unsigned)(g_pending_env.tai[1].bytes >> 10),
+             (int)((t1 - t0) / 1000), (unsigned)(g_pending_env.appdb_size >> 10),
+             (int)((t2 - t1) / 1000));
+    log_append(line);
+    jv_set_appdb_changed(0);
+  }
+
   /* progress screen during the save (PCH-2000): the game's frame as it is
    * now, if it passes the same checks as the display test; otherwise no
    * screen. Remembered for slotN.jvf (loads draw there). */
@@ -2139,8 +2178,13 @@ static void do_load(int slot) {
     }
   }
 
-  /* only with the plugin configuration the snapshot was taken with */
+  /* only with the plugin configuration the snapshot was taken with: the
+   * config.txt files (every slot) and, for slots that recorded them, every
+   * plugin file in ux0:tai and ur0:tai (slotN.jve) */
+  static SlotEnv env;
+  int have_env = slot_env_read(slot, info.crc, &env) == 0;
   {
+    static TaiPrint now[JV_TAI_DIRS];
     int which = 0;
     if (!config_matches(&info, &which)) {
       snprintf(msg, sizeof(msg), "%s changed since this snapshot - it "
@@ -2148,11 +2192,47 @@ static void do_load(int slot) {
       set_message(MV_MESSAGE, msg, -1, 1);
       return;
     }
+    if (have_env) {
+      tai_fingerprint(now);
+      if (!tai_matches(env.tai, now, &which)) {
+        static char line[160];
+        snprintf(msg, sizeof(msg), "Plugins in %s changed since this "
+                 "snapshot - it can't be loaded", jv_tai_dirs[which]);
+        snprintf(line, sizeof(line), "load refused: %s %u files %u bytes "
+                 "now, %u files %u bytes at the save\r\n", jv_tai_dirs[which],
+                 (unsigned)now[which].files, (unsigned)now[which].bytes,
+                 (unsigned)env.tai[which].files,
+                 (unsigned)env.tai[which].bytes);
+        log_append(line);
+        set_message(MV_MESSAGE, msg, -1, 1);
+        return;
+      }
+    }
   }
 
   snprintf(msg, sizeof(msg), "Loading slot %d...", slot + 1);
   set_message(MV_BUSY, msg, -1, 0);
   slots_sync();
+
+  /* the LiveArea's app database: changed since the save? (a warning after
+   * the load, not a block - see slots.h) */
+  {
+    static char line[128];
+    uint8_t md5[16];
+    uint32_t size = 0, v = 0;
+    const char *what = "no record (older slot)";
+    if (have_env && env.appdb_state == JV_CFG_PRESENT) {
+      int st = appdb_fingerprint(md5, &size);
+      v = (st == JV_CFG_PRESENT && !memcmp(md5, env.appdb_md5, 16)) ? 1 : 2;
+      what = v == 1 ? "unchanged since the save" : "CHANGED since the save";
+    }
+    jv_set_appdb_changed(v);
+    snprintf(line, sizeof(line), "    app.db: %s (%u bytes now, %u then); "
+             "plugin folders: %s\r\n", what, (unsigned)size,
+             (unsigned)(have_env ? env.appdb_size : 0),
+             have_env ? "unchanged" : "no record (older slot)");
+    log_append(line);
+  }
 
   /* progress screen: the frame on screen now (game or LiveArea) until the
    * memory restore starts, then the snapshot's own frame from slotN.jvf

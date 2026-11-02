@@ -120,6 +120,10 @@ typedef struct {
    * payload/xerpi/display_test.h): 1 LCD (PCH-2000), 2 OLED (PCH-1000),
    * 3 HDMI (PS TV); 0 = none, the screen stays dark. */
   uint32_t disp_type;
+  /* Loads (set by the plugin before the request, read after it by the
+   * restored image): the LiveArea's app database compared with the one
+   * recorded at save time - 0 unknown (no record), 1 same, 2 changed. */
+  uint32_t appdb_changed;
 } PayloadArguments;
 
 /* First sector of data/JamaisVu/trace.bin on the Memory Card. The plugin

@@ -46,6 +46,18 @@ int ksceIoRemove(const char *file);
 int ksceIoRename(const char *oldname, const char *newname);
 int ksceIoMkdir(const char *dir, SceMode mode);
 int ksceIoGetstat(const char *file, SceIoStat *stat);
+#define SCE_S_IFMT  0xF000
+#define SCE_S_IFDIR 0x1000
+#define SCE_S_IFREG 0x2000
+typedef struct {
+  SceIoStat d_stat;
+  char d_name[256];
+  void *d_private;
+  int dummy;
+} SceIoDirent;
+SceUID ksceIoDopen(const char *dirname);
+int ksceIoDread(SceUID fd, SceIoDirent *dir);
+int ksceIoDclose(SceUID fd);
 int ksceIoSync(const char *device, unsigned int unk);
 int ksceIoDevctl(const char *dev, unsigned int cmd, void *indata, int inlen,
                  void *outdata, int outlen);

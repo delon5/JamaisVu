@@ -9,12 +9,14 @@
 #include <psp2kern/io/fcntl.h>
 #include <psp2kern/io/stat.h>
 #include <psp2kern/io/devctl.h>
+#include <psp2kern/io/dirent.h>
 
 #include <stdio.h>
 #include <string.h>
 
 #include "slots.h"
 #include "md5.h"
+#include "appdb.h"
 #include "storage.h"
 #include "../payload/crc32.h"
 
@@ -389,6 +391,8 @@ int slot_info_remove(int slot) {
     return JV_ERR_SLOT_IO;
   path_for(path, sizeof(path), slot, "jvf"); /* its frame record too */
   ksceIoRemove(path);
+  path_for(path, sizeof(path), slot, "jve"); /* and its environment record */
+  ksceIoRemove(path);
   path_for(path, sizeof(path), slot, "jvi");
   int res = ksceIoRemove(path);
   slots_sync();
@@ -436,6 +440,40 @@ int slot_frame_read(int slot, uint32_t info_crc, SlotFrame *f) {
   /* written for exactly this slot info: anything else (e.g. the slot was
    * saved again by a build that does not write this file) - not used */
   return f->info_crc == info_crc ? 0 : JV_ERR_SLOT_IO;
+}
+
+int slot_env_write(int slot, const SlotEnv *e) {
+  static char path[80];
+  static SlotEnv w;
+  w = *e;
+  if (!storage_mc_root())
+    return JV_ERR_SLOT_IO;
+  w.magic = SLOT_ENV_MAGIC;
+  w.crc = crc32_update(0, &w, offsetof(SlotEnv, crc));
+  path_for(path, sizeof(path), slot, "jve");
+  SceUID fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  if (fd < 0)
+    return JV_ERR_SLOT_IO;
+  int n = ksceIoWrite(fd, &w, sizeof(w));
+  ksceIoClose(fd);
+  slots_sync();
+  return n == sizeof(w) ? 0 : JV_ERR_SLOT_IO;
+}
+
+int slot_env_read(int slot, uint32_t info_crc, SlotEnv *e) {
+  static char path[80];
+  if (!storage_mc_root())
+    return JV_ERR_SLOT_IO;
+  path_for(path, sizeof(path), slot, "jve");
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  if (fd < 0)
+    return JV_ERR_SLOT_IO;
+  int n = ksceIoRead(fd, e, sizeof(*e));
+  ksceIoClose(fd);
+  if (n != sizeof(*e) || e->magic != SLOT_ENV_MAGIC ||
+      e->crc != crc32_update(0, e, offsetof(SlotEnv, crc)))
+    return JV_ERR_SLOT_IO;
+  return e->info_crc == info_crc ? 0 : JV_ERR_SLOT_IO;
 }
 
 int slot_file_exists(int slot) {
@@ -645,18 +683,21 @@ const char *const jv_cfg_paths[JV_CFG_FILES] = {
 
 #define CFG_MAX_BYTES (1024 * 1024)
 
-static int md5_file(const char *path, uint8_t out[16]) {
+static int md5_file_max(const char *path, uint8_t out[16], uint32_t max,
+                        uint32_t *size) {
   static uint8_t buf[4096];
   Md5 m;
   uint32_t total = 0;
 
+  if (size)
+    *size = 0;
   SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
   if (fd < 0)
     return JV_CFG_ABSENT;
   md5_init(&m);
   while (1) {
     int n = ksceIoRead(fd, buf, sizeof(buf));
-    if (n < 0 || total + (uint32_t)n > CFG_MAX_BYTES) {
+    if (n < 0 || total + (uint32_t)n > max) {
       ksceIoClose(fd);
       return JV_CFG_UNREADABLE;
     }
@@ -667,7 +708,134 @@ static int md5_file(const char *path, uint8_t out[16]) {
   }
   ksceIoClose(fd);
   md5_final(&m, out);
+  if (size)
+    *size = total;
   return JV_CFG_PRESENT;
+}
+
+static int md5_file(const char *path, uint8_t out[16]) {
+  return md5_file_max(path, out, CFG_MAX_BYTES, NULL);
+}
+
+/* ---- plugin folders (see slots.h, SlotEnv) ---- */
+
+const char *const jv_tai_dirs[JV_TAI_DIRS] = { "ux0:tai", "ur0:tai" };
+
+#ifndef SCE_S_IFMT
+#define SCE_S_IFMT  0xF000
+#endif
+#ifndef SCE_S_IFDIR
+#define SCE_S_IFDIR 0x1000
+#endif
+
+/* JamaisVu's own files (JamaisVu.skprx, any build of it): not part of
+ * the fingerprint, so updating JamaisVu never locks existing slots */
+static int is_jamaisvu_file(const char *name) {
+  static const char k[] = "jamaisvu";
+  for (int i = 0; i < 8; i++) {
+    char c = name[i];
+    if (c >= 'A' && c <= 'Z')
+      c = (char)(c - 'A' + 'a');
+    if (c != k[i])
+      return 0;
+  }
+  return 1;
+}
+
+/* md5(relative name, NUL, content) XORed into t->md5: the order the
+ * folder lists its files in does not matter */
+static int tai_hash_file(const char *path, const char *rel, TaiPrint *t) {
+  static uint8_t buf[4096];
+  uint8_t d[16];
+  Md5 m;
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  if (fd < 0)
+    return -1;
+  md5_init(&m);
+  md5_update(&m, rel, (uint32_t)strlen(rel) + 1);
+  for (;;) {
+    int n = ksceIoRead(fd, buf, sizeof(buf));
+    if (n < 0 || t->bytes + (uint32_t)n > 256u * 1024 * 1024) {
+      ksceIoClose(fd);
+      return -1;
+    }
+    if (n == 0)
+      break;
+    md5_update(&m, buf, (uint32_t)n);
+    t->bytes += (uint32_t)n;
+  }
+  ksceIoClose(fd);
+  md5_final(&m, d);
+  for (int i = 0; i < 16; i++)
+    t->md5[i] ^= d[i];
+  t->files++;
+  return 0;
+}
+
+/* files of dir and of its subfolders (one level); rel = name below the
+ * plugin folder */
+static int tai_hash_dir(const char *dir, const char *relbase, int depth,
+                        TaiPrint *t) {
+  static SceIoDirent ent[2];
+  static char path[2][256], rel[2][256];
+  SceUID dfd = ksceIoDopen(dir);
+  if (dfd < 0)
+    return depth == 0 ? 1 : -1; /* top folder missing: "absent" */
+  int res = 0;
+  while (res == 0 && ksceIoDread(dfd, &ent[depth]) > 0) {
+    const char *name = ent[depth].d_name;
+    if (!name[0] || !strcmp(name, ".") || !strcmp(name, ".."))
+      continue;
+    if (depth == 0 && is_jamaisvu_file(name))
+      continue;
+    snprintf(path[depth], sizeof(path[depth]), "%s/%s", dir, name);
+    snprintf(rel[depth], sizeof(rel[depth]), "%s%s%s", relbase,
+             relbase[0] ? "/" : "", name);
+    if ((ent[depth].d_stat.st_mode & SCE_S_IFMT) == SCE_S_IFDIR) {
+      if (depth == 0)
+        res = tai_hash_dir(path[0], rel[0], 1, t);
+      /* deeper folders: not part of the fingerprint */
+    } else {
+      res = tai_hash_file(path[depth], rel[depth], t);
+    }
+  }
+  ksceIoDclose(dfd);
+  return res;
+}
+
+void tai_fingerprint(TaiPrint out[JV_TAI_DIRS]) {
+  for (int i = 0; i < JV_TAI_DIRS; i++) {
+    memset(&out[i], 0, sizeof(out[i]));
+    int r = tai_hash_dir(jv_tai_dirs[i], "", 0, &out[i]);
+    out[i].state = r == 0 ? JV_CFG_PRESENT : r > 0 ? JV_CFG_ABSENT
+                                                   : JV_CFG_UNREADABLE;
+    if (out[i].state != JV_CFG_PRESENT) {
+      out[i].files = out[i].bytes = 0;
+      memset(out[i].md5, 0, 16);
+    }
+  }
+}
+
+int tai_matches(const TaiPrint rec[JV_TAI_DIRS],
+                const TaiPrint now[JV_TAI_DIRS], int *which) {
+  for (int i = 0; i < JV_TAI_DIRS; i++) {
+    /* an unreadable folder can never be shown to be unchanged */
+    if (now[i].state != rec[i].state || now[i].state == JV_CFG_UNREADABLE ||
+        (now[i].state == JV_CFG_PRESENT &&
+         (now[i].files != rec[i].files || now[i].bytes != rec[i].bytes ||
+          memcmp(now[i].md5, rec[i].md5, 16)))) {
+      if (which)
+        *which = i;
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* app.db: ~720 KB on the test console; read-only, up to 32 MB */
+int appdb_fingerprint(uint8_t md5[16], uint32_t *size) {
+  memset(md5, 0, 16);
+  return md5_file_max(APPDB_PATH, md5, 32u * 1024 * 1024, size);
 }
 
 void config_fingerprint(uint8_t state[JV_CFG_FILES],

@@ -117,6 +117,46 @@ typedef struct {
 int slot_frame_write(int slot, uint32_t info_crc, uint32_t paddr,
                      uint32_t pitch, uint32_t width, uint32_t height);
 int slot_frame_read(int slot, uint32_t info_crc, SlotFrame *f);
+
+/* slotN.jve: the environment the snapshot was taken in, bound to the slot
+ * info by its CRC like slotN.jvf (slots saved before it have none: not
+ * checked).
+ *   - The plugin folders ux0:tai and ur0:tai: every file's name and
+ *     content (one level of subfolders too), except JamaisVu's own files
+ *     (updating JamaisVu must never lock existing slots). A snapshot holds
+ *     every plugin that was loaded: with any plugin file changed, it can't
+ *     be loaded (like the config.txt check).
+ *   - The LiveArea's app database (ur0:shell/db/app.db): a load restores
+ *     the LiveArea's memory too, so after apps were installed, removed or
+ *     moved its app list is older than the card's. A warning after the
+ *     load, not a block (yet), until logs show how often app.db changes. */
+#define JV_TAI_DIRS 2
+extern const char *const jv_tai_dirs[JV_TAI_DIRS];
+typedef struct {
+  uint32_t state;    /* JV_CFG_PRESENT / _ABSENT / _UNREADABLE */
+  uint32_t files;    /* files hashed */
+  uint32_t bytes;    /* their total size */
+  uint8_t md5[16];   /* XOR of md5(relative name, NUL, content) per file */
+} TaiPrint;
+#define SLOT_ENV_MAGIC 0x3145564Au /* "JVE1" */
+typedef struct {
+  uint32_t magic;
+  uint32_t info_crc; /* SlotInfo.crc of the slot it belongs to */
+  uint32_t appdb_state, appdb_size;
+  uint8_t appdb_md5[16];
+  TaiPrint tai[JV_TAI_DIRS];
+  uint32_t crc;      /* of the fields above */
+} SlotEnv;
+/* app.db now; returns JV_CFG_PRESENT/_ABSENT/_UNREADABLE */
+int appdb_fingerprint(uint8_t md5[16], uint32_t *size);
+/* the plugin folders now */
+void tai_fingerprint(TaiPrint out[JV_TAI_DIRS]);
+/* 1 if every folder equals the record; else 0, *which = the first that
+ * differs */
+int tai_matches(const TaiPrint rec[JV_TAI_DIRS],
+                const TaiPrint now[JV_TAI_DIRS], int *which);
+int slot_env_write(int slot, const SlotEnv *e);
+int slot_env_read(int slot, uint32_t info_crc, SlotEnv *e);
 int slot_info_remove(int slot);
 
 /* slotN.jvi is valid and slotN.bin has the right size */

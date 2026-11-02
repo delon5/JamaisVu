@@ -47,6 +47,7 @@ extern uint32_t g_ev_cnt[JV_EV_MAX];
 /* loads: the snapshot's own frame (slotN.jvf), drawn into once the memory
  * restore starts; 0 = none */
 void jv_set_display_frame2(uint32_t paddr, uint32_t pitch);
+void jv_set_appdb_changed(uint32_t v); /* 0 unknown, 1 same, 2 changed */
 int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
                uint32_t trace_rel_lba, const uint8_t *trace_nonce,
                int payload_variant);

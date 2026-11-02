@@ -155,6 +155,20 @@ static Fd *get_fd(SceUID fd) {
   return &g_fds[fd];
 }
 
+/* no directory listing in the fake OS (tai_fingerprint: folder absent) */
+SceUID ksceIoDopen(const char *dirname) {
+  (void)dirname;
+  return -1;
+}
+int ksceIoDread(SceUID fd, SceIoDirent *dir) {
+  (void)fd; (void)dir;
+  return 0;
+}
+int ksceIoDclose(SceUID fd) {
+  (void)fd;
+  return 0;
+}
+
 SceUID ksceIoOpen(const char *file, int flags, SceMode mode) {
   char p[512];
   (void)mode;
