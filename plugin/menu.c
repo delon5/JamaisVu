@@ -884,6 +884,7 @@ static int render_thread(SceSize args, void *argp) {
 static int (*g_setfb)(int head, int index, const SceDisplayFrameBuf *p,
                       int sync);
 static volatile int g_layer_req, g_layer_on;
+static int g_layer_pref; /* switched in Diagnostics with R (until restart) */
 /* layer 1 could not be switched off: the buffer stays (cleared to
  * transparent) - never freed while the display may still read it */
 static int g_layer_stuck;
@@ -1415,8 +1416,9 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
      * mode: browse, thumbnails, input), but save/load are refused. */
     if (g_busy || open_menu() < 0)
       return;
-    /* experiment: L held -> the menu on the system layer (in a game) */
-    if ((held & SCE_CTRL_LTRIGGER) && ksceAppMgrIsExclusiveProcessRunning()) {
+    /* experiment (Diagnostics, R): the menu on the system layer (in a
+     * game) */
+    if (g_layer_pref && ksceAppMgrIsExclusiveProcessRunning()) {
       if (layer_alloc() == 0)
         g_layer_req = 1;
       else
@@ -1525,6 +1527,14 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_RESET, sel);
       else if (pressed & SCE_CTRL_SQUARE)
         start_op(OP_TEST_DRY, sel);
+      else if (pressed & SCE_CTRL_RTRIGGER) {
+        /* experiment on/off: the menu on the system layer the next time
+         * it opens in a game (L at opening clashed with reVita's START+L) */
+        g_layer_pref = !g_layer_pref;
+        model_begin();
+        g_model.layer_exp = g_layer_pref;
+        model_end();
+      }
       else if (pressed & SCE_CTRL_TRIANGLE) {
         /* PCH-2000 LCD: timing B (vic 0x20). A/B on hardware: timing A
          * (vic 0, libbaremetal's choice, the OLED timing) left garbage
