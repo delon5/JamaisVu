@@ -73,6 +73,8 @@ A savestate contains the savedata of the games that were running. Loading a slot
 
 Slots from the original dejavu plugin (`ux0:savestate/…`, format v1) cannot be loaded.
 
+**Known issue: Dead Nation.** The menu (and reVita's popup) breaks up into blocks in Dead Nation, because the game itself tears: it draws into frames that are already on screen, which damages anything drawn over them. Saving and loading work normally there; only the menu's picture is affected.
+
 ## How it keeps the Memory Card safe
 
 The original README warned that *"your SD Card and/or Memory Card may be corrupted"*. This version addresses each known cause.

@@ -69,7 +69,6 @@ typedef struct {
   int can_save;       /* 0 in the LiveArea: no game on screen to save */
   int prepare_count;  /* slots that could be prepared now */
   int prepare_all;    /* CONFIRM_PREPARE: all of them, not just the selected */
-  int slow_test;      /* DIAG: slow-frame test is on */
   const ExtGlyphs *ext; /* glyphs for non-ASCII game names, or NULL */
   int savedata_rolls_back; /* 0 when slots are on uma0: ux0 savedata is
                               not part of the snapshot */
