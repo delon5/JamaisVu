@@ -883,6 +883,21 @@ static int render_thread(SceSize args, void *argp) {
  * touched. Every step's result is logged when the menu closes. */
 static int (*g_setfb)(int head, int index, const SceDisplayFrameBuf *p,
                       int sync);
+/* ksceDisplayGetProcFrameBufInternal: what SceDisplay has configured for a
+ * head and index (pid -1: the current one, 0: the caller's = ours), with
+ * how many vblanks it has been shown - does our buffer stay on screen? */
+typedef struct {
+  SceSize size;
+  SceUID pid;
+  uint32_t vblankcount;
+  uintptr_t paddr;
+  SceDisplayFrameBuf framebuf;
+  uint32_t resolution;
+} JvFbInfo;
+_Static_assert(sizeof(JvFbInfo) == 0x2C, "SceDisplayFrameBufInfo is 0x2C");
+static int (*g_getprocfb)(SceUID pid, int head, int index, JvFbInfo *info);
+/* layer_update (input thread) and layer_close (input or worker thread) */
+static SceUID g_layer_mtx = -1;
 static volatile int g_layer_req, g_layer_on;
 static int g_layer_pref; /* switched in Diagnostics with R (until restart) */
 /* layer 1 could not be switched off: the buffer stays (cleared to
@@ -894,6 +909,12 @@ static uint32_t g_layer_seq = 1, g_layer_gen;
 static struct {
   int tried, alloc_ret[3], type_used, contig, show_ret, hide_ret, hide_ret2;
   uint32_t pa, updates;
+  /* read back while shown: samples, how many had ours as the current
+   * layer-1 buffer, the first other owner seen, our vblank count */
+  uint32_t rb_n, rb_ours, rb_err, rb_other_at, rb_other_paddr;
+  int rb_err_val, rb_other_pid, rb_my_pid, rb_game_pid;
+  uint32_t rb_vb_first, rb_vb_last, rb_ms_first_other;
+  int64_t rb_t0;
 } g_ldbg;
 #define LAYER_BYTES 0x200000u /* >= 960 * 544 * 4 */
 
@@ -905,10 +926,12 @@ static void layer_free(void) {
 }
 
 /* memory the display can read: physically contiguous, tried in order
- * (uncached, then cached, then video memory), each result logged */
+ * (video memory - uncached, then uncached main, then cached main), each
+ * result logged. The last build got only the cached type (#1 then), and
+ * the game's cached frames are what show the blocks. */
 static int layer_alloc(void) {
-  static const SceKernelMemBlockType types[3] = { 0x10808006, 0x1080D006,
-                                                  0x40408006 };
+  static const SceKernelMemBlockType types[3] = { 0x40408006, 0x10808006,
+                                                  0x1080D006 };
   memset(&g_ldbg, 0, sizeof(g_ldbg));
   g_ldbg.type_used = -1;
   if (!g_setfb || !g_va2pa_hw)
@@ -949,9 +972,56 @@ static int layer_alloc(void) {
   return -1;
 }
 
+/* while shown: is our buffer still the current layer-1 buffer? */
+static void layer_readback(void) {
+  JvFbInfo cur, mine, game;
+  int head = ksceDisplayGetPrimaryHead();
+  if (!g_getprocfb)
+    return;
+  memset(&cur, 0, sizeof(cur));
+  memset(&mine, 0, sizeof(mine));
+  memset(&game, 0, sizeof(game));
+  cur.size = mine.size = game.size = sizeof(JvFbInfo);
+  int r1 = g_getprocfb(-1, head, 1, &cur);
+  int r2 = g_getprocfb(0, head, 1, &mine);
+  int r3 = g_getprocfb(-1, head, 0, &game);
+  g_ldbg.rb_n++;
+  if (r1 < 0 || r2 < 0) {
+    g_ldbg.rb_err++;
+    g_ldbg.rb_err_val = r1 < 0 ? r1 : r2;
+    return;
+  }
+  if (r3 >= 0)
+    g_ldbg.rb_game_pid = game.pid;
+  g_ldbg.rb_my_pid = mine.pid;
+  if (g_ldbg.rb_n == 1)
+    g_ldbg.rb_vb_first = mine.vblankcount;
+  g_ldbg.rb_vb_last = mine.vblankcount;
+  if (cur.pid == mine.pid && cur.framebuf.base == (void *)g_layer_px) {
+    g_ldbg.rb_ours++;
+  } else if (!g_ldbg.rb_other_at) {
+    g_ldbg.rb_other_at = g_ldbg.rb_n;
+    g_ldbg.rb_other_pid = cur.pid;
+    g_ldbg.rb_other_paddr = (uint32_t)cur.paddr;
+    g_ldbg.rb_ms_first_other =
+        (uint32_t)((ksceKernelGetSystemTimeWide() - g_ldbg.rb_t0) / 1000);
+  }
+}
+
 /* from the input thread: the panel into our buffer when it changed, then
  * (the first time) our buffer onto layer 1 */
+static void layer_update_locked(void);
 static void layer_update(void) {
+  if (g_layer_mtx >= 0)
+    ksceKernelLockMutex(g_layer_mtx, 1, NULL);
+  layer_update_locked();
+  if (g_layer_on)
+    layer_readback();
+  if (g_layer_mtx >= 0)
+    ksceKernelUnlockMutex(g_layer_mtx, 1);
+}
+
+static void layer_update_locked(void) {
   if (!g_layer_req || !g_layer_px)
     return;
   if (g_panel_seq != g_model_seq || g_panel_gen != g_overlay_gen)
@@ -978,6 +1048,7 @@ static void layer_update(void) {
     fb.width = JV_SCREEN_W;
     fb.height = JV_SCREEN_H;
     g_ldbg.show_ret = g_setfb(ksceDisplayGetPrimaryHead(), 1, &fb, 1);
+    g_ldbg.rb_t0 = ksceKernelGetSystemTimeWide();
     if (g_ldbg.show_ret >= 0)
       g_layer_on = 1;
     else
@@ -986,7 +1057,16 @@ static void layer_update(void) {
 }
 
 /* layer 1 back to empty, then (a few frames later) our buffer freed */
+static void layer_close_locked(void);
 static void layer_close(void) {
+  if (g_layer_mtx >= 0)
+    ksceKernelLockMutex(g_layer_mtx, 1, NULL);
+  layer_close_locked();
+  if (g_layer_mtx >= 0)
+    ksceKernelUnlockMutex(g_layer_mtx, 1);
+}
+
+static void layer_close_locked(void) {
   if (g_layer_on) {
     g_ldbg.hide_ret = g_setfb(ksceDisplayGetPrimaryHead(), 1, NULL, 1);
     if (g_ldbg.hide_ret < 0) {
@@ -1014,6 +1094,18 @@ static void layer_close(void) {
              (unsigned)g_ldbg.hide_ret, (unsigned)g_ldbg.hide_ret2,
              (unsigned)g_ldbg.updates);
     log_queue(line);
+    static char rb[256];
+    snprintf(rb, sizeof(rb), "    layer read-back: %u samples, ours current "
+             "in %u, errors %u (0x%08X); first other owner at sample %u "
+             "(%u ms): pid 0x%08X PA 0x%08X; our pid 0x%08X, our vblanks "
+             "%u -> %u; game layer pid 0x%08X\r\n",
+             (unsigned)g_ldbg.rb_n, (unsigned)g_ldbg.rb_ours,
+             (unsigned)g_ldbg.rb_err, (unsigned)g_ldbg.rb_err_val,
+             (unsigned)g_ldbg.rb_other_at, (unsigned)g_ldbg.rb_ms_first_other,
+             (unsigned)g_ldbg.rb_other_pid, (unsigned)g_ldbg.rb_other_paddr,
+             (unsigned)g_ldbg.rb_my_pid, (unsigned)g_ldbg.rb_vb_first,
+             (unsigned)g_ldbg.rb_vb_last, (unsigned)g_ldbg.rb_game_pid);
+    log_queue(rb);
   }
   g_layer_req = 0;
   if (!g_layer_stuck)
@@ -1383,8 +1475,11 @@ static int open_menu(void) {
 static void close_menu(void) {
   if (g_menu_open)
     perf_report(); /* this menu session's numbers, frames included */
-  layer_close();
+  /* closed first: layer_close waits 60 ms, and an open menu with the
+   * layer off was drawn into the game's frames meanwhile (2 frames of the
+   * old, blocky menu at every close in the last log) */
   g_menu_open = 0;
+  layer_close();
   g_capture_req = 0;
   g_block_input_until = now_us() + 300000;
 }
@@ -2820,6 +2915,10 @@ int menu_init(const char *status_text) {
   if (module_get_export_func(KERNEL_PID, "SceDisplay", TAI_ANY_LIBRARY,
                              0x16466675, (uintptr_t *)&g_setfb) < 0)
     g_setfb = NULL;
+  if (module_get_export_func(KERNEL_PID, "SceDisplay", TAI_ANY_LIBRARY,
+                             0x3BC165EF, (uintptr_t *)&g_getprocfb) < 0)
+    g_getprocfb = NULL;
+  g_layer_mtx = ksceKernelCreateMutex("JamaisVuLayer", 0, 0, NULL);
   if (module_get_export_func(KERNEL_PID, "SceSysmem", 0x40ECDB0E, 0x364E68A4,
                              (uintptr_t *)&g_dcache_clean_inv) < 0)
     g_dcache_clean_inv = NULL;
