@@ -976,11 +976,13 @@ static volatile int g_wait_first_any;
  * is closed - if the game itself breaks up then, the time is the cause,
  * not the menu's pixels. */
 static int (*g_vcount)(int head);
+/* 0 off, 1 held before the system's display call (979e26c: the game
+ * tore with the menu closed), 2 held after it (the call itself on time) */
 static volatile int g_slow_test; /* until switched off or restart */
 #define JV_SLOW_TEST_US 9000
 static struct {
   uint32_t n[2][5]; /* [menu open][vblanks since the last game frame] */
-  uint32_t crossed, drawn, slow_frames;
+  uint32_t crossed, drawn, slow_frames, slow_crossed;
   uint32_t chk_x_frames, chk_x_hit;
   uint32_t last_vc;
   int have_last;
@@ -1035,11 +1037,13 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
     }
     g_pace.last_vc = vc;
     g_pace.have_last = 1;
-    if (g_slow_test && !g_menu_open) {
+    if (g_slow_test == 1 && !g_menu_open) {
       int64_t until = now_us() + JV_SLOW_TEST_US;
       while (now_us() < until)
         ;
       g_pace.slow_frames++;
+      if ((uint32_t)g_vcount(head) != vc)
+        g_pace.slow_crossed++;
     }
   }
   if (g_menu_open && head == ksceDisplayGetPrimaryHead() &&
@@ -1099,7 +1103,17 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
   }
   prof_add(PROF_DISPLAY, t0);
 
-  return TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
+  int ret = TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
+  if (game_frame && g_slow_test == 2 && !g_menu_open) {
+    uint32_t vc = (uint32_t)g_vcount(head);
+    int64_t until = now_us() + JV_SLOW_TEST_US;
+    while (now_us() < until)
+      ;
+    g_pace.slow_frames++;
+    if ((uint32_t)g_vcount(head) != vc)
+      g_pace.slow_crossed++;
+  }
+  return ret;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1225,7 +1239,8 @@ static void perf_report(void) {
              "    game frames, vblanks since the previous one (0/1/2/3/4+): "
              "menu closed %u/%u/%u/%u/%u, menu open %u/%u/%u/%u/%u; menu "
              "drawing ran past a vblank in %u of %u frames, drawn over after "
-             "those %u of %u; slow-frame test %s, frames held %u ms: %u\r\n",
+             "those %u of %u; slow-frame test %s, frames held %u ms: %u "
+             "(ran past a vblank: %u)\r\n",
              (unsigned)g_pace.n[0][0], (unsigned)g_pace.n[0][1],
              (unsigned)g_pace.n[0][2], (unsigned)g_pace.n[0][3],
              (unsigned)g_pace.n[0][4], (unsigned)g_pace.n[1][0],
@@ -1233,8 +1248,10 @@ static void perf_report(void) {
              (unsigned)g_pace.n[1][3], (unsigned)g_pace.n[1][4],
              (unsigned)g_pace.crossed, (unsigned)g_pace.drawn,
              (unsigned)g_pace.chk_x_hit, (unsigned)g_pace.chk_x_frames,
-             g_slow_test ? "ON" : "off", JV_SLOW_TEST_US / 1000,
-             (unsigned)g_pace.slow_frames);
+             g_slow_test == 1 ? "BEFORE the display call"
+             : g_slow_test == 2 ? "AFTER the display call" : "off",
+             JV_SLOW_TEST_US / 1000, (unsigned)g_pace.slow_frames,
+             (unsigned)g_pace.slow_crossed);
     log_queue(line);
   }
   {
@@ -1451,13 +1468,17 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_DRY, sel);
       else if (pressed & SCE_CTRL_RTRIGGER) {
         /* slow-frame test on/off (applies while the menu is closed) */
-        g_slow_test = !g_slow_test;
+        g_slow_test = (g_slow_test + 1) % 3;
         model_begin();
         g_model.slow_test = g_slow_test;
         model_end();
-        log_queue(g_slow_test ? "slow-frame test: ON (each game frame held "
-                                "9 ms while the menu is closed)\r\n"
-                              : "slow-frame test: off\r\n");
+        log_queue(g_slow_test == 1 ? "slow-frame test: BEFORE (each game frame "
+                                     "held 9 ms before the display call, menu "
+                                     "closed)\r\n"
+                  : g_slow_test == 2 ? "slow-frame test: AFTER (each game frame "
+                                       "held 9 ms after the display call, menu "
+                                       "closed)\r\n"
+                                     : "slow-frame test: off\r\n");
       }
       else if (pressed & SCE_CTRL_TRIANGLE) {
         /* PCH-2000 LCD: timing B (vic 0x20). A/B on hardware: timing A
