@@ -299,6 +299,9 @@ static struct {
   /* drawn-over check: menu pixels read back from the previous frame when
    * the next one arrives (that frame is still on screen until the flip) */
   uint32_t chk_frames, chk_hit, chk_px, chk_changed, chk_us_max;
+  /* the cache flush after drawing, in 32 KB pieces: what each returned */
+  uint32_t fl_pieces, fl_ret0, fl_ret1, fl_other;
+  int fl_other_val;
   /* the system overlay layer (index 1) of the primary display while the
    * menu is open in a game: could the menu live there instead? */
   uint32_t l0_calls, l1_calls, l1_set;
@@ -749,7 +752,29 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
   /* one cache clean for the whole area (was two per row) */
   t = prof_now();
   uint32_t *first = (uint32_t *)p->base + fy0 * p->pitch + fx0;
-  g_fbd.clean_ret = fb_cache_sync(first, ((fh - 1) * p->pitch + fw) * 4);
+  /* Dead Nation: blocks of the game showing through the menu while the
+   * game does not write there (b7e6274: 1 of 526 frames) - pixels stuck
+   * in the cache? One flush of the whole area (up to ~1.9 MB) returned 1
+   * on every frame; it is now done in 32 KB pieces and every result
+   * counted. */
+  {
+    uintptr_t a = (uintptr_t)first, e = a + ((fh - 1) * p->pitch + fw) * 4;
+    while (a < e) {
+      uint32_t n = e - a > 0x8000 ? 0x8000 : (uint32_t)(e - a);
+      int r = fb_cache_sync((void *)a, n);
+      g_fbd.fl_pieces++;
+      if (r == 0)
+        g_fbd.fl_ret0++;
+      else if (r == 1)
+        g_fbd.fl_ret1++;
+      else {
+        g_fbd.fl_other++;
+        g_fbd.fl_other_val = r;
+      }
+      g_fbd.clean_ret = r;
+      a += n;
+    }
+  }
   g_fbd.cleans++;
   /* drawn-over check: 8 opaque rows x 4 columns, values as written */
   if (record && fw == c->w) {
@@ -1113,7 +1138,7 @@ static uint32_t g_perf_since; /* set in menu_init: first report = since boot */
 static void perf_report(void) {
   static JvProfStat last[PROF_N];
   uint32_t last_t = g_perf_since;
-  static char line[448];
+  static char line[640];
   static const char *const names[PROF_N] = {
     "display", "ctrl", "ctrl-incl-original", "syscon", "exfat-write", "input",
     "render", "compose", "compose-read", "compose-build", "compose-write",
@@ -1157,14 +1182,17 @@ static void perf_report(void) {
              "frames (%u of %u pixels changed, checked up to %u ms after "
              "drawing); system layer 1 while in the game: %u calls (%u with "
              "a frame, last %08X fmt %X %ux%u pitch %u), game layer 0: %u "
-             "calls\r\n",
+             "calls; cache flush pieces %u: returned 0 x%u, 1 x%u, other x%u "
+             "(last other 0x%08X)\r\n",
              (unsigned)g_fbd.chk_hit, (unsigned)g_fbd.chk_frames,
              (unsigned)g_fbd.chk_changed, (unsigned)g_fbd.chk_px,
              (unsigned)(g_fbd.chk_us_max / 1000), (unsigned)g_fbd.l1_calls,
              (unsigned)g_fbd.l1_set, (unsigned)g_fbd.l1_base,
              (unsigned)g_fbd.l1_fmt, (unsigned)g_fbd.l1_w,
              (unsigned)g_fbd.l1_h, (unsigned)g_fbd.l1_pitch,
-             (unsigned)g_fbd.l0_calls);
+             (unsigned)g_fbd.l0_calls, (unsigned)g_fbd.fl_pieces,
+             (unsigned)g_fbd.fl_ret0, (unsigned)g_fbd.fl_ret1,
+             (unsigned)g_fbd.fl_other, (unsigned)g_fbd.fl_other_val);
     log_queue(line);
     memset(&g_fbd, 0, sizeof(g_fbd));
   }
