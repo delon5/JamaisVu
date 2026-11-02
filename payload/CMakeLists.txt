@@ -53,6 +53,8 @@ set(JamaisVu_payload_sources
   xerpi/dsi.c
   xerpi/iftu.c
   xerpi/lcd.c
+  xerpi/oled.c
+  xerpi/hdmi.c
   xerpi/i2c.c
   xerpi/utils.c
   xerpi/font_data.c
@@ -72,7 +74,7 @@ set_source_files_properties(../plugin/gui/font_data.c PROPERTIES
 # (log, builds 23145bf vs 5830ae3: display-showing -> filesystem).
 set_source_files_properties(
   xerpi/display_test.c xerpi/pervasive_display.c xerpi/dsi.c xerpi/iftu.c
-  xerpi/lcd.c xerpi/i2c.c xerpi/utils.c
+  xerpi/lcd.c xerpi/oled.c xerpi/hdmi.c xerpi/i2c.c xerpi/utils.c
   PROPERTIES COMPILE_OPTIONS "-Os")
 
 # Not -mgeneral-regs-only: on 3.60 hardware that build never reached the

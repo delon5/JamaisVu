@@ -8,8 +8,18 @@ typedef struct {
   uint32_t fb_paddr; /* the frame the game showed (physically contiguous) */
   uint32_t pitch, width, height; /* pixels */
   uint32_t hw_info, hw_flags0;   /* for the LCD backlight setup */
-  uint32_t vic;                  /* display timing: 0 (A) or 0x20 (B) */
+  uint32_t vic;                  /* LCD timing: 0 (A) or 0x20 (B) */
+  uint32_t disp_type;            /* JV_DISP_*: which display to drive */
 } JvDisplayArgs;
+
+/* which display the console has (decided by the plugin; same values in
+ * JamaisVu.h) */
+#ifndef JV_DISP_LCD
+#define JV_DISP_NONE 0
+#define JV_DISP_LCD  1 /* PCH-2000: LCD on display link 0 */
+#define JV_DISP_OLED 2 /* PCH-1000: OLED on display link 0 */
+#define JV_DISP_HDMI 3 /* PS TV: HDMI bridge on display link 1, 720p */
+#endif
 
 /* Switches the PCH-2000 LCD on, shows a test screen with a moving progress
  * bar for a few seconds, switches it off again. mark() records each step.

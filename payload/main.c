@@ -298,6 +298,7 @@ static void display_args(JvDisplayArgs *a) {
   a->hw_info = pargs->disp_hw_info;
   a->hw_flags0 = pargs->disp_hw_flags0;
   a->vic = pargs->disp_vic;
+  a->disp_type = pargs->disp_type;
 }
 
 /* Progress screen during a save: the bar follows the slot file position

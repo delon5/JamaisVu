@@ -60,6 +60,14 @@ static volatile int g_overlay_users;
 static volatile uint32_t g_overlay_gen; /* +1 per acquire: buffers are new */
 static uint32_t *g_panel_px, *g_toast_px, *g_rowbuf, *g_band_px;
 
+/* Widest frame the menu is drawn on: 960 on the handhelds; the PS TV's
+ * home screen may use a larger frame for the TV (up to 1920x1088), so
+ * there frames up to that size are accepted (the row buffer is sized for
+ * it everywhere; it is only one row). */
+#define JV_MAX_FB_W 1920
+static int g_fb_max_w = 960, g_fb_max_h = 544;
+static int g_dolce; /* PS TV: also controller port 1 */
+
 /* The menu image is drawn by its own low-priority thread, not in the
  * game's display call: in Trails a redraw took ~200 ms there, and every
  * ◀/▶ stalled the game for that long. It draws BAND_ROWS rows at a time
@@ -173,6 +181,56 @@ static int read_small(const char *path, void *buf, int cap) {
   int n = ksceIoRead(fd, buf, cap);
   ksceIoClose(fd);
   return n;
+}
+
+/* Progress screen on the PCH-1000 (OLED) and the PS TV (HDMI): only once
+ * the Diagnostics display test has run through on this console without a
+ * hardware wait giving up. Recorded in data/JamaisVu/display_ok.txt
+ * ("type N" per display that passed); delete the file to reset. */
+static int g_disp_ok_mask = -1; /* bit per JV_DISP_*, -1 = not read yet */
+
+static int display_ok(uint32_t type) {
+  if (type == JV_DISP_LCD)
+    return 1; /* PCH-2000: tested on hardware */
+  if (g_disp_ok_mask < 0) {
+    static char path[96], buf[64];
+    g_disp_ok_mask = 0;
+    jv_file_path(path, sizeof(path), "display_ok.txt");
+    int n = read_small(path, buf, sizeof(buf) - 1);
+    if (n > 0) {
+      buf[n] = '\0';
+      for (int t = JV_DISP_OLED; t <= JV_DISP_HDMI; t++) {
+        char key[8] = "type 0";
+        key[5] = (char)('0' + t);
+        if (strstr(buf, key))
+          g_disp_ok_mask |= 1 << t;
+      }
+    }
+  }
+  return (g_disp_ok_mask >> type) & 1;
+}
+
+static void display_ok_record(uint32_t type) {
+  static char path[96], buf[64];
+  if (type != JV_DISP_OLED && type != JV_DISP_HDMI || display_ok(type))
+    return;
+  g_disp_ok_mask |= 1 << type;
+  int n = 0;
+  for (int t = JV_DISP_OLED; t <= JV_DISP_HDMI; t++)
+    if ((g_disp_ok_mask >> t) & 1)
+      n += snprintf(buf + n, sizeof(buf) - n, "type %d\r\n", t);
+  jv_file_path(path, sizeof(path), "display_ok.txt");
+  SceUID fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  if (fd >= 0) {
+    ksceIoWrite(fd, buf, n);
+    ksceIoClose(fd);
+  }
+}
+
+static const char *disp_name(uint32_t type) {
+  return type == JV_DISP_LCD ? "LCD, PCH-2000" :
+         type == JV_DISP_OLED ? "OLED, PCH-1000" :
+         type == JV_DISP_HDMI ? "HDMI, PS TV" : "none";
 }
 
 /* read-only: ur0:data/PSVshell/profiles/<TITLEID>, else "global" */
@@ -482,7 +540,7 @@ static int overlay_acquire(void) {
     ksceKernelLockMutex(g_ovl_mtx, 1, NULL);
   if (!g_overlay_ready) {
     uint32_t size = MENU_W * MENU_H * 4 + TOAST_W * TOAST_H * 4 +
-                    (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_SCREEN_W * 4 +
+                    (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_MAX_FB_W * 4 +
                     MENU_W * BAND_ROWS * 4 + 2 * ((sizeof(ExtGlyphs) + 3) & ~3u);
     size = (size + 0xfff) & ~0xfff;
     g_mem_blk = ksceKernelAllocMemBlock("JamaisVuMenu",
@@ -496,7 +554,7 @@ static int overlay_acquire(void) {
         g_thumbs[i] = p;
         p += THUMB_PX;
       }
-      g_rowbuf = p;    p += JV_SCREEN_W;
+      g_rowbuf = p;    p += JV_MAX_FB_W;
       g_band_px = p;   p += MENU_W * BAND_ROWS;
       for (int k = 0; k < 2; k++) {
         g_ext_set[k] = (ExtGlyphs *)p;
@@ -635,7 +693,7 @@ static void scan_blend_rows(const Canvas *c, uint8_t *rows) {
  * framebuffer, scaling to the framebuffer's resolution. */
 static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
                     const uint8_t *blend_rows, int dx, int dy, int record) {
-  static int xmap[JV_SCREEN_W];
+  static int xmap[JV_MAX_FB_W];
   int w = p->width, h = p->height;
   int fx0 = dx * w / JV_SCREEN_W, fy0 = dy * h / JV_SCREEN_H;
   int fw = c->w * w / JV_SCREEN_W, fh = c->h * h / JV_SCREEN_H;
@@ -937,8 +995,8 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
   }
   if (g_overlay_ready && p && p->base && p->pixelformat == 0 &&
       overlay_target(head, index) &&
-      p->width >= 480 && p->width <= 960 && p->height >= 272 &&
-      p->height <= 544 && p->pitch >= p->width) {
+      p->width >= 480 && p->width <= g_fb_max_w && p->height >= 272 &&
+      p->height <= g_fb_max_h && p->pitch >= p->width) {
     __sync_fetch_and_add(&g_overlay_users, 1);
     __sync_synchronize();
     if (g_overlay_ready) { /* re-check: a release may have started */
@@ -1331,6 +1389,13 @@ static int input_thread(SceSize args, void *argp) {
     memset(&pad, 0, sizeof(pad));
     if (ksceCtrlPeekBufferPositive(0, &pad, 1) < 0)
       continue;
+    if (g_dolce) {
+      /* PS TV: a DualShock may report on port 1 rather than 0 */
+      SceCtrlData pad1;
+      memset(&pad1, 0, sizeof(pad1));
+      if (ksceCtrlPeekBufferPositive(1, &pad1, 1) >= 0)
+        pad.buttons |= pad1.buttons;
+    }
 
     if (g_rearm_input) {
       g_rearm_input = 0;
@@ -1669,6 +1734,12 @@ static void after_resume(void) {
   }
 
   if (g_res_debug != JV_TEST_NONE) {
+    /* display test through all its steps, no hardware wait gave up (the
+     * payload reports their count as detail): from now on saves and loads
+     * show the progress screen on this console (OLED / PS TV) */
+    if (g_res_debug == JV_TEST_DISPLAY && g_res_result == JV_TEST_DONE &&
+        g_res_detail == 0)
+      display_ok_record(g_res_pa.disp_type);
     /* diagnostics: report and never touch the slot info */
     if (g_res_result == JV_TEST_DONE)
       snprintf(msg, sizeof(msg), "%s passed - reached stage %u (%s)",
@@ -1860,7 +1931,7 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   }
 }
 
-static int display_frame_check(char *why, int len);
+static int display_frame_check(char *why, int len, int for_test);
 
 /* The frame on screen right now (the display hook records the next one;
  * the menu is open, so frames keep coming). Up to 0.3 s. */
@@ -1994,7 +2065,7 @@ static void do_save(int slot) {
     static char why[160];
     g_save_frame.valid = 0;
     fresh_frame();
-    if (display_frame_check(why, sizeof(why))) {
+    if (display_frame_check(why, sizeof(why), 0)) {
       jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h, 0x20);
       g_save_frame.valid = frame_in_cdram(g_fb_pa, g_fb_pitch, g_fb_h);
       g_save_frame.pa = g_fb_pa;
@@ -2062,7 +2133,7 @@ static void do_load(int slot) {
     static char why[160], line[160];
     static SlotFrame sf;
     fresh_frame();
-    if (display_frame_check(why, sizeof(why))) {
+    if (display_frame_check(why, sizeof(why), 0)) {
       jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h, 0x20);
       if (slot_frame_read(slot, info.crc, &sf) == 0 && sf.width == 960 &&
           sf.height == 544 && sf.pitch >= 960 && sf.pitch <= 1024 &&
@@ -2093,22 +2164,29 @@ static void do_load(int slot) {
  * save, and the selected slot must be empty). */
 /* Display test / progress screen: is the recorded frame usable? Logs the
  * details either way; why = the reason if not. */
-static int display_frame_check(char *why, int len) {
-  uint32_t hw = jv_hw_info();
+/* for_test: the Diagnostics display test itself (any display); otherwise
+ * a save/load/dry run, which shows the progress screen on the OLED or the
+ * PS TV only after that test has passed on this console. */
+static int display_frame_check(char *why, int len, int for_test) {
+  uint32_t hw = jv_hw_info(), type = jv_disp_type();
+  /* the frame the payload draws into: the game's 960x544 frame; on the
+   * PS TV (HDMI) also a larger one (home screen), as long as it holds the
+   * 960x544 screen */
+  int size_ok = type == JV_DISP_HDMI
+      ? g_fb_w <= 1920 && g_fb_h <= 1088 && g_fb_pitch >= g_fb_w &&
+        g_fb_pitch <= 2048 && g_fb_pitch * g_fb_h >= 960u * 544
+      : g_fb_w == 960 && g_fb_h == 544 && g_fb_pitch >= 960 &&
+        g_fb_pitch <= 1024;
   why[0] = '\0';
-  /* PCH-2000 (LCD): hardware info 0x80xxxx and up - e.g. 0x822238 on
-   * the user's console (libbaremetal's model check only knew 0x80xxxx,
-   * but its LCD backlight code handles boards up to 0x90xxxx). PCH-1000
-   * (OLED) and PS TV report lower values. */
-  if ((hw & 0xFF0000) < 0x800000)
-    snprintf(why, len, "Display test: PCH-2000 only for now (hardware "
-             "0x%08X)", (unsigned)hw);
+  if (!for_test && !display_ok(type))
+    snprintf(why, len, "Progress screen off until Diagnostics > Display test "
+             "has passed on this console (%s)", disp_name(type));
   else if (!g_fb_rec)
     snprintf(why, len, "Display test: no frame seen yet - try again");
-  else if (g_fb_w != 960 || g_fb_h != 544 || g_fb_pitch < 960 ||
-           g_fb_pitch > 1024)
+  else if (!size_ok)
     snprintf(why, len, "Display test: frame %ux%u pitch %u is not supported "
-             "yet", (unsigned)g_fb_w, (unsigned)g_fb_h, (unsigned)g_fb_pitch);
+             "yet (%s)", (unsigned)g_fb_w, (unsigned)g_fb_h,
+             (unsigned)g_fb_pitch, disp_name(type));
   else if (g_fb_pa0 == 0)
     snprintf(why, len, "Display test: frame address 0x%08X could not be "
              "translated", (unsigned)g_fb_va);
@@ -2139,9 +2217,10 @@ static int display_frame_check(char *why, int len) {
     return 0;
   }
   snprintf(line, sizeof(line), "display: frame at 0x%08X, %ux%u pitch %u "
-           "(%s), hardware 0x%08X\r\n", (unsigned)g_fb_pa, (unsigned)g_fb_w,
-           (unsigned)g_fb_h, (unsigned)g_fb_pitch,
-           g_fb_game ? "game" : "LiveArea", (unsigned)hw);
+           "(%s), hardware 0x%08X, display %s, primary head %d\r\n",
+           (unsigned)g_fb_pa, (unsigned)g_fb_w, (unsigned)g_fb_h,
+           (unsigned)g_fb_pitch, g_fb_game ? "game" : "LiveArea",
+           (unsigned)hw, disp_name(type), ksceDisplayGetPrimaryHead());
   log_append(line);
   return 1;
 }
@@ -2166,7 +2245,7 @@ static void do_test(int kind, int slot, int variant) {
    * screen, as before. */
   if (kind == 2 || kind == 1) {
     static char why[160];
-    if (display_frame_check(why, sizeof(why))) {
+    if (display_frame_check(why, sizeof(why), kind == 2)) {
       jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h,
                            kind == 2 ? g_disp_vic : 0x20);
     } else {
@@ -2441,6 +2520,12 @@ int menu_init(const char *status_text) {
 
   g_status_text = status_text;
   g_perf_since = prof_now();
+
+  if (jv_disp_type() == JV_DISP_HDMI) {
+    g_dolce = 1;
+    g_fb_max_w = 1920;
+    g_fb_max_h = 1088;
+  }
 
   /* SceSysmemForDriver ksceKernelVAtoPA / ksceKernelVAtoPABySW (display
    * test: where the game's frame is in physical memory) */

@@ -88,6 +88,7 @@ target_link_libraries(JamaisVu
   ScePowerForDriver_stub
   SceRegMgrForDriver_stub
   SceRtcForDriver_stub
+  SceSblAIMgrForDriver_stub
   SceSysclibForDriver_stub
   SceSysconForDriver_stub
   SceSysmemForDriver_stub

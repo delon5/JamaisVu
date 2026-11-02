@@ -3,7 +3,8 @@
 The files in this folder (except `display_test.c`, `sysroot.h` and the
 parts marked "JamaisVu") come from
 [xerpi/vita-libbaremetal](https://github.com/xerpi/vita-libbaremetal):
-display link (DSI), display controller (IFTU), PCH-2000 LCD, I2C, and the
+display link (DSI), display controller (IFTU), PCH-2000 LCD, PCH-1000
+OLED (`oled.c`), PS TV HDMI bridge (`hdmi.c`), I2C, and the
 8x8 debug font (which itself is from PSPSDK, BSD licence).
 
 **vita-libbaremetal has no licence file.** This folder is used with the

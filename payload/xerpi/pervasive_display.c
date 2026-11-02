@@ -249,3 +249,10 @@ void pervasive_reset_enter_dsi(int bus, int value)
 {
 	pervasive_mask_or(PERVASIVE_RESET_BASE_ADDR + 0x80 + 4 * bus, value);
 }
+
+/* From libbaremetal's pervasive.c: the HDMI bridge clock (PS TV) */
+void pervasive_hdmi_clock_set_enabled(int enable)
+{
+	*(volatile uint32_t *)PERVASIVE_BASECLK_HDMI_CLOCK = enable;
+	dsb();
+}

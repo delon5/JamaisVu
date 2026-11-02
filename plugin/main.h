@@ -32,6 +32,7 @@ void jv_clocks_restore(char *out, int len);
 void jv_set_display_frame(uint32_t paddr, uint32_t pitch, uint32_t width,
                           uint32_t height, uint32_t vic);
 uint32_t jv_hw_info(void);
+uint32_t jv_disp_type(void); /* JV_DISP_* */
 /* system time at: save/load requested, sleep event, wake event, system
  * resumed (main.c); the first game frame after it is timed in menu.c */
 extern volatile int64_t g_t_request, g_t_suspend, g_t_resume, g_t_resumed;

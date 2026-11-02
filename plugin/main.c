@@ -410,6 +410,7 @@ ev_done:
 /* Display test: the frame the game showed (see menu.c, record_frame) */
 void jv_set_display_frame(uint32_t paddr, uint32_t pitch, uint32_t width,
                           uint32_t height, uint32_t vic) {
+  pargs.disp_type = paddr ? jv_disp_type() : JV_DISP_NONE;
   pargs.disp_vic = vic;
   pargs.disp_fb_paddr = paddr;
   pargs.disp_fb_pitch = pitch;
@@ -441,6 +442,25 @@ void jv_set_display_frame2(uint32_t paddr, uint32_t pitch) {
 uint32_t jv_hw_info(void) {
   resolve_hw_fns();
   return g_hw_info_fn ? g_hw_info_fn() : 0;
+}
+
+/* SceSblAIMgrForDriver: 1 on a PS TV ("Dolce") */
+int ksceSblAimgrIsDolce(void);
+
+/* The console's display, for the payload's progress screen:
+ *   PS TV -> HDMI; handheld with a PCH-2000 board (hardware info 0x80xxxx
+ *   and up, e.g. 0x00822238) -> LCD; any other handheld -> OLED. */
+uint32_t jv_disp_type(void) {
+  static int type = -1;
+  if (type < 0) {
+    if (ksceSblAimgrIsDolce())
+      type = JV_DISP_HDMI;
+    else if ((jv_hw_info() & 0xFF0000) >= 0x800000)
+      type = JV_DISP_LCD;
+    else
+      type = JV_DISP_OLED;
+  }
+  return (uint32_t)type;
 }
 
 /* Starts a save or load of a slot: fills in the payload arguments and
@@ -495,6 +515,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
     pargs.disp_hw_flags0 = flags[0];
   } else {
     pargs.disp_fb_paddr = 0; /* reset test: no screen */
+    pargs.disp_type = JV_DISP_NONE;
   }
   if (!(debug_mode == JV_TEST_NONE && mode == JAMAISVU_MODE_LOAD))
     pargs.disp_fb2_paddr = 0; /* the snapshot's frame: loads only */
@@ -653,6 +674,8 @@ int module_start(SceSize args, void *argp) {
            "SceSysmem NID:    0x%08X\n"
            "SceCtrl NID:      0x%08X\n"
            "SceDisplay NID:   0x%08X\n"
+           "hardware info:    0x%08X\n"
+           "display:          %s (PS TV check %d)\n"
            "\n"
            "If status is not \"armed\", JamaisVu changes nothing on this\n"
            "system. See docs/porting-3.60.md.\n",
@@ -664,7 +687,11 @@ int module_start(SceSize args, void *argp) {
            (unsigned)module_nid("SceRtc"),
            (unsigned)module_nid("SceSysmem"),
            (unsigned)module_nid("SceCtrl"),
-           (unsigned)module_nid("SceDisplay"));
+           (unsigned)module_nid("SceDisplay"),
+           (unsigned)jv_hw_info(),
+           jv_disp_type() == JV_DISP_HDMI ? "HDMI (PS TV)" :
+           jv_disp_type() == JV_DISP_OLED ? "OLED (PCH-1000)" :
+           "LCD (PCH-2000)", ksceSblAimgrIsDolce());
 
   menu_init(g_status);
 

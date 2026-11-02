@@ -20,6 +20,8 @@
 #include "dsi.h"
 #include "iftu.h"
 #include "lcd.h"
+#include "oled.h"
+#include "hdmi.h"
 #include "i2c.h"
 #include "utils.h"
 
@@ -51,8 +53,15 @@ static const struct iftu_csc_params csc1 = {
 #define RGB(r, g, b) (0xFF000000u | ((b) << 16) | ((g) << 8) | (r))
 
 static volatile uint32_t *g_fb;
-static uint32_t g_vic;
+static uint32_t g_vic, g_type;
 static int g_pitch, g_w, g_h;
+/* where the picture goes: display controller and link of the console's
+ * display, and the picture's place on the output (HDMI: 960x544 centred
+ * in 1280x720, unscaled) */
+static enum iftu_bus g_bus = IFTU_BUS_0;
+static enum dsi_bus g_dsi = DSI_BUS_OLED_LCD;
+static uint32_t g_dst_x, g_dst_y;
+static int g_hdmi_tv; /* PS TV: a TV answered (hot-plug detect) */
 
 static void fill(int x, int y, int w, int h, uint32_t c) {
 	for (int j = y; j < y + h && j < g_h; j++)
@@ -103,37 +112,68 @@ static void plane_setup(uint32_t paddr) {
 	fb.height = g_h;
 	for (int p = 0; p < 2; p++)
 		for (int c = 0; c < 2; c++) {
-			iftu_plane_set_alpha(IFTU_BUS_0, planes[p], 256);
-			iftu_plane_set_csc0(IFTU_BUS_0, planes[p], &csc0);
-			iftu_plane_set_csc1(IFTU_BUS_0, planes[p], &csc1);
-			iftu_plane_set_csc_enabled(IFTU_BUS_0, planes[p], true);
-			iftu_plane_config_set_config(IFTU_BUS_0, planes[p], cfgs[c], &fb,
-			                             0, 0, g_w, g_h);
+			iftu_plane_set_alpha(g_bus, planes[p], 256);
+			iftu_plane_set_csc0(g_bus, planes[p], &csc0);
+			iftu_plane_set_csc1(g_bus, planes[p], &csc1);
+			iftu_plane_set_csc_enabled(g_bus, planes[p], true);
+			iftu_plane_config_set_config(g_bus, planes[p], cfgs[c], &fb,
+			                             g_dst_x, g_dst_y, g_w, g_h);
 		}
-	iftu_bus_plane_config_select(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0);
-	iftu_plane_config_set_enabled(IFTU_BUS_0, IFTU_PLANE_B, IFTU_PLANE_CONFIG_0, false);
-	iftu_plane_config_set_enabled(IFTU_BUS_0, IFTU_PLANE_B, IFTU_PLANE_CONFIG_1, false);
-	iftu_bus_alpha_blending_control(IFTU_BUS_0, 0);
-	iftu_bus_enable(IFTU_BUS_0);
+	iftu_bus_plane_config_select(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0);
+	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_B, IFTU_PLANE_CONFIG_0, false);
+	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_B, IFTU_PLANE_CONFIG_1, false);
+	iftu_bus_alpha_blending_control(g_bus, 0);
+	iftu_bus_enable(g_bus);
 }
 
-/* only what this was written for: a 960x544 frame in CDRAM or main
- * memory, as the plugin checked */
+/* Only what this was written for. The screen is always laid out as
+ * 960x544 with rows of 960 inside the frame's memory, so the frame must
+ * hold that much (the plugin checked it is one physically contiguous
+ * block of pitch x height x 4 bytes):
+ *   LCD/OLED: exactly the game's 960x544 frame (pitch 960..1024);
+ *   HDMI: any frame up to 1920x1088 that is big enough (the PS TV home
+ *   screen may use a larger one). */
 static int args_ok(const JvDisplayArgs *a) {
-	return a->width == 960 && a->height == 544 && a->pitch >= 960 &&
-	       a->pitch <= 1024 && !(a->fb_paddr & 0xFF) &&
-	       a->fb_paddr >= 0x20000000u &&
-	       (uint64_t)a->fb_paddr + (uint64_t)a->pitch * a->height * 4 <=
-	           0x60000000u;
+	uint64_t bytes = (uint64_t)a->pitch * a->height * 4;
+	if (a->disp_type == JV_DISP_LCD || a->disp_type == JV_DISP_OLED) {
+		if (a->width != 960 || a->height != 544 || a->pitch < 960 ||
+		    a->pitch > 1024)
+			return 0;
+	} else if (a->disp_type == JV_DISP_HDMI) {
+		if (a->width > 1920 || a->height > 1088 || a->pitch < a->width ||
+		    a->pitch > 2048 || bytes < 960u * 544 * 4)
+			return 0;
+	} else {
+		return 0;
+	}
+	return !(a->fb_paddr & 0xFF) && a->fb_paddr >= 0x20000000u &&
+	       (uint64_t)a->fb_paddr + bytes <= 0x60000000u;
 }
 
 /* Switches the display on showing whatever draw() put into the frame. */
 static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
 	uint32_t pixelclock = 0;
+	uint32_t vic;
 
-	/* 0x20 for the PCH-2000 LCD (clean on hardware; 0 = the OLED timing
-	 * libbaremetal used, garbage along the edges); nothing else */
-	uint32_t vic = a->vic == 0x20 ? 0x20 : 0;
+	g_type = a->disp_type;
+	if (g_type == JV_DISP_HDMI) {
+		/* 1280x720p 60 Hz, as libbaremetal's display_init_hdmi; the
+		 * system's own HDMI setting (480p/720p/1080i) comes back when it
+		 * wakes */
+		vic = 0x8600;
+		g_bus = IFTU_BUS_HDMI;
+		g_dsi = DSI_BUS_HDMI;
+		g_dst_x = (1280 - 960) / 2;
+		g_dst_y = (720 - 544) / 2;
+	} else {
+		/* LCD: 0x20 (clean on the PCH-2000; 0 = libbaremetal's timing,
+		 * garbage along the edges there). OLED: 0, as libbaremetal's
+		 * display_init_oled */
+		vic = g_type == JV_DISP_LCD && a->vic == 0x20 ? 0x20 : 0;
+		g_bus = IFTU_BUS_OLED_LCD;
+		g_dsi = DSI_BUS_OLED_LCD;
+		g_dst_x = g_dst_y = 0;
+	}
 
 	g_fb = (volatile uint32_t *)(uintptr_t)a->fb_paddr;
 	/* The display controller reads rows exactly as wide as the picture
@@ -142,33 +182,47 @@ static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
 	 * diagonal stripes on hardware). The screen covers the whole frame
 	 * anyway, so lay it out with rows of 960; the frame is big enough
 	 * (pitch >= width). */
-	g_pitch = a->width;
-	g_w = a->width;
-	g_h = a->height;
+	g_pitch = 960; /* the screen is always 960x544, rows of 960 (HDMI: the
+	                  frame may be larger; only its first 2 MB are used) */
+	g_w = 960;
+	g_h = 544;
 	g_vic = vic;
 	g_disp_hw_info = a->hw_info;
 	g_disp_hw_flags0 = a->hw_flags0;
 
-	/* I2C bus 1: the LCD backlight controller */
-	pervasive_clock_enable_i2c(1);
-	pervasive_reset_exit_i2c(1);
-	i2c_init_bus(1);
+	/* I2C bus 1: the LCD backlight controller / the PS TV's HDMI bridge
+	 * (the OLED panel needs none) */
+	if (g_type != JV_DISP_OLED) {
+		pervasive_clock_enable_i2c(1);
+		pervasive_reset_exit_i2c(1);
+		i2c_init_bus(1);
+	}
 	mark(JV_DISP_STEP_I2C);
 
-	/* display link, 960x544 (as libbaremetal's display_init_lcd) */
+	/* display link (as libbaremetal's display_init_lcd/_oled/_hdmi) */
 	dsi_get_pixelclock_for_vic(vic, 24, &pixelclock);
-	pervasive_dsi_set_pixelclock(0, pixelclock);
-	pervasive_clock_enable_dsi(0, 0xF);
-	pervasive_reset_exit_dsi(0, 7);
+	pervasive_dsi_set_pixelclock(g_dsi, pixelclock);
+	pervasive_clock_enable_dsi(g_dsi, 0xF);
+	pervasive_reset_exit_dsi(g_dsi, 7);
 	dsi_init();
-	dsi_start_master(DSI_BUS_OLED_LCD, vic);
-	dsi_start_display(DSI_BUS_OLED_LCD, vic, 1);
+	dsi_start_master(g_dsi, vic);
+	dsi_start_display(g_dsi, vic, g_type == JV_DISP_HDMI ? 0 : 1);
 	mark(JV_DISP_STEP_DSI);
 
 	draw(); /* before the panel lights up: no stale picture */
 	mark(JV_DISP_STEP_DRAWN);
 
-	lcd_init();
+	if (g_type == JV_DISP_LCD) {
+		lcd_init();
+	} else if (g_type == JV_DISP_OLED) {
+		oled_init();
+	} else {
+		hdmi_init();
+		/* no TV answering: the link runs, nothing is shown */
+		g_hdmi_tv = hdmi_get_hpd_state();
+		if (g_hdmi_tv)
+			hdmi_connect();
+	}
 	mark(JV_DISP_STEP_LCD);
 
 	plane_setup(a->fb_paddr);
@@ -183,14 +237,19 @@ static void hw_off(void) {
 	 * the panel shuts down shows nothing */
 	fill(0, 0, g_w, g_h, RGB(0, 0, 0));
 	delay(6000);
-	lcd_off();
+	if (g_type == JV_DISP_LCD)
+		lcd_off();
+	else if (g_type == JV_DISP_OLED)
+		oled_off();
+	else
+		hdmi_off();
 	mark(JV_DISP_STEP_LCD_OFF);
-	iftu_plane_config_set_enabled(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0, false);
-	iftu_plane_config_set_enabled(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1, false);
+	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0, false);
+	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1, false);
 	mark(JV_DISP_STEP_PLANE_OFF);
-	dsi_stop_master(DSI_BUS_OLED_LCD);
-	pervasive_reset_enter_dsi(0, 7);
-	pervasive_clock_disable_dsi(0, 0xF);
+	dsi_stop_master(g_dsi);
+	pervasive_reset_enter_dsi(g_dsi, 7);
+	pervasive_clock_disable_dsi(g_dsi, 0xF);
 	mark(JV_DISP_STEP_OFF);
 }
 
@@ -217,7 +276,9 @@ static void draw_test(void) {
 	text((g_w - text_w("JamaisVu", 5)) / 2, 120, 5, C_TITLE, "JamaisVu");
 	centred(200, 3, C_TEXT, "Display test - nothing is written");
 	centred(250, 2, C_DIM, "If you can read this, the screen works.");
-	centred(470, 3, C_TEXT, g_vic == 0x20 ? "Timing B" : "Timing A");
+	centred(470, 3, C_TEXT, g_type == JV_DISP_OLED ? "OLED" :
+	        g_type == JV_DISP_HDMI ? "HDMI 720p" :
+	        g_vic == 0x20 ? "LCD - timing B" : "LCD - timing A");
 	bar_frame();
 	/* colour check: red, green, blue, white */
 	static const uint32_t sw[4] = { RGB(220, 40, 40), RGB(40, 200, 60),
@@ -369,6 +430,10 @@ int jv_screen_switch(uint32_t paddr, uint32_t pitch) {
 	b = g_args;
 	b.fb_paddr = paddr;
 	b.pitch = pitch;
+	/* the snapshot's frame is a game's 960x544 frame (the plugin records
+	 * no other), whatever the first frame was (PS TV home screen) */
+	b.width = 960;
+	b.height = 544;
 	if (!args_ok(&b))
 		return -1;
 	g_fb = (volatile uint32_t *)(uintptr_t)paddr;
@@ -379,9 +444,9 @@ int jv_screen_switch(uint32_t paddr, uint32_t pitch) {
 	fb.pixelformat = IFTU_FB_PIXELFORMAT_A8B8G8R8;
 	fb.width = g_w;
 	fb.height = g_h;
-	iftu_plane_config_set_config(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1,
-	                             &fb, 0, 0, g_w, g_h);
-	iftu_bus_plane_config_select(IFTU_BUS_0, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1);
+	iftu_plane_config_set_config(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1,
+	                             &fb, g_dst_x, g_dst_y, g_w, g_h);
+	iftu_bus_plane_config_select(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1);
 	g_args = b;
 	return 0;
 }

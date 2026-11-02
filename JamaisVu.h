@@ -116,6 +116,10 @@ typedef struct {
    * and the measured length of one xerpi delay() unit (ns, cache off). */
   uint32_t icache_on;
   uint32_t delay_unit_ns;
+  /* Which display the progress screen drives (JV_DISP_* in
+   * payload/xerpi/display_test.h): 1 LCD (PCH-2000), 2 OLED (PCH-1000),
+   * 3 HDMI (PS TV); 0 = none, the screen stays dark. */
+  uint32_t disp_type;
 } PayloadArguments;
 
 /* First sector of data/JamaisVu/trace.bin on the Memory Card. The plugin
@@ -152,6 +156,14 @@ enum JamaisVuModes {
 #define JV_TEST_NONE   0
 #define JV_TEST_RESET  1 /* payload returns immediately: soft reset only */
 #define JV_TEST_DRYRUN 2 /* runs a save up to (not including) the first write */
+/* Which display the progress screen drives (PayloadArguments.disp_type) */
+#ifndef JV_DISP_LCD
+#define JV_DISP_NONE 0
+#define JV_DISP_LCD  1 /* PCH-2000: LCD on display link 0 */
+#define JV_DISP_OLED 2 /* PCH-1000: OLED on display link 0 */
+#define JV_DISP_HDMI 3 /* PS TV: HDMI bridge on display link 1, 720p */
+#endif
+
 #define JV_TEST_DISPLAY 3 /* switches the screen on, test picture, off again */
 
 /* Payload progress (PayloadArguments.stage) */

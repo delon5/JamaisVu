@@ -103,6 +103,14 @@ uint32_t jv_wait_limit_us(uint32_t polls);
 #define JV_WAIT_MAX 2000000u
 extern volatile uint32_t g_jv_wait_timeouts;
 #define JV_WAIT_WHILE(cond) JV_WAIT_WHILE_N(cond, JV_WAIT_MAX)
+/* the same, for a wait that is expected to run out (not counted) */
+#define JV_WAIT_WHILE_QUIET_N(cond, max)                      \
+	do {                                                  \
+		uint32_t jv_t0_ = jv_time_us();               \
+		uint32_t jv_lim_ = jv_wait_limit_us(max);     \
+		while ((cond) && jv_time_us() - jv_t0_ < jv_lim_) \
+			;                                     \
+	} while (0)
 #define JV_WAIT_WHILE_N(cond, max)                            \
 	do {                                                  \
 		uint32_t jv_t0_ = jv_time_us();               \
