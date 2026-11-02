@@ -238,7 +238,24 @@ static struct {
   int clean_ret;
   uint32_t w, h, pitch, nbases;
   uintptr_t prev, bases[4];
+  /* drawn-over check: menu pixels read back from the previous frame when
+   * the next one arrives (that frame is still on screen until the flip) */
+  uint32_t chk_frames, chk_hit, chk_px, chk_changed, chk_us_max;
+  /* the system overlay layer (index 1) of the primary display while the
+   * menu is open in a game: could the menu live there instead? */
+  uint32_t l0_calls, l1_calls, l1_set;
+  uintptr_t l1_base;
+  uint32_t l1_fmt, l1_w, l1_h, l1_pitch;
 } g_fbd;
+
+/* where the last menu compose put a few of its pixels, and their values */
+#define CHK_N 32
+static struct {
+  uintptr_t base;
+  int n;
+  int64_t t;
+  uint32_t off[CHK_N], val[CHK_N];
+} g_chk;
 
 static int fb_cache_sync(void *addr, unsigned int size) {
   if (!g_dcache_clean_inv || !size)
@@ -617,7 +634,7 @@ static void scan_blend_rows(const Canvas *c, uint8_t *rows) {
 /* Puts canvas c, laid out at (dx,dy) on a 960x544 screen, onto the
  * framebuffer, scaling to the framebuffer's resolution. */
 static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
-                    const uint8_t *blend_rows, int dx, int dy) {
+                    const uint8_t *blend_rows, int dx, int dy, int record) {
   static int xmap[JV_SCREEN_W];
   int w = p->width, h = p->height;
   int fx0 = dx * w / JV_SCREEN_W, fy0 = dy * h / JV_SCREEN_H;
@@ -676,6 +693,25 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
   uint32_t *first = (uint32_t *)p->base + fy0 * p->pitch + fx0;
   g_fbd.clean_ret = fb_cache_sync(first, ((fh - 1) * p->pitch + fw) * 4);
   g_fbd.cleans++;
+  /* drawn-over check: 8 opaque rows x 4 columns, values as written */
+  if (record && fw == c->w) {
+    int n = 0;
+    for (int k = 1; k <= 8; k++) {
+      int j = k * fh / 9, sy = j * c->h / fh;
+      if (blend_rows[sy])
+        continue;
+      for (int q = 1; q <= 4 && n < CHK_N; q++) {
+        int x = q * fw / 5;
+        g_chk.off[n] = (uint32_t)((fy0 + j) * p->pitch + fx0 + x);
+        g_chk.val[n] = c->px[sy * c->w + x];
+        n++;
+      }
+    }
+    g_chk.base = (uintptr_t)p->base;
+    g_chk.t = now_us();
+    __sync_synchronize();
+    g_chk.n = n;
+  }
   prof_add(PROF_C_SYNC, t);
   prof_add_us(PROF_C_READ, t_read);
   prof_add_us(PROF_C_BUILD, t_build);
@@ -770,7 +806,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     if (g_panel_gen == g_overlay_gen && !(g_panel_seq & 1)) {
       uint32_t t0 = prof_now();
       Canvas c = { g_panel_px, MENU_W, MENU_H, 0 };
-      compose(p, &c, g_panel_blend, MENU_X, MENU_Y);
+      compose(p, &c, g_panel_blend, MENU_X, MENU_Y, 1);
       prof_add(PROF_COMPOSE, t0);
     }
   } else if (g_menu_open) { /* no render thread: draw here */
@@ -799,7 +835,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     if (!(rendered_seq & 1)) {
       uint32_t t0 = prof_now();
       Canvas c = { g_panel_px, MENU_W, MENU_H, 0 };
-      compose(p, &c, g_panel_blend, MENU_X, MENU_Y);
+      compose(p, &c, g_panel_blend, MENU_X, MENU_Y, 1);
       prof_add(PROF_COMPOSE, t0);
     }
   }
@@ -811,7 +847,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       menu_view_render_toast(&c, g_toast_msg, g_toast_err);
       scan_blend_rows(&c, g_toast_blend);
     }
-    compose(p, &c, g_toast_blend, TOAST_X, TOAST_Y);
+    compose(p, &c, g_toast_blend, TOAST_X, TOAST_Y, 0);
   }
 }
 
@@ -840,9 +876,55 @@ static volatile int64_t g_t_first_any;
 static volatile int g_first_any_head, g_first_any_index;
 static volatile int g_wait_first_any;
 
+/* Reads back the menu pixels of the frame drawn last time. Called when the
+ * next frame arrives: the old one is still on screen until the flip, so a
+ * game that has finished with it must not have written there. */
+static void drawn_over_check(uintptr_t next_base) {
+  int n = g_chk.n;
+  if (!n || !g_chk.base || g_chk.base == next_base)
+    return;
+  uint32_t changed = 0;
+  for (int i = 0; i < n; i++) {
+    uint32_t v;
+    uint32_t *a = (uint32_t *)g_chk.base + g_chk.off[i];
+    fb_cache_sync(a, 4);
+    if (jv_copy_from_user(&v, a, 4) < 0) {
+      g_chk.n = 0;
+      return;
+    }
+    if (v != g_chk.val[i])
+      changed++;
+  }
+  uint32_t us = (uint32_t)(now_us() - g_chk.t);
+  g_fbd.chk_frames++;
+  g_fbd.chk_px += n;
+  g_fbd.chk_changed += changed;
+  if (changed)
+    g_fbd.chk_hit++;
+  if (us > g_fbd.chk_us_max)
+    g_fbd.chk_us_max = us;
+  g_chk.n = 0;
+}
+
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
+  if (g_menu_open && head == ksceDisplayGetPrimaryHead() &&
+      ksceAppMgrIsExclusiveProcessRunning()) {
+    if (index == 0)
+      g_fbd.l0_calls++;
+    else if (index == 1) {
+      g_fbd.l1_calls++;
+      if (p && p->base) {
+        g_fbd.l1_set++;
+        g_fbd.l1_base = (uintptr_t)p->base;
+        g_fbd.l1_fmt = p->pixelformat;
+        g_fbd.l1_w = p->width;
+        g_fbd.l1_h = p->height;
+        g_fbd.l1_pitch = p->pitch;
+      }
+    }
+  }
   if (g_wait_first_any && p && p->base) {
     g_t_first_any = ksceKernelGetSystemTimeWide();
     g_first_any_head = head;
@@ -864,6 +946,7 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
         capture(p);
       if (g_menu_open || now_us() < g_toast_until) {
         if (g_menu_open) {
+          drawn_over_check((uintptr_t)p->base);
           fbd_frame(p, sync);
           if (!g_fb_rec)
             record_frame(p);
@@ -1010,6 +1093,20 @@ static void perf_report(void) {
              g_dcache_clean_inv ? "resolved" : "MISSING",
              (unsigned)g_fbd.clean_ret, (unsigned)g_fbd.cleans,
              (unsigned)g_fbd.copy_fail);
+    log_queue(line);
+    snprintf(line, sizeof(line),
+             "    menu drawn over by the game before the next frame: %u of %u "
+             "frames (%u of %u pixels changed, checked up to %u ms after "
+             "drawing); system layer 1 while in the game: %u calls (%u with "
+             "a frame, last %08X fmt %X %ux%u pitch %u), game layer 0: %u "
+             "calls\r\n",
+             (unsigned)g_fbd.chk_hit, (unsigned)g_fbd.chk_frames,
+             (unsigned)g_fbd.chk_changed, (unsigned)g_fbd.chk_px,
+             (unsigned)(g_fbd.chk_us_max / 1000), (unsigned)g_fbd.l1_calls,
+             (unsigned)g_fbd.l1_set, (unsigned)g_fbd.l1_base,
+             (unsigned)g_fbd.l1_fmt, (unsigned)g_fbd.l1_w,
+             (unsigned)g_fbd.l1_h, (unsigned)g_fbd.l1_pitch,
+             (unsigned)g_fbd.l0_calls);
     log_queue(line);
     memset(&g_fbd, 0, sizeof(g_fbd));
   }
