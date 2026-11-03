@@ -89,6 +89,8 @@ static const char *jv_wake_name(uint8_t step) {
     case JV_WAKE_FIRST_FRAME:    return "first-frame";
     case JV_WAKE_TIMING:         return "timing-logged";
     case JV_WAKE_ALIVE:          return "alive";
+    case JV_WAKE_FS_LATE:        return "usb-wait";
+    case JV_WAKE_FS_LATE_DONE:   return "usb-reread";
     case JV_WAKE_CARD_REMOUNT:   return "card-remount";
     case JV_WAKE_CARD_REMOUNTED: return "card-remounted";
     case JV_WAKE_W_LOCK:    return "w-lock";
@@ -206,7 +208,15 @@ int trace_format(char *out, int len, const JvTraceSector *t) {
     if (f->first_err)
       APP(", first failed look-up 0x%08X on drive %u", (unsigned)f->first_err,
           (unsigned)f->first_err_drive);
-    APP("\r\n     ");
+    if (f->mount_err)
+      APP(", first remount error 0x%08X", (unsigned)f->mount_err);
+    APP("\r\n    waited for devices %u ms during the wake-up; drives left "
+        "for later 0x%03X, re-read later 0x%03X after %u ms (open files gone "
+        "or unreadable then %u); slowest look-up %u ms on drive %u "
+        "(0x%08X)\r\n     ",
+        (unsigned)f->wait_ms, (unsigned)f->deferred, (unsigned)f->late_ok,
+        (unsigned)f->late_ms, (unsigned)f->late_stale, (unsigned)f->slow_ms,
+        (unsigned)f->slow_drive, (unsigned)f->slow_res);
     uint32_t dn = f->n > JV_WAKE_FS_MAX ? JV_WAKE_FS_MAX : f->n;
     for (uint32_t i = 0; i < dn; i++) {
       const JvWakeFsDrive *d = &f->drive[i];
@@ -507,6 +517,7 @@ static int g_wake_on, g_wake_io, g_wake_writes, g_wake_ret;
 static int64_t g_wake_t0;
 
 void trace_wake_begin(const PayloadArguments *pa) {
+  memset(&g_wake.fs, 0, sizeof(g_wake.fs));
   g_wake_on = 0;
   g_wake_writes = 0;
   g_wake_ret = 0;

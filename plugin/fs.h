@@ -49,6 +49,14 @@ int fs_init(const FwOffsets *o);
 void fs_set_write_mode(uint32_t mode);
 /* the drives FS_WRITES_READ_ONLY applies to, e.g. "ux0:" (empty if none) */
 int fs_read_only_names(char *out, int len);
+int fs_read_only_count(void);
+/* how update_filesystem() tells whether a drive's device is back
+ * (storage_dev_state) */
+void fs_set_dev_check(int (*fn)(const char *root));
+/* After a load: re-reads the drives whose device was not back during the
+ * wake-up, waiting up to timeout_ms for them; lifts read-only where that
+ * worked. Returns how many were re-read. */
+int fs_refresh_late(uint32_t timeout_ms);
 uint32_t fs_get_write_mode(void);
 volatile uint32_t *fs_write_mode_addr(void);
 

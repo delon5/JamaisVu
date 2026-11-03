@@ -5,6 +5,7 @@
  */
 
 #include <psp2kern/io/stat.h>
+#include <psp2kern/io/fcntl.h>
 
 #include <stddef.h>
 #include <string.h>
@@ -177,4 +178,35 @@ int storage_force_remount_card(const char **root) {
     return g_mount(k_mounts[i].id, NULL, 0, 0, 0, 0);
   }
   return 1;
+}
+
+/* Can the device behind this drive be read? Only the drives that can be
+ * away for a while after a wake-up are checked (ux0/uma0/xmc0, when not
+ * on the internal storage); everything else is STORAGE_DEV_UNCHECKED.
+ * Reads one sector of the raw device, writes nothing. */
+int storage_dev_state(const char *root) {
+  static uint8_t sec[512] __attribute__((aligned(64)));
+  if (!root || !g_lookup)
+    return STORAGE_DEV_UNCHECKED;
+  for (size_t i = 0; i < N_MOUNTS; i++) {
+    if (strcmp(root, k_mounts[i].root) != 0)
+      continue;
+    JvIoMountPoint *mp = g_lookup(k_mounts[i].id);
+    if (!mp || mp->id != k_mounts[i].id || !mp->dev)
+      return STORAGE_DEV_UNCHECKED;
+    const char *blk = mp->dev->blkdev ? mp->dev->blkdev : mp->dev->blkdev2;
+    if (!blk || strncmp(blk, "sdstor0:int-", 12) == 0)
+      return STORAGE_DEV_UNCHECKED;
+    int card_later = i > 0 && mount_is_mc(k_mounts[i].id);
+    SceUID fd = ksceIoOpen(blk, SCE_O_RDONLY, 0);
+    int r = -1;
+    if (fd >= 0) {
+      r = ksceIoRead(fd, sec, sizeof(sec));
+      ksceIoClose(fd);
+    }
+    if (r == (int)sizeof(sec))
+      return STORAGE_DEV_READY;
+    return card_later ? STORAGE_DEV_CARD_LATER : STORAGE_DEV_NOT_READY;
+  }
+  return STORAGE_DEV_UNCHECKED;
 }

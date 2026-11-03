@@ -406,7 +406,8 @@ ev_done:
            * than risk writing through stale cluster chains. */
           stale = update_filesystem();
           g_t_fs_done = ksceKernelGetSystemTimeWide();
-          fs_set_write_mode(stale ? FS_WRITES_READ_ONLY : FS_WRITES_ALLOWED);
+          fs_set_write_mode(fs_read_only_count() ? FS_WRITES_READ_ONLY
+                                                 : FS_WRITES_ALLOWED);
         } else {
           trace_wake(JV_WAKE_RESUMED);
           if (fs_get_write_mode() == FS_WRITES_DROPPED)
@@ -672,6 +673,7 @@ static int arm(void) {
                                0x20574100, &umnt) >= 0)
       storage_set_mount_ops((MountFn)mnt, (UmountFn)umnt);
   }
+  fs_set_dev_check(storage_dev_state);
 
   if (patch_syscon() < 0) {
     g_disabled_reason = "could not hook SceSyscon";

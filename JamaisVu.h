@@ -175,9 +175,18 @@ typedef struct {
   uint8_t first_err_drive; /* its drive index */
   uint8_t writes_unknown;  /* writes refused: drive not recognised */
   uint16_t writes_refused; /* writes refused on read-only drives */
+  int32_t mount_err;       /* first failed remount's result */
+  int32_t slow_res;        /* slowest single look-up: its result, */
+  uint16_t slow_ms;        /*   time */
+  uint8_t slow_drive;      /*   and drive */
+  uint8_t late_stale;      /* late re-read: open files gone/unreadable */
+  uint16_t wait_ms;        /* waited during the wake-up for devices */
+  uint16_t late_ms;        /* waited afterwards (fs_refresh_late) */
+  uint16_t deferred;       /* drives not re-read during the wake-up */
+  uint16_t late_ok;        /* of those, re-read afterwards */
   JvWakeFsDrive drive[JV_WAKE_FS_MAX];
 } JvWakeFs;
-#define JV_WAKE_FS_SIZE (16 + 8 * JV_WAKE_FS_MAX)
+#define JV_WAKE_FS_SIZE (36 + 8 * JV_WAKE_FS_MAX)
 _Static_assert(sizeof(JvWakeFs) == JV_WAKE_FS_SIZE, "packed");
 
 typedef struct {
@@ -200,9 +209,7 @@ typedef struct {
   uint32_t wake_n;
   uint8_t wake_step[64];
   uint16_t wake_ms[64];
-  JvWakeFs fs;
-  uint8_t pad[512 - 8 - 16 - 4 * 9 - 24 - 4 * 24 - 4 * 3 - 4 - 64 - 2 * 64 -
-              JV_WAKE_FS_SIZE];
+  JvWakeFs fs; /* fills the sector exactly */
 } JvTraceSector;
 _Static_assert(sizeof(JvTraceSector) == 512, "one sector");
 

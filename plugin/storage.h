@@ -85,4 +85,15 @@ int storage_card_unmounted(const char **root);
  * do (card on ux0 or not mounted), else the mount result. */
 int storage_force_remount_card(const char **root);
 
+/* After a load, before the exFAT driver re-reads a drive: is its device
+ * back? (ux0 on a USB drive - usbmc on the PCH-1000's PSVSD and the
+ * PS TV - was not, 1.5 s after the wake-up: the re-read failed, ux0
+ * was gone, and the PS TV rebooted.) */
+#define STORAGE_DEV_UNCHECKED  (-1) /* not a drive that is checked */
+#define STORAGE_DEV_NOT_READY  0
+#define STORAGE_DEV_READY      1
+#define STORAGE_DEV_CARD_LATER 2 /* not ready, but it is the card on
+                                  * uma0/xmc0, mounted afresh later */
+int storage_dev_state(const char *root);
+
 #endif

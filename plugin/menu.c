@@ -277,6 +277,8 @@ static void decide_buttons(const char *tid) {
 static volatile uint32_t g_res_mode, g_res_slot;
 static volatile int32_t g_res_result;
 static volatile int g_res_stale;
+/* load: drives left for fs_refresh_late() (their device was away) */
+static volatile int g_res_late;
 static volatile uint32_t g_res_debug, g_res_stage;
 static volatile int32_t g_res_detail;
 static PayloadArguments g_res_pa; /* copy of the last run's results */
@@ -1840,6 +1842,8 @@ static void log_result(const char *msg) {
   trace_wake(JV_WAKE_REPORT);
   int wret = 0, wn = trace_wake_end(&wret);
   trace_from_args(&t, &g_res_pa);
+  /* the load's file system re-read, also when the run returns fine */
+  memcpy(&t.fs, trace_wake_fs(), sizeof(t.fs));
   int n = trace_format(text, sizeof(text), &t);
   n += snprintf(text + n, sizeof(text) - n, "    message: %s\r\n", msg);
   if (wn >= 0 && n < (int)sizeof(text))
@@ -1904,6 +1908,13 @@ static void after_resume(void) {
       g_card_remount_ret = storage_force_remount_card(&root);
       g_card_remount_root = root;
       trace_wake(JV_WAKE_CARD_REMOUNTED);
+      /* a USB drive on ux0 that was not back during the wake-up: re-read
+       * it once it is (at most 20 s); until then it stays read-only */
+      if (g_res_late) {
+        trace_wake(JV_WAKE_FS_LATE);
+        fs_refresh_late(20000);
+        trace_wake(JV_WAKE_FS_LATE_DONE);
+      }
     }
     /* the card may be away for a moment after the wake-up (usbmc's uma0):
      * no file access until it is usable again (at most 10 s) */
@@ -1996,10 +2007,12 @@ static void after_resume(void) {
   } else if (g_res_mode == JAMAISVU_MODE_LOAD) {
     if (g_res_result == JV_OK) {
       static char ro[48];
-      if (g_res_stale && fs_read_only_names(ro, sizeof(ro)) > 0)
-        snprintf(msg, sizeof(msg), "Loaded slot %u - %s read-only until "
-                 "restart", (unsigned)g_res_slot + 1, ro);
-      else if (g_res_stale)
+      int ro_n = fs_read_only_names(ro, sizeof(ro));
+      if (ro_n > 0)
+        snprintf(msg, sizeof(msg), "Loaded slot %u - %s could not be read "
+                 "again: read-only until restart", (unsigned)g_res_slot + 1,
+                 ro);
+      else if (g_res_stale && fs_get_write_mode() == FS_WRITES_READ_ONLY)
         snprintf(msg, sizeof(msg), "Loaded slot %u - Memory Card is "
                  "read-only until restart", (unsigned)g_res_slot + 1);
       else if (g_res_pa.appdb_changed == 2)
@@ -2008,7 +2021,7 @@ static void after_resume(void) {
                  (unsigned)g_res_slot + 1);
       else
         snprintf(msg, sizeof(msg), "Loaded slot %u", (unsigned)g_res_slot + 1);
-      report(msg, g_res_stale);
+      report(msg, ro_n > 0);
     } else {
       snprintf(msg, sizeof(msg), "Load failed: %s - nothing was changed",
                result_text(g_res_result));
@@ -2776,6 +2789,7 @@ void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
   g_res_result = pa->result;
   g_res_slot = pa->slot;
   g_res_stale = stale_open_files;
+  g_res_late = trace_wake_fs()->deferred != 0;
   g_menu_open = 0;
   g_capture_req = 0;
   g_rearm_input = 1;
