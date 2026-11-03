@@ -1906,7 +1906,7 @@ static void after_resume(void) {
       const char *root = NULL;
       /* PS TV: nothing on the card or the USB storage until SceSdstor is
        * done bringing the USB storage back */
-      if (g_storage_usb_gone_t) {
+      if (g_storage_usb_gone_t || g_storage_usb_drops) {
         storage_wait_usb_settled(8000);
         trace_wake(JV_WAKE_USB_SETTLED);
       }

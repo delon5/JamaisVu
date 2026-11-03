@@ -190,24 +190,33 @@ static char g_cal_name[N_MOUNTS][40];
 
 volatile int g_storage_probe_busy;
 volatile int64_t g_storage_usb_gone_t, g_storage_usb_back_t;
+volatile int g_storage_usb_drops;
 static volatile int g_usb_settled;
+static int64_t g_usb_wake_t;
 
 void storage_usb_reset(void) {
   g_storage_usb_gone_t = 0;
   g_storage_usb_back_t = 0;
   g_usb_settled = 0;
+  g_usb_wake_t = ksceKernelGetSystemTimeWide();
 }
 
 uint32_t storage_wait_usb_settled(uint32_t max_ms) {
   int64_t t0 = ksceKernelGetSystemTimeWide();
-  if (!g_storage_usb_gone_t)
+  if (!g_storage_usb_gone_t && !g_storage_usb_drops) {
+    g_usb_settled = 1;
     return 0;
+  }
   while (1) {
     int64_t now = ksceKernelGetSystemTimeWide();
-    if (g_storage_usb_back_t && now >= g_storage_usb_back_t + 1000000)
-      break;
-    if (now >= g_storage_usb_gone_t + 6000000)
-      break;
+    if (g_storage_usb_gone_t) {
+      if (g_storage_usb_back_t && now >= g_storage_usb_back_t + 1000000)
+        break;
+      if (now >= g_storage_usb_gone_t + 6000000)
+        break;
+    } else if (now >= g_usb_wake_t + 4000000) {
+      break; /* expected to go away, but did not within 4 s */
+    }
     if (now - t0 >= (int64_t)max_ms * 1000)
       break;
     ksceKernelDelayThread(100 * 1000);
@@ -317,8 +326,9 @@ int storage_dev_state(const char *root) {
     return STORAGE_DEV_UNCHECKED;
   if (!g_cal_name[i][0])
     return STORAGE_DEV_UNKNOWN;
-  /* gone and not yet settled (PS TV): not read now */
-  if (g_storage_usb_gone_t && !g_usb_settled)
+  /* PS TV (its USB storage goes away and comes back after every wake-up)
+   * or gone: not read until it has settled */
+  if ((g_storage_usb_drops || g_storage_usb_gone_t) && !g_usb_settled)
     return STORAGE_DEV_NOT_READY;
   return probe_read(g_cal_name[i], NULL) == 512 ? STORAGE_DEV_READY
                                                 : STORAGE_DEV_NOT_READY;

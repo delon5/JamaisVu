@@ -678,6 +678,7 @@ static int arm(void) {
       storage_set_mount_ops((MountFn)mnt, (UmountFn)umnt);
   }
   fs_set_dev_check(storage_dev_state);
+  g_storage_usb_drops = ksceSblAimgrIsDolce() ? 1 : 0;
 
   if (patch_syscon() < 0) {
     g_disabled_reason = "could not hook SceSyscon";

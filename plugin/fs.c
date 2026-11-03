@@ -439,6 +439,7 @@ static void check_devices(void) {
      * again until it is back - in fs_refresh_late() */
     int st = g_dev_state ? g_dev_state(name) : STORAGE_DEV_UNCHECKED;
     while (st == STORAGE_DEV_NOT_READY && !g_storage_usb_gone_t &&
+           !g_storage_usb_drops &&
            ksceKernelGetSystemTimeWide() - t0 < FS_DEV_WAIT_MS * 1000LL) {
       ksceKernelDelayThread(50 * 1000);
       if (ksceKernelGetSystemTimeWide() >= next_tick) {
@@ -562,7 +563,7 @@ int fs_refresh_late(uint32_t timeout_ms) {
       continue;
     const char *name = fs_name((int)i);
     /* PS TV: not before the USB storage is back */
-    if (g_storage_usb_gone_t) {
+    if (g_storage_usb_gone_t || g_storage_usb_drops) {
       storage_wait_usb_settled(timeout_ms);
       trace_wake(JV_WAKE_USB_SETTLED);
     }

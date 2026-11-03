@@ -115,5 +115,9 @@ extern volatile int64_t g_storage_usb_gone_t, g_storage_usb_back_t;
 uint32_t storage_wait_usb_settled(uint32_t max_ms);
 /* at each wake-up: nothing went away yet */
 void storage_usb_reset(void);
+/* set at start on the PS TV: its USB storage goes away ~0.8 s after
+ * every wake-up and comes back - reading it around then killed the PS TV
+ * (232d976: within 0.15 s of the first read, 0.73 s after waking) */
+extern volatile int g_storage_usb_drops;
 
 #endif
