@@ -2818,7 +2818,14 @@ static void mount_events_log(void) {
 
 static int umount_hook(int id, int a2, int a3, int a4) {
   uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-  if (g_sdstor_hi && lr >= g_sdstor_lo && lr < g_sdstor_hi &&
+  /* only in the first 15 s after one of JamaisVu's own wake-ups (the
+   * save/load path): at shutdown/reboot or when the card is pulled out,
+   * SceSdstor's unmount must happen (a4ce776-98c6bf6 refused it at any
+   * time: the PCH-1000 restarted by itself when rebooted from Settings) */
+  int64_t since = g_t_resume ? ksceKernelGetSystemTimeWide() - g_t_resume
+                             : -1;
+  if (since >= 0 && since < 15000000 &&
+      g_sdstor_hi && lr >= g_sdstor_lo && lr < g_sdstor_hi &&
       ((id == 0xF00 && g_card_on[0]) || (id == 0xE00 && g_card_on[1]))) {
     mount_note(2, id, a2, 0, lr); /* refused, reported as done */
     return 0;
