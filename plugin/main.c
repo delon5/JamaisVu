@@ -687,7 +687,13 @@ static int arm(void) {
       storage_set_mount_ops((MountFn)mnt, (UmountFn)umnt);
   }
   fs_set_dev_check(storage_dev_state);
-  g_storage_usb_drops = ksceSblAimgrIsDolce() ? 1 : 0;
+  /* The PS TV special handling (USB storage left alone until it is back,
+   * 232d976-249ee2f) was written while its loads froze; that freeze went
+   * away with the user's LiveArea database clean-up, and f88da30's way -
+   * wait for the USB drive during the wake-up - worked there then (509
+   * ms). Off, so the PS TV runs what was tested; the code stays. */
+  g_storage_usb_drops = 0;
+  (void)ksceSblAimgrIsDolce;
 
   if (patch_syscon() < 0) {
     g_disabled_reason = "could not hook SceSyscon";
