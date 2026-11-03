@@ -1746,27 +1746,50 @@ static void log_append(const char *text) {
     ksceKernelUnlockMutex(g_log_mtx, 1);
 }
 
+/* lines that could not be written because the card was not mounted
+ * (usbmc's uma0 drops out after a wake-up): kept, with their time, and
+ * written ahead of the next line that can be */
+static char g_log_backlog[4096];
+static int g_log_backlog_len;
+
+static void log_backlog_add(const char *stamp, int n, const char *text) {
+  int tl = (int)strlen(text);
+  if (n + tl > (int)sizeof(g_log_backlog) - g_log_backlog_len)
+    return; /* full: the newest lines are dropped */
+  memcpy(g_log_backlog + g_log_backlog_len, stamp, n);
+  memcpy(g_log_backlog + g_log_backlog_len + n, text, tl);
+  g_log_backlog_len += n + tl;
+}
+
 static void log_append_locked(const char *text) {
   static char path[64], line[160];
   SceDateTime t;
   SceIoStat st;
-
-  if (!storage_mc_root() || slots_mkdirs() < 0)
-    return;
-  jv_file_path(path, sizeof(path), "log.txt");
-
-  int flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND;
-  if (ksceIoGetstat(path, &st) >= 0 && st.st_size > 64 * 1024)
-    flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC;
 
   memset(&t, 0, sizeof(t));
   ksceRtcGetCurrentClockLocalTime(&t);
   int n = snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d ",
                    t.year, t.month, t.day, t.hour, t.minute, t.second);
 
-  SceUID fd = ksceIoOpen(path, flags, 0666);
-  if (fd < 0)
+  if (!storage_mc_root() || slots_mkdirs() < 0) {
+    log_backlog_add(line, n, text);
     return;
+  }
+  jv_file_path(path, sizeof(path), "log.txt");
+
+  int flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND;
+  if (ksceIoGetstat(path, &st) >= 0 && st.st_size > 64 * 1024)
+    flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC;
+
+  SceUID fd = ksceIoOpen(path, flags, 0666);
+  if (fd < 0) {
+    log_backlog_add(line, n, text);
+    return;
+  }
+  if (g_log_backlog_len) {
+    ksceIoWrite(fd, g_log_backlog, g_log_backlog_len);
+    g_log_backlog_len = 0;
+  }
   ksceIoWrite(fd, line, n);
   ksceIoWrite(fd, text, strlen(text));
   ksceIoClose(fd);
@@ -1792,6 +1815,24 @@ static void log_result(const char *msg) {
 static void report(const char *msg, int is_error) {
   toast(msg, is_error);
   log_result(msg);
+}
+
+/* After a wake-up the card may be unmounted for a moment (usbmc: uma0 is
+ * dropped and not mounted again). Waits until it is usable again, mounting
+ * it back itself when needed (the io thread's watch is off while a
+ * save/load runs). 1 = usable. */
+static int card_wait(int ms) {
+  for (int waited = 0; waited <= ms; waited += 100) {
+    const char *root = NULL;
+    if (storage_card_unmounted(&root))
+      storage_remount_card(&root);
+    const char *mc = storage_detect();
+    SceIoStat st;
+    if (mc && ksceIoGetstat(mc, &st) >= 0)
+      return 1;
+    ksceKernelDelayThread(100 * 1000);
+  }
+  return 0;
 }
 
 static void after_resume(void) {
@@ -1836,6 +1877,20 @@ static void after_resume(void) {
     if (g_res_result == JV_OK) {
       trace_wake(JV_WAKE_SLOT_INFO);
       int r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
+      if (r != 0) {
+        /* PS TV (8fdbce8): uma0 dropped out right after the wake-up, the
+         * slot info could not be written ("save failed") and the card was
+         * back 5 s later - wait for it and try once more */
+        static char rl[128];
+        int back = card_wait(10000);
+        int r1 = r;
+        if (back)
+          r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
+        snprintf(rl, sizeof(rl), "    slot info: first write %d, card %s, "
+                 "second write %d\r\n", r1, back ? "back" : "still missing",
+                 back ? r : r1);
+        log_append(rl);
+      }
       trace_wake(JV_WAKE_SLOT_INFO_DONE);
       if (r == 0) {
         g_pending_env.info_crc = g_pending_info.crc;
@@ -2635,6 +2690,103 @@ void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
     ksceKernelSetEventFlag(g_evf, EVF_RESUMED);
 }
 
+/* Who mounts and unmounts ux0/uma0/xmc0 (observation only, the calls go
+ * through unchanged): usbmc's uma0 card mount is dropped after wake-ups
+ * and screenshots; the caller's module and process, and the time since
+ * the last wake-up, are logged. */
+static tai_hook_ref_t g_umount_ref, g_mount_ref;
+static SceUID g_umount_hook = -1, g_mount_hook = -1;
+static int (*g_mod_by_addr)(SceUID pid, const void *addr, uint32_t *nid,
+                            const void **text, void *name);
+
+/* the hooks only record (no lookups or locks in the system's own mount
+ * calls); the io thread formats the events */
+#define MOUNT_EV_N 16
+static struct {
+  uint8_t unmount;
+  int id, arg, ret, ms;
+  uintptr_t lr;
+  SceUID pid;
+} g_mount_ev[MOUNT_EV_N];
+static volatile uint32_t g_mount_ev_w, g_mount_ev_r;
+
+static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
+  if (id != 0x800 && id != 0xF00 && id != 0xE00)
+    return;
+  uint32_t w = __sync_fetch_and_add(&g_mount_ev_w, 1);
+  if (w - g_mount_ev_r >= MOUNT_EV_N)
+    return; /* full */
+  int64_t now = ksceKernelGetSystemTimeWide();
+  int k = w % MOUNT_EV_N;
+  g_mount_ev[k].unmount = (uint8_t)unmount;
+  g_mount_ev[k].id = id;
+  g_mount_ev[k].arg = arg;
+  g_mount_ev[k].ret = ret;
+  g_mount_ev[k].lr = lr;
+  g_mount_ev[k].pid = ksceKernelGetProcessId();
+  g_mount_ev[k].ms = g_t_resume ? (int)((now - g_t_resume) / 1000) : -1;
+}
+
+/* io thread */
+static void mount_events_log(void) {
+  static char line[220];
+  uint32_t w = g_mount_ev_w;
+  if (w - g_mount_ev_r > MOUNT_EV_N) /* the hooks dropped the newest */
+    w = g_mount_ev_r + MOUNT_EV_N;
+  while (g_mount_ev_r != w) {
+    int k = g_mount_ev_r % MOUNT_EV_N;
+    char name[0x1C + 4];
+    const void *text = NULL;
+    memset(name, 0, sizeof(name));
+    if (!g_mod_by_addr ||
+        g_mod_by_addr(0x10005, (const void *)g_mount_ev[k].lr, NULL, &text,
+                      name) < 0) {
+      strcpy(name, "?");
+      text = NULL;
+    }
+    int id = g_mount_ev[k].id;
+    snprintf(line, sizeof(line), "mount table: %s 0x%X (%s) arg %d -> 0x%08X,"
+             " called from %s+0x%X (process 0x%X), %d ms after the last "
+             "wake-up\r\n", g_mount_ev[k].unmount ? "unmount" : "mount", id,
+             id == 0x800 ? "ux0:" : id == 0xF00 ? "uma0:" : "xmc0:",
+             g_mount_ev[k].arg, (unsigned)g_mount_ev[k].ret, name,
+             (unsigned)(g_mount_ev[k].lr - (uintptr_t)text),
+             (unsigned)g_mount_ev[k].pid, g_mount_ev[k].ms);
+    log_append(line);
+    g_mount_ev_r++;
+  }
+  g_mount_ev_r = g_mount_ev_w > g_mount_ev_r + MOUNT_EV_N ? g_mount_ev_w
+                                                         : g_mount_ev_r;
+}
+
+static int umount_hook(int id, int a2, int a3, int a4) {
+  uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+  int ret = TAI_CONTINUE(int, g_umount_ref, id, a2, a3, a4);
+  mount_note(1, id, a2, ret, lr);
+  return ret;
+}
+
+static int mount_hook(int id, const char *path, int perm, int a4, int a5,
+                      int a6) {
+  uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+  int ret = TAI_CONTINUE(int, g_mount_ref, id, path, perm, a4, a5, a6);
+  mount_note(0, id, perm, ret, lr);
+  return ret;
+}
+
+static void mount_watch_install(void) {
+  if (module_get_export_func(KERNEL_PID, "SceKernelModulemgr",
+                             TAI_ANY_LIBRARY, 0x8309E043,
+                             (uintptr_t *)&g_mod_by_addr) < 0)
+    g_mod_by_addr = NULL;
+  g_umount_hook = taiHookFunctionExportForKernel(
+      KERNEL_PID, &g_umount_ref, "SceIofilemgr", TAI_ANY_LIBRARY, 0x20574100,
+      umount_hook);
+  g_mount_hook = taiHookFunctionExportForKernel(
+      KERNEL_PID, &g_mount_ref, "SceIofilemgr", TAI_ANY_LIBRARY, 0xD070BC48,
+      mount_hook);
+}
+
 /* The Memory Card back on uma0/xmc0 when it was left unmounted after a
  * sleep (usbmc / StorageMgr mount it there only at boot): checked by the
  * io thread every 2 s (the input thread never touches the card); acted on
@@ -2680,6 +2832,7 @@ static int io_thread(SceSize args, void *argp) {
                                     SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
                                     &out, &timeout);
     card_watch();
+    mount_events_log();
     if (w < 0)
       continue;
 
@@ -2739,6 +2892,7 @@ int menu_init(const char *status_text) {
 
   g_io_evf = ksceKernelCreateEventFlag("JamaisVuIoEvf", 0, 0, NULL);
   g_logq_mtx = ksceKernelCreateMutex("JamaisVuLogQ", 0, 0, NULL);
+  mount_watch_install(); /* logs through the queue: after it exists */
   g_log_mtx = ksceKernelCreateMutex("JamaisVuLog", 0, 0, NULL);
   g_evf = ksceKernelCreateEventFlag("JamaisVuEvf", 0, 0, NULL);
   g_mtx = ksceKernelCreateMutex("JamaisVuMenu", 0, 0, NULL);
