@@ -23,6 +23,7 @@
 #include "slots.h"
 #include "storage.h"
 #include "trace.h"
+#include "hwdump.h"
 #include "remap.h"
 #include "prof.h"
 #include "lockskip.h"
@@ -1776,9 +1777,14 @@ static void log_result(const char *msg) {
   static char text[1200];
   static JvTraceSector t;
 
+  trace_wake(JV_WAKE_REPORT);
+  int wret = 0, wn = trace_wake_end(&wret);
   trace_from_args(&t, &g_res_pa);
   int n = trace_format(text, sizeof(text), &t);
-  snprintf(text + n, sizeof(text) - n, "    message: %s\r\n", msg);
+  n += snprintf(text + n, sizeof(text) - n, "    message: %s\r\n", msg);
+  if (wn >= 0 && n < (int)sizeof(text))
+    snprintf(text + n, sizeof(text) - n, "    wake-up steps written to "
+             "trace.bin: %d (last result 0x%08X)\r\n", wn, (unsigned)wret);
   log_append(text);
   trace_consumed(); /* already logged from the arguments */
 }
@@ -1791,6 +1797,9 @@ static void report(const char *msg, int is_error) {
 static void after_resume(void) {
   static char msg[128];
 
+  trace_wake_io(1);
+  trace_wake(JV_WAKE_WORKER);
+
   /* put the clocks back to the snapshot's (or, after a save, to what they
    * were before) and record it */
   {
@@ -1798,6 +1807,7 @@ static void after_resume(void) {
     jv_clocks_restore(clk, sizeof(clk));
     snprintf(line, sizeof(line), "    %s\r\n", clk);
     log_append(line);
+    trace_wake(JV_WAKE_CLOCKS);
   }
 
   if (g_res_debug != JV_TEST_NONE) {
@@ -1824,7 +1834,9 @@ static void after_resume(void) {
 
   if (g_res_mode == JAMAISVU_MODE_SAVE) {
     if (g_res_result == JV_OK) {
+      trace_wake(JV_WAKE_SLOT_INFO);
       int r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
+      trace_wake(JV_WAKE_SLOT_INFO_DONE);
       if (r == 0) {
         g_pending_env.info_crc = g_pending_info.crc;
         slot_env_write(g_res_slot, &g_pending_env);
@@ -1894,6 +1906,11 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     snprintf(line, sizeof(line), "    clocks before: %s\r\n", clk);
     log_append(line);
   }
+  /* PS TV: the system's own HDMI setup while its picture is on screen
+   * (read only), to compare with the progress screen's */
+  if (jv_disp_type() == JV_DISP_HDMI &&
+      (debug_mode == JV_TEST_DISPLAY || debug_mode == JV_TEST_NONE))
+    hwdump_hdmi(log_append);
 
   /* no lock screen on the way back (both the save and the load path:
    * the snapshot is taken with this in place, too) */

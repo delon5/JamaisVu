@@ -146,7 +146,14 @@ typedef struct {
   uint8_t trace_stage[24];
   uint32_t trace_ms[24];
   uint32_t fault_type, fault_addr, fault_lr;
-  uint8_t pad[512 - 8 - 16 - 4 * 9 - 24 - 4 * 24 - 4 * 3];
+  /* Written by the plugin, not the payload (which leaves these 0): its own
+   * steps after the wake-up (JV_WAKE_*, ms since the first resume event),
+   * so a freeze after the payload returned still shows how far the
+   * system got (PCH-1000 with the card on uma0: froze twice). */
+  uint32_t wake_n;
+  uint8_t wake_step[32];
+  uint16_t wake_ms[32];
+  uint8_t pad[512 - 8 - 16 - 4 * 9 - 24 - 4 * 24 - 4 * 3 - 4 - 32 - 2 * 32];
 } JvTraceSector;
 _Static_assert(sizeof(JvTraceSector) == 512, "one sector");
 

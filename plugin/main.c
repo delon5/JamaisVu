@@ -30,6 +30,7 @@
 #include "menu.h"
 #include "prof.h"
 #include "storage.h"
+#include "trace.h"
 
 #define JV_VERSION "2.0-dev"
 #ifndef JV_BUILD_ID
@@ -380,12 +381,16 @@ ev_done:
         menu_arm_first_frame();
         memcpy(&pargs, (void *)PAYLOAD_ARGS_PADDR, sizeof(PayloadArguments));
         memcpy(g_rtc_ctx, pargs.rtc_ctx, SCE_RTC_CTX_SIZE);
+        trace_wake_begin(&pargs);
+        trace_wake(JV_WAKE_RESUME);
       } else if (eventid == 0x100000) {
         g_t_resumed = ksceKernelGetSystemTimeWide();
         g_t_fs_done = 0;
         int stale = 0;
 
         if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK) {
+          trace_wake_io(1); /* the refresh below reads the card anyway */
+          trace_wake(JV_WAKE_RESUMED);
           /* We are the restored image and the payload has armed
            * FS_WRITES_DROPPED. Re-read ux0 from the card, then allow
            * writes again - unless files that are still open no longer
@@ -394,10 +399,13 @@ ev_done:
           stale = update_filesystem();
           g_t_fs_done = ksceKernelGetSystemTimeWide();
           fs_set_write_mode(stale ? FS_WRITES_READ_ONLY : FS_WRITES_ALLOWED);
-        } else if (fs_get_write_mode() == FS_WRITES_DROPPED) {
-          fs_set_write_mode(FS_WRITES_ALLOWED);
+        } else {
+          trace_wake(JV_WAKE_RESUMED);
+          if (fs_get_write_mode() == FS_WRITES_DROPPED)
+            fs_set_write_mode(FS_WRITES_ALLOWED);
         }
 
+        trace_wake(JV_WAKE_MENU);
         menu_on_resumed(&pargs, stale);
         pargs.mode = JAMAISVU_MODE_NONE;
       }

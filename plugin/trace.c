@@ -64,6 +64,29 @@ const char *jv_stage_name(uint32_t stage) {
   }
 }
 
+static const char *jv_wake_name(uint8_t step) {
+  static char fs[12];
+  if (step >= JV_WAKE_FS_MOUNT) {
+    snprintf(fs, sizeof(fs), "remount-%u", (unsigned)(step - JV_WAKE_FS_MOUNT));
+    return fs;
+  }
+  switch (step) {
+    case JV_WAKE_RESUME:    return "resume";
+    case JV_WAKE_RESUMED:   return "resumed";
+    case JV_WAKE_FS_CACHES: return "fs-caches";
+    case JV_WAKE_FS_PATCH:  return "fs-patch";
+    case JV_WAKE_FS_VNODES: return "fs-open-files";
+    case JV_WAKE_FS_FNODES: return "fs-cached-files";
+    case JV_WAKE_MENU:      return "menu";
+    case JV_WAKE_WORKER:    return "worker";
+    case JV_WAKE_CLOCKS:    return "clocks";
+    case JV_WAKE_SLOT_INFO: return "slot-info";
+    case JV_WAKE_SLOT_INFO_DONE: return "slot-info-done";
+    case JV_WAKE_REPORT:    return "report";
+    default:                return "?";
+  }
+}
+
 const char *jv_result_text(int32_t res) {
   switch (res) {
     case JV_TEST_DONE:      return "test passed";
@@ -143,6 +166,16 @@ int trace_format(char *out, int len, const JvTraceSector *t) {
     APP(" %s@%ums", jv_stage_name(t->trace_stage[i]),
             (unsigned)t->trace_ms[i]);
   APP("\r\n");
+
+  uint32_t wn = t->wake_n;
+  if (wn > sizeof(t->wake_step))
+    wn = sizeof(t->wake_step);
+  if (wn) {
+    APP("    after the wake-up (ms since the first resume event):");
+    for (uint32_t i = 0; i < wn; i++)
+      APP(" %s@%u", jv_wake_name(t->wake_step[i]), (unsigned)t->wake_ms[i]);
+    APP("\r\n");
+  }
 
   if (t->fault_type)
     APP("    crash: %s, fault address 0x%08X, return address 0x%08X\r\n",
@@ -416,4 +449,69 @@ void trace_consumed(void) {
   static const uint8_t zero[16];
   if (storage_mc_root())
     write_header(zero);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Steps after the wake-up                                                  */
+/* ------------------------------------------------------------------------ */
+
+static JvTraceSector g_wake __attribute__((aligned(64)));
+static uint32_t g_wake_rel;
+static const char *g_wake_dev;
+static int g_wake_on, g_wake_io, g_wake_writes, g_wake_ret;
+static int64_t g_wake_t0;
+
+void trace_wake_begin(const PayloadArguments *pa) {
+  g_wake_on = 0;
+  g_wake_writes = 0;
+  g_wake_ret = 0;
+  g_wake_dev = storage_mc_blkdev();
+  g_wake_rel = pa->trace_rel_lba;
+  if (!g_wake_dev || !g_wake_rel)
+    return;
+  trace_from_args(&g_wake, pa);
+  memcpy(g_wake.nonce, pa->trace_nonce, 16);
+  g_wake.wake_n = 0;
+  g_wake_t0 = ksceKernelGetSystemTimeWide();
+  g_wake_io = 0;
+  g_wake_on = 1;
+}
+
+void trace_wake_io(int on) {
+  g_wake_io = on;
+}
+
+void trace_wake(uint8_t step) {
+  if (!g_wake_on || g_wake.wake_n >= sizeof(g_wake.wake_step))
+    return;
+  uint32_t ms = (uint32_t)((ksceKernelGetSystemTimeWide() - g_wake_t0) / 1000);
+  g_wake.wake_step[g_wake.wake_n] = step;
+  g_wake.wake_ms[g_wake.wake_n] = ms > 0xFFFF ? 0xFFFF : (uint16_t)ms;
+  g_wake.wake_n++;
+  /* steps from before the card may be touched are kept in memory and go
+   * out with the first write */
+  if (!g_wake_io)
+    return;
+  /* the payload checked magic + nonce in this very sector before the run;
+   * only it is written, through the card's raw device */
+  SceUID fd = ksceIoOpen(g_wake_dev, SCE_O_WRONLY, 0);
+  if (fd < 0) {
+    g_wake_ret = fd;
+    return;
+  }
+  int r = (int)ksceIoLseek(fd, (SceOff)g_wake_rel * 512, SCE_SEEK_SET);
+  if (r >= 0)
+    r = ksceIoWrite(fd, &g_wake, 512);
+  ksceIoClose(fd);
+  g_wake_ret = r;
+  if (r == 512)
+    g_wake_writes++;
+}
+
+int trace_wake_end(int *last_ret) {
+  int n = g_wake_on ? g_wake_writes : -1;
+  if (last_ret)
+    *last_ret = g_wake_ret;
+  g_wake_on = 0;
+  return n;
 }

@@ -202,6 +202,31 @@ static void write_sfo(const char *path, const char *title, const char *ver) {
 /* Persistent trace: trace_prepare must find trace.bin's sector by walking
  * the card's exFAT structures through the raw device, and the payload's
  * record there must come back through trace_collect. */
+/* the plugin's steps after the wake-up, as they appear in log.txt */
+static void test_wake_format(void) {
+  static JvTraceSector t;
+  static char out[1200];
+  printf("trace: steps after the wake-up\n");
+  memset(&t, 0, sizeof(t));
+  memcpy(t.magic, JV_TRACE_MAGIC, 8);
+  t.written = 1;
+  t.mode = JAMAISVU_MODE_LOAD;
+  t.stage = JV_STAGE_DONE;
+  t.wake_n = 4;
+  t.wake_step[0] = JV_WAKE_RESUME;   t.wake_ms[0] = 0;
+  t.wake_step[1] = JV_WAKE_RESUMED;  t.wake_ms[1] = 840;
+  t.wake_step[2] = JV_WAKE_FS_PATCH; t.wake_ms[2] = 851;
+  t.wake_step[3] = JV_WAKE_FS_MOUNT + 1; t.wake_ms[3] = 852;
+  trace_format(out, sizeof(out), &t);
+  printf("%s", out);
+  CHECK(strstr(out, "after the wake-up (ms since the first resume event): "
+                    "resume@0 resumed@840 fs-patch@851 remount-1@852\r\n")
+        != NULL, "wake steps not formatted");
+  t.wake_n = 0;
+  trace_format(out, sizeof(out), &t);
+  CHECK(strstr(out, "wake-up") == NULL, "no wake line without steps");
+}
+
 static void test_trace(const char *mc_mount, int sd_ux0, int usb_uma0,
                        int filler) {
   static char path[128], out[1400];
@@ -602,6 +627,7 @@ int main(int argc, char **argv) {
   }
 
   test_remount();
+  test_wake_format();
 
   scenario("mount table unavailable", "ux0:", 0, 0);
   storage_set_mount_lookup(NULL);

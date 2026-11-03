@@ -15,6 +15,7 @@
 #include <stdarg.h>
 
 #include "main.h"
+#include "trace.h"
 #include "fs.h"
 #include "prof.h"
 
@@ -212,6 +213,7 @@ static void remount_filesystems(void) {
     void *drive = *(uintptr_t **)(fileSystem + 0xac);
     void *trash_fnode = *(uintptr_t **)(fileSystem + 0x114);
     if (drive) {
+      trace_wake((uint8_t)(JV_WAKE_FS_MOUNT + (i > 0x3F ? 0x3F : i)));
       if (ksceKernelLockFastMutex(drive + 0x1e0) >= 0) {
         char *assignName = *(char **)(drive + 0xc0);
 
@@ -280,15 +282,19 @@ int update_filesystem(void) {
   tm->ms[0] = fs_ms_since(&t);
   invalidate_file_caches();
   tm->ms[1] = fs_ms_since(&t);
+  trace_wake(JV_WAKE_FS_CACHES);
   if (mgmt_patch_apply() < 0) {
     /* cannot remount safely: keep the card read-only until restart */
     return 1;
   }
+  trace_wake(JV_WAKE_FS_PATCH);
   remount_filesystems();
   mgmt_patch_remove();
   tm->ms[2] = fs_ms_since(&t);
+  trace_wake(JV_WAKE_FS_VNODES);
   int stale_open = update_vnodes();
   tm->ms[3] = fs_ms_since(&t);
+  trace_wake(JV_WAKE_FS_FNODES);
   tm->fnodes = update_fnodes(&tm->fnodes_skipped);
   tm->ms[4] = fs_ms_since(&t);
   return stale_open;
