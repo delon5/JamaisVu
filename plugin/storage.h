@@ -64,4 +64,19 @@ const char *storage_reason(void);   /* why there is no usable card */
  * "sdstor0:xmc-lp-ign-userext" (read-only use only) */
 const char *storage_mc_blkdev(void);
 
+/* usbmc (and StorageMgr) put the Memory Card on uma0/xmc0 once, at boot.
+ * After a sleep the system leaves that mount unmounted (user, PS TV and
+ * PCH-1000 with usbmc: ux0 back, uma0 gone). main.c passes ksceIoMount /
+ * ksceIoUmount; storage_remount_card() then mounts the card again where
+ * the mount table already says it belongs - only uma0/xmc0, only when
+ * that mount is the Memory Card and not mounted. Returns 1 if nothing was
+ * to do, else the ksceIoMount result; *root is the mount it acted on. */
+typedef int (*MountFn)(int id, const char *path, int permission, int a4,
+                       int a5, int a6);
+typedef int (*UmountFn)(int id, int a2, int a3, int a4);
+void storage_set_mount_ops(MountFn mount, UmountFn umount);
+int storage_remount_card(const char **root);
+/* 1 if uma0/xmc0 is the Memory Card in the mount table but not mounted */
+int storage_card_unmounted(const char **root);
+
 #endif

@@ -646,6 +646,17 @@ static int arm(void) {
     storage_set_mount_lookup((MountLookupFn)fn);
   }
 
+  /* ksceIoMount / ksceIoUmount, to mount the card again on uma0/xmc0
+   * after a sleep (usbmc only does it at boot) */
+  {
+    uintptr_t mnt = 0, umnt = 0;
+    if (module_get_export_func(KERNEL_PID, "SceIofilemgr", TAI_ANY_LIBRARY,
+                               0xD070BC48, &mnt) >= 0 &&
+        module_get_export_func(KERNEL_PID, "SceIofilemgr", TAI_ANY_LIBRARY,
+                               0x20574100, &umnt) >= 0)
+      storage_set_mount_ops((MountFn)mnt, (UmountFn)umnt);
+  }
+
   if (patch_syscon() < 0) {
     g_disabled_reason = "could not hook SceSyscon";
     return -1;

@@ -105,3 +105,41 @@ const char *storage_detect(void) {
              "ux0, uma0 or xmc0)";
   return NULL;
 }
+
+static MountFn g_mount = NULL;
+static UmountFn g_umount = NULL;
+
+void storage_set_mount_ops(MountFn mount, UmountFn umount) {
+  g_mount = mount;
+  g_umount = umount;
+}
+
+int storage_card_unmounted(const char **root) {
+  for (size_t i = 1; i < N_MOUNTS; i++)
+    if (mount_is_mc(k_mounts[i].id) && !mounted(k_mounts[i].root)) {
+      if (root)
+        *root = k_mounts[i].root;
+      return 1;
+    }
+  return 0;
+}
+
+int storage_remount_card(const char **root) {
+  if (root)
+    *root = NULL;
+  /* ux0 is left to the system: it mounts its own card there */
+  for (size_t i = 1; i < N_MOUNTS; i++) {
+    if (!mount_is_mc(k_mounts[i].id) || mounted(k_mounts[i].root))
+      continue;
+    if (root)
+      *root = k_mounts[i].root;
+    if (!g_mount || !g_umount)
+      return -1;
+    /* as usbmc does at boot: both unmount kinds, then mount by id (the
+     * mount table entry still points at the Memory Card) */
+    g_umount(k_mounts[i].id, 0, 0, 0);
+    g_umount(k_mounts[i].id, 1, 0, 0);
+    return g_mount(k_mounts[i].id, NULL, 0, 0, 0, 0);
+  }
+  return 1;
+}

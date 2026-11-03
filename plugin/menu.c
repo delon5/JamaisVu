@@ -2618,15 +2618,52 @@ void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
     ksceKernelSetEventFlag(g_evf, EVF_RESUMED);
 }
 
+/* The Memory Card back on uma0/xmc0 when it was left unmounted after a
+ * sleep (usbmc / StorageMgr mount it there only at boot): checked by the
+ * io thread every 2 s (the input thread never touches the card); acted on
+ * when it is still missing at the next check, so the system's own remount
+ * after a wake-up is not raced. */
+static void card_watch(void) {
+  static int64_t next;
+  static int missing, failures;
+  int64_t t = now_us();
+  const char *root = NULL;
+  if (t < next || g_busy)
+    return;
+  next = t + 2000000;
+  if (!storage_card_unmounted(&root)) {
+    missing = 0;
+    return;
+  }
+  if (++missing < 2)
+    return;
+  int r = storage_remount_card(&root);
+  int ok = storage_detect() != NULL;
+  if (ok || failures < 3) {
+    static char line[160];
+    snprintf(line, sizeof(line), "Memory Card was not mounted on %s (left "
+             "unmounted after a sleep): mounted it again, result 0x%08X, %s\r\n",
+             root ? root : "?", (unsigned)r, ok ? "found" : "still missing");
+    log_append(line); /* after storage_detect: written if found */
+  }
+  failures = ok ? 0 : failures + 1;
+  missing = 0;
+  if (!ok)
+    next = t + (failures > 3 ? 30000000 : 5000000);
+}
+
 static int io_thread(SceSize args, void *argp) {
   static char batch[sizeof(g_logq)];
   static char tid[16];
 
   while (1) {
     unsigned int out = 0;
-    if (ksceKernelWaitEventFlag(g_io_evf, IOEV_LOG | IOEV_DECIDE,
-                                SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
-                                &out, NULL) < 0)
+    SceUInt32 timeout = 2000000;
+    int w = ksceKernelWaitEventFlag(g_io_evf, IOEV_LOG | IOEV_DECIDE,
+                                    SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
+                                    &out, &timeout);
+    card_watch();
+    if (w < 0)
       continue;
 
     if (out & IOEV_DECIDE) {
