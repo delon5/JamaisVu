@@ -8,6 +8,7 @@
 #include <psp2kern/io/fcntl.h>
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "storage.h"
@@ -180,6 +181,9 @@ int storage_force_remount_card(const char **root) {
   return 1;
 }
 
+static int g_probe_open, g_probe_read;
+static const char *g_probe_blk;
+
 /* Can the device behind this drive be read? Only the drives that can be
  * away for a while after a wake-up are checked (ux0/uma0/xmc0, when not
  * on the internal storage); everything else is STORAGE_DEV_UNCHECKED.
@@ -197,16 +201,34 @@ int storage_dev_state(const char *root) {
     const char *blk = mp->dev->blkdev ? mp->dev->blkdev : mp->dev->blkdev2;
     if (!blk || strncmp(blk, "sdstor0:int-", 12) == 0)
       return STORAGE_DEV_UNCHECKED;
-    int card_later = i > 0 && mount_is_mc(k_mounts[i].id);
+    /* the card on uma0/xmc0 is mounted afresh after a load anyway; its
+     * in-place re-read crashed the PS TV (f3caa8d: remount of uma0 3.7 s
+     * after the wake-up, once SceSdstor had set the card up again) */
+    if (i > 0 && mount_is_mc(k_mounts[i].id))
+      return STORAGE_DEV_CARD_LATER;
     SceUID fd = ksceIoOpen(blk, SCE_O_RDONLY, 0);
     int r = -1;
     if (fd >= 0) {
       r = ksceIoRead(fd, sec, sizeof(sec));
       ksceIoClose(fd);
     }
+    g_probe_blk = blk;
+    g_probe_open = fd;
+    g_probe_read = r;
     if (r == (int)sizeof(sec))
       return STORAGE_DEV_READY;
-    return card_later ? STORAGE_DEV_CARD_LATER : STORAGE_DEV_NOT_READY;
+    return STORAGE_DEV_NOT_READY;
   }
   return STORAGE_DEV_UNCHECKED;
+}
+
+int storage_dev_probe_text(const char *root, char *out, int len) {
+  static const char *const names[] = {"ready", "NOT ready", "card, later"};
+  g_probe_blk = NULL;
+  g_probe_open = g_probe_read = 0;
+  int st = storage_dev_state(root);
+  return snprintf(out, len, "%s device %s: %s (open 0x%08X, read 0x%08X)",
+                  root, g_probe_blk ? g_probe_blk : "-",
+                  st >= 0 && st <= 2 ? names[st] : "not checked",
+                  (unsigned)g_probe_open, (unsigned)g_probe_read);
 }

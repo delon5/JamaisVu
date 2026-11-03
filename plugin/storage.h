@@ -92,8 +92,10 @@ int storage_force_remount_card(const char **root);
 #define STORAGE_DEV_UNCHECKED  (-1) /* not a drive that is checked */
 #define STORAGE_DEV_NOT_READY  0
 #define STORAGE_DEV_READY      1
-#define STORAGE_DEV_CARD_LATER 2 /* not ready, but it is the card on
-                                  * uma0/xmc0, mounted afresh later */
+#define STORAGE_DEV_CARD_LATER 2 /* the card on uma0/xmc0: not re-read in
+                                  * place, it is mounted afresh later */
 int storage_dev_state(const char *root);
+/* diagnostics: the check above as one line (device, open and read results) */
+int storage_dev_probe_text(const char *root, char *out, int len);
 
 #endif

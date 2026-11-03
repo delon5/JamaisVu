@@ -1882,6 +1882,7 @@ static int card_wait(int ms) {
 }
 
 static int g_card_remount_ret = 1;
+static char g_late_probe[128];
 static const char *g_card_remount_root;
 
 static void after_resume(void) {
@@ -1914,6 +1915,7 @@ static void after_resume(void) {
         trace_wake(JV_WAKE_FS_LATE);
         fs_refresh_late(20000);
         trace_wake(JV_WAKE_FS_LATE_DONE);
+        storage_dev_probe_text("ux0:", g_late_probe, sizeof(g_late_probe));
       }
     }
     /* the card may be away for a moment after the wake-up (usbmc's uma0):
@@ -1929,6 +1931,12 @@ static void after_resume(void) {
                (unsigned)g_card_remount_ret);
       log_append(line);
       g_card_remount_root = NULL;
+    }
+    if (g_late_probe[0]) {
+      snprintf(line, sizeof(line), "    after the load: %s\r\n",
+               g_late_probe);
+      log_append(line);
+      g_late_probe[0] = 0;
     }
     trace_wake(JV_WAKE_CLOCKS);
   }
@@ -2709,6 +2717,14 @@ static int worker_thread(SceSize args, void *argp) {
     snprintf(text, sizeof(text), "PREVIOUS RUN DID NOT RETURN (recovered "
              "from trace.bin):\r\n    %s", prev);
     log_append(text);
+  }
+  /* is the check that loads use to see whether a USB drive is back right
+   * at all? (f3caa8d: ux0 never looked ready, on both usbmc consoles) */
+  {
+    static char probe[128], line[160];
+    storage_dev_probe_text("ux0:", probe, sizeof(probe));
+    snprintf(line, sizeof(line), "storage check at start: %s\r\n", probe);
+    log_append(line);
   }
 
   while (1) {
