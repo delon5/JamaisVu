@@ -421,6 +421,27 @@ static void mount_failed(uint32_t i, int mr) {
  * (ed20f94). Such a drive is left completely alone (no cache dropped, no
  * remount, no look-ups: the restored image's own view of it stays as it
  * was) and read-only; fs_refresh_late() re-reads it once it is back. */
+static int root_is(const char *name, const char *root) {
+  int n = (int)strlen(root) - 1; /* without the ':' */
+  return name && strncmp(name, root, n) == 0 &&
+         (name[n] == ':' || name[n] == '\0');
+}
+
+/* PS TV: by the drive's name only - nothing of the mount table or the
+ * devices is touched during the wake-up there (7a523c1 died 20 ms into
+ * this check without reading any device; what it still did was look the
+ * drives up in the mount table, ux0's entry being the USB stick that is
+ * going away then) */
+static int dev_state_by_name(const char *name) {
+  const char *mc = storage_mc_root();
+  int card_elsewhere = mc && !root_is(mc, "ux0:");
+  if (root_is(name, "ux0:"))
+    return card_elsewhere ? STORAGE_DEV_NOT_READY : STORAGE_DEV_UNCHECKED;
+  if (root_is(name, "uma0:") || root_is(name, "xmc0:"))
+    return card_elsewhere ? STORAGE_DEV_CARD_LATER : STORAGE_DEV_NOT_READY;
+  return STORAGE_DEV_UNCHECKED;
+}
+
 static void check_devices(void) {
   JvWakeFs *f = trace_wake_fs();
   int64_t t0 = ksceKernelGetSystemTimeWide();
@@ -437,7 +458,8 @@ static void check_devices(void) {
 
     /* once SceSdstor has let the USB storage go (PS TV), it is not read
      * again until it is back - in fs_refresh_late() */
-    int st = g_dev_state ? g_dev_state(name) : STORAGE_DEV_UNCHECKED;
+    int st = g_storage_usb_drops ? dev_state_by_name(name)
+             : g_dev_state ? g_dev_state(name) : STORAGE_DEV_UNCHECKED;
     while (st == STORAGE_DEV_NOT_READY && !g_storage_usb_gone_t &&
            !g_storage_usb_drops &&
            ksceKernelGetSystemTimeWide() - t0 < FS_DEV_WAIT_MS * 1000LL) {
