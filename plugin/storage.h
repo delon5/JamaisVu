@@ -119,5 +119,13 @@ void storage_usb_reset(void);
  * every wake-up and comes back - reading it around then killed the PS TV
  * (232d976: within 0.15 s of the first read, 0.73 s after waking) */
 extern volatile int g_storage_usb_drops;
+/* PS TV, after a load: no card I/O at all until the wake-up is over and
+ * the USB storage has settled (set at the first resume event, cleared by
+ * storage_wait_usb_settled). The record and the log lines stay in memory
+ * meanwhile. Writing the card from within the wake-up is what hung the
+ * PS TV: no picture ever came back, a fresh boot 5-10 s later, and the
+ * record always ended at the first write in the wake-up (249ee2f:
+ * dev-check@667, then not even the next step 1 ms later). */
+extern volatile int g_storage_card_hold;
 
 #endif

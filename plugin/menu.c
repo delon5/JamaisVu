@@ -1800,7 +1800,7 @@ static void log_append_locked(const char *text) {
   int n = snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d ",
                    t.year, t.month, t.day, t.hour, t.minute, t.second);
 
-  if (!storage_mc_root() || slots_mkdirs() < 0) {
+  if (g_storage_card_hold || !storage_mc_root() || slots_mkdirs() < 0) {
     log_backlog_add(line, n, text);
     return;
   }
@@ -1891,6 +1891,13 @@ static const char *g_card_remount_root;
 static void after_resume(void) {
   static char msg[128];
 
+  /* PS TV after a load: the card only once the wake-up is over and the
+   * USB storage has settled (the record is kept in memory until then) */
+  if (g_storage_card_hold) {
+    trace_wake(JV_WAKE_WORKER);
+    storage_wait_usb_settled(8000);
+    trace_wake(JV_WAKE_USB_SETTLED);
+  }
   trace_wake_io(1);
   trace_wake(JV_WAKE_WORKER);
 

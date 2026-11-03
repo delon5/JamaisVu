@@ -393,6 +393,10 @@ ev_done:
           g_regsnap_ok = 1;
         }
         storage_usb_reset();
+        g_storage_card_hold = g_storage_usb_drops &&
+                              pargs.mode == JAMAISVU_MODE_LOAD &&
+                              pargs.result == JV_OK &&
+                              pargs.debug_mode == JV_TEST_NONE;
         trace_wake_begin(&pargs);
         trace_wake(JV_WAKE_RESUME);
         if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK &&
@@ -404,7 +408,10 @@ ev_done:
         int stale = 0;
 
         if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK) {
-          trace_wake_io(1); /* the refresh below reads the card anyway */
+          /* the refresh below reads the card anyway - not on the PS TV,
+           * where card I/O during the wake-up hung it */
+          if (!g_storage_card_hold)
+            trace_wake_io(1);
           trace_wake(JV_WAKE_RESUMED);
           /* We are the restored image and the payload has armed
            * FS_WRITES_DROPPED. Re-read ux0 from the card, then allow

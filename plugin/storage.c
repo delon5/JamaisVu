@@ -191,6 +191,7 @@ static char g_cal_name[N_MOUNTS][40];
 volatile int g_storage_probe_busy;
 volatile int64_t g_storage_usb_gone_t, g_storage_usb_back_t;
 volatile int g_storage_usb_drops;
+volatile int g_storage_card_hold;
 static volatile int g_usb_settled;
 static int64_t g_usb_wake_t;
 
@@ -205,6 +206,7 @@ uint32_t storage_wait_usb_settled(uint32_t max_ms) {
   int64_t t0 = ksceKernelGetSystemTimeWide();
   if (!g_storage_usb_gone_t && !g_storage_usb_drops) {
     g_usb_settled = 1;
+    g_storage_card_hold = 0;
     return 0;
   }
   while (1) {
@@ -222,6 +224,7 @@ uint32_t storage_wait_usb_settled(uint32_t max_ms) {
     ksceKernelDelayThread(100 * 1000);
   }
   g_usb_settled = 1;
+  g_storage_card_hold = 0;
   return (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
 }
 
