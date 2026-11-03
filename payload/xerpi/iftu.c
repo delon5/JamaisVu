@@ -212,3 +212,18 @@ void iftu_plane_config_set_scale(enum iftu_bus bus, enum iftu_plane plane,
 
 	dmb();
 }
+
+/* JamaisVu: plane registers 0x004 and 0x030, which the PS TV's system
+ * sets for HDMI (full readout, f900412: 0x101 and 0x1F6100; 0 after our
+ * setup - the display controller is reset during sleep and libbaremetal
+ * never writes them). Without them our scaled 960x544 -> 1280x720
+ * picture came out slanted, running past its end. */
+void iftu_plane_set_hdmi_scaler(enum iftu_bus bus, enum iftu_plane plane)
+{
+	uintptr_t regs = IFTU_PLANE_REGS(bus, plane);
+
+	write32(0x101, regs + 0x004);
+	write32(0x1F6100, regs + 0x030);
+
+	dmb();
+}

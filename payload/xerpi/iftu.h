@@ -63,6 +63,7 @@ void iftu_plane_config_set_config(enum iftu_bus bus, enum iftu_plane plane,
 void iftu_plane_config_set_scale(enum iftu_bus bus, enum iftu_plane plane,
 				 enum iftu_plane_config config,
 				 uint32_t step, uint32_t reg54);
+void iftu_plane_set_hdmi_scaler(enum iftu_bus bus, enum iftu_plane plane);
 void iftu_plane_config_set_enabled(enum iftu_bus bus, enum iftu_plane plane,
 				   enum iftu_plane_config config, bool enabled);
 

@@ -115,6 +115,8 @@ static void plane_setup(uint32_t paddr) {
 	fb.height = g_h;
 	for (int p = 0; p < 2; p++)
 		for (int c = 0; c < 2; c++) {
+			if (g_type == JV_DISP_HDMI && c == 0)
+				iftu_plane_set_hdmi_scaler(g_bus, planes[p]);
 			iftu_plane_set_alpha(g_bus, planes[p], 256);
 			iftu_plane_set_csc0(g_bus, planes[p], &csc0);
 			iftu_plane_set_csc1(g_bus, planes[p], &csc1);
