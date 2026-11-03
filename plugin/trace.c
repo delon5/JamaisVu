@@ -91,6 +91,9 @@ static const char *jv_wake_name(uint8_t step) {
     case JV_WAKE_ALIVE:          return "alive";
     case JV_WAKE_FS_LATE:        return "usb-wait";
     case JV_WAKE_FS_LATE_DONE:   return "usb-reread";
+    case JV_WAKE_FS_DEV_CHECK:   return "dev-check";
+    case JV_WAKE_FS_DEV_WAIT:    return "dev-wait";
+    case JV_WAKE_FS_DEV_DONE:    return "dev-checked";
     case JV_WAKE_CARD_REMOUNT:   return "card-remount";
     case JV_WAKE_CARD_REMOUNTED: return "card-remounted";
     case JV_WAKE_W_LOCK:    return "w-lock";

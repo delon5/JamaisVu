@@ -189,8 +189,7 @@ static void invalidate_file_caches(uint32_t only) {
   void *files = *(uintptr_t **)(g_shared_resource + g_off->sr_files);
   for (uint32_t i = 0; i < num; i++) {
     FileCache *filep = (FileCache *)(files + 0x38 * i);
-    if (filep->fnode &&
-        (!only || fs_wanted(fnode_fs((void *)filep->fnode), only))) {
+    if (filep->fnode && fs_wanted(fnode_fs((void *)filep->fnode), only)) {
       FreeFpCache(filep);
       filep->Cluster = -2;
       filep->ClusterIndex = -1;
@@ -356,12 +355,12 @@ static void invalidate_buff_caches(uint32_t only) {
   for (int i = 0; i < num; i++) {
     void *vp = (void *)(*g_vnodes + *g_vnode_size * i);
     void *file = *(uintptr_t **)(vp + 0x5c);
-    if (only) {
-      void *fnode = *(uintptr_t **)(vp + 0x60);
-      if (!fnode || fnode != *(uintptr_t **)(vp + 0x48) ||
-          !fs_wanted(fnode_fs(fnode), only))
-        continue;
-    }
+    void *fnode = *(uintptr_t **)(vp + 0x60);
+    int exfat = fnode && fnode == *(uintptr_t **)(vp + 0x48);
+    if (only && !exfat)
+      continue;
+    if (exfat && !fs_wanted(fnode_fs(fnode), only))
+      continue; /* a drive left alone (see check_devices) */
     if (file) {
       invalidate_buff_cache(file, vp);
       *(uint32_t *)(file + 0xc) = 8;
@@ -417,9 +416,16 @@ static void mount_failed(uint32_t i, int mr) {
 /* how long the wake-up may wait for a device to come back (ms) */
 #define FS_DEV_WAIT_MS 3000
 
-static void remount_filesystems(void) {
+/* Before anything is dropped: which drives can be re-read now? A USB
+ * drive (ux0 through usbmc) may not be back yet - its remount failed
+ * (ed20f94). Such a drive is left completely alone (no cache dropped, no
+ * remount, no look-ups: the restored image's own view of it stays as it
+ * was) and read-only; fs_refresh_late() re-reads it once it is back. */
+static void check_devices(void) {
   JvWakeFs *f = trace_wake_fs();
   int64_t t0 = ksceKernelGetSystemTimeWide();
+  int64_t next_tick = t0 + 500 * 1000;
+  trace_wake(JV_WAKE_FS_DEV_CHECK);
   for (uint32_t i = 0; i < g_off->fs_count && i < 32; i++) {
     const char *name = fs_name((int)i);
     if (!*(uintptr_t **)(fs_at(i) + 0xac))
@@ -429,32 +435,39 @@ static void remount_filesystems(void) {
       for (int k = 0; k < 4 && name[k]; k++)
         rec->name[k] = name[k];
 
-    /* a USB drive (ux0 through usbmc) may not be back yet: wait for it a
-     * little; remounting it before was what failed */
     int st = g_dev_state ? g_dev_state(name) : STORAGE_DEV_UNCHECKED;
     while (st == STORAGE_DEV_NOT_READY &&
            ksceKernelGetSystemTimeWide() - t0 < FS_DEV_WAIT_MS * 1000LL) {
       ksceKernelDelayThread(50 * 1000);
+      if (ksceKernelGetSystemTimeWide() >= next_tick) {
+        trace_wake(JV_WAKE_FS_DEV_WAIT);
+        next_tick += 500 * 1000;
+      }
       st = g_dev_state(name);
     }
-    if (st != STORAGE_DEV_UNCHECKED) {
-      uint32_t w = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
-      f->wait_ms = w > 0xFFFF ? 0xFFFF : (uint16_t)w;
-    }
-    if (st == STORAGE_DEV_NOT_READY || st == STORAGE_DEV_CARD_LATER) {
-      /* not touched now: no remount, no look-ups. A USB drive is re-read
-       * by fs_refresh_late() once it is back, and nothing is written to
-       * it until then; the card on uma0/xmc0 is mounted afresh anyway */
-      g_skip_mask |= 1u << i;
-      if (i < 16)
-        f->deferred |= (uint16_t)(1u << i);
-      if (st == STORAGE_DEV_NOT_READY) {
-        g_late_mask |= 1u << i;
-        ro_add(name ? name : "?");
-      }
+    uint32_t w = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
+    f->wait_ms = w > 0xFFFF ? 0xFFFF : (uint16_t)w;
+    if (st == STORAGE_DEV_UNCHECKED || st == STORAGE_DEV_READY)
       continue;
-    }
+    g_skip_mask |= 1u << i;
+    if (i < 16)
+      f->deferred |= (uint16_t)(1u << i);
+    if (st == STORAGE_DEV_CARD_LATER)
+      continue; /* the card on uma0/xmc0: mounted afresh by the worker */
+    /* NOT_READY: re-read later once it is back; UNKNOWN (no way to tell
+     * when it is back): left as it is until restart */
+    if (st == STORAGE_DEV_NOT_READY)
+      g_late_mask |= 1u << i;
+    ro_add(name ? name : "?");
+  }
+  trace_wake(JV_WAKE_FS_DEV_DONE);
+}
 
+static void remount_filesystems(void) {
+  for (uint32_t i = 0; i < g_off->fs_count && i < 32; i++) {
+    if (!*(uintptr_t **)(fs_at(i) + 0xac) || (g_skip_mask & (1u << i)))
+      continue;
+    const char *name = fs_name((int)i);
     trace_wake((uint8_t)(JV_WAKE_FS_MOUNT + (i > 0x3F ? 0x3F : i)));
     int mr = remount_one(i);
     if (mr < 0) {
@@ -508,6 +521,7 @@ int update_filesystem(void) {
   JvWakeFs *f = trace_wake_fs();
   f->n = (uint8_t)(g_off->fs_count > JV_WAKE_FS_MAX ? JV_WAKE_FS_MAX
                                                      : g_off->fs_count);
+  check_devices();
   invalidate_buff_caches(0);
   tm->ms[0] = fs_ms_since(&t);
   invalidate_file_caches(0);

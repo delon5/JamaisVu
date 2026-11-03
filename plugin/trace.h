@@ -67,6 +67,9 @@ enum {
   JV_WAKE_W_SYNC,         /*   card flushed */
   JV_WAKE_FS_LATE,        /* load: waiting for drives that were away */
   JV_WAKE_FS_LATE_DONE,   /*   done (re-read, or gave up) */
+  JV_WAKE_FS_DEV_CHECK,   /* load: checking which drives are there */
+  JV_WAKE_FS_DEV_WAIT,    /*   still waiting for one (every 0.5 s) */
+  JV_WAKE_FS_DEV_DONE,    /*   checked */
   JV_WAKE_FS_MOUNT = 0x40 /* + n: load, remounting filesystem n */
 };
 void trace_wake_begin(const PayloadArguments *pa);
