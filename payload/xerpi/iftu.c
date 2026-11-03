@@ -194,3 +194,19 @@ void iftu_plane_config_set_enabled(enum iftu_bus bus, enum iftu_plane plane,
 
 	dmb();
 }
+
+/* JamaisVu: scaling, as the PS TV's system does for HDMI (its own setup,
+ * read on hardware: source step 0xC16C in both directions = 960x544 shown
+ * as ~1268x718, and 0x100 at config offset 0x54) */
+void iftu_plane_config_set_scale(enum iftu_bus bus, enum iftu_plane plane,
+				 enum iftu_plane_config config,
+				 uint32_t step, uint32_t reg54)
+{
+	uintptr_t regs = IFTU_PLANE_CONFIG_REGS(bus, plane, config);
+
+	write32(step, regs + IFTU_PLANE_CONFIG_SRC_W);
+	write32(step, regs + IFTU_PLANE_CONFIG_SRC_H);
+	write32(reg54, regs + 0x54);
+
+	dmb();
+}

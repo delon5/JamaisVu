@@ -61,6 +61,7 @@ static int g_pitch, g_w, g_h;
 static enum iftu_bus g_bus = IFTU_BUS_0;
 static enum dsi_bus g_dsi = DSI_BUS_OLED_LCD;
 static uint32_t g_dst_x, g_dst_y;
+static uint32_t g_out_w, g_out_h; /* plane output: 960x544, HDMI 1280x720 */
 static int g_hdmi_tv; /* PS TV: a TV answered (hot-plug detect) */
 
 static void fill(int x, int y, int w, int h, uint32_t c) {
@@ -117,7 +118,11 @@ static void plane_setup(uint32_t paddr) {
 			iftu_plane_set_csc1(g_bus, planes[p], &csc1);
 			iftu_plane_set_csc_enabled(g_bus, planes[p], true);
 			iftu_plane_config_set_config(g_bus, planes[p], cfgs[c], &fb,
-			                             g_dst_x, g_dst_y, g_w, g_h);
+			                             g_dst_x, g_dst_y, g_out_w,
+			                             g_out_h);
+			if (g_type == JV_DISP_HDMI)
+				iftu_plane_config_set_scale(g_bus, planes[p],
+				                            cfgs[c], 0xC16C, 0x100);
 		}
 	iftu_bus_plane_config_select(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0);
 	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_B, IFTU_PLANE_CONFIG_0, false);
@@ -163,8 +168,12 @@ static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
 		vic = 0x8600;
 		g_bus = IFTU_BUS_HDMI;
 		g_dsi = DSI_BUS_HDMI;
-		g_dst_x = (1280 - 960) / 2;
-		g_dst_y = (720 - 544) / 2;
+		/* the whole 1280x720 output, the picture scaled up as the
+		 * system does (from 4 px in; 66481a6 readout) */
+		g_dst_x = 4;
+		g_dst_y = 0;
+		g_out_w = 1280;
+		g_out_h = 720;
 	} else {
 		/* LCD: 0x20 (clean on the PCH-2000; 0 = libbaremetal's timing,
 		 * garbage along the edges there). OLED: 0, as libbaremetal's
@@ -173,6 +182,8 @@ static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
 		g_bus = IFTU_BUS_OLED_LCD;
 		g_dsi = DSI_BUS_OLED_LCD;
 		g_dst_x = g_dst_y = 0;
+		g_out_w = 960;
+		g_out_h = 544;
 	}
 
 	g_fb = (volatile uint32_t *)(uintptr_t)a->fb_paddr;
@@ -445,7 +456,10 @@ int jv_screen_switch(uint32_t paddr, uint32_t pitch) {
 	fb.width = g_w;
 	fb.height = g_h;
 	iftu_plane_config_set_config(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1,
-	                             &fb, g_dst_x, g_dst_y, g_w, g_h);
+	                             &fb, g_dst_x, g_dst_y, g_out_w, g_out_h);
+	if (g_type == JV_DISP_HDMI)
+		iftu_plane_config_set_scale(g_bus, IFTU_PLANE_A,
+		                            IFTU_PLANE_CONFIG_1, 0xC16C, 0x100);
 	iftu_bus_plane_config_select(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1);
 	g_args = b;
 	return 0;

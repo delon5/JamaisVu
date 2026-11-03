@@ -60,6 +60,9 @@ void iftu_plane_config_set_config(enum iftu_bus bus, enum iftu_plane plane,
 				  const struct iftu_plane_fb_config *fb,
 				  uint32_t dst_x, uint32_t dst_y,
 				  uint32_t dst_w, uint32_t dst_h);
+void iftu_plane_config_set_scale(enum iftu_bus bus, enum iftu_plane plane,
+				 enum iftu_plane_config config,
+				 uint32_t step, uint32_t reg54);
 void iftu_plane_config_set_enabled(enum iftu_bus bus, enum iftu_plane plane,
 				   enum iftu_plane_config config, bool enabled);
 

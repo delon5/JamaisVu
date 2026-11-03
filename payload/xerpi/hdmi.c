@@ -3,7 +3,8 @@
  * JamaisVu changes: the wait for the TV's HDCP answer (BKSV) is bounded;
  * the system controller command goes through JamaisVu's syscon.c;
  * hdmi_off() added (bridge powered down, HPD and clock back off).
- * Not yet run on a PS TV. */
+ * Run on a PS TV: picture garbled until the timing generator / colour
+ * conversion changes below (compared with the system's own setup). */
 #include <stdint.h>
 #include "hdmi.h"
 #include "utils.h"
@@ -57,6 +58,14 @@ static const struct reg_sequence adv7533_fixed_registers[] = {
 	{ 0xde, 0x82 },
 	{ 0xe4, 0x40 },
 	{ 0xe5, 0x80 },
+};
+
+/* JamaisVu: timing generator values the PS TV's system uses for 720p60 */
+static const struct reg_sequence adv7533_timing_720p[] = {
+	{ 0x28, 0x67 }, { 0x29, 0x20 }, { 0x2A, 0x02 }, { 0x2B, 0x80 },
+	{ 0x2C, 0x06 }, { 0x2D, 0xE0 }, { 0x2E, 0x0D }, { 0x2F, 0xC0 },
+	{ 0x30, 0x2E }, { 0x31, 0xE0 }, { 0x32, 0x00 }, { 0x33, 0x50 },
+	{ 0x34, 0x00 }, { 0x35, 0x50 }, { 0x36, 0x01 }, { 0x37, 0x40 },
 };
 
 static const struct reg_sequence adv7533_cec_fixed_registers[] = {
@@ -169,8 +178,23 @@ int hdmi_connect(void)
 	/* Set pixel clock divider mode */
 	hdmi_write(HDMI_I2C_CEC_ADDR, 0x16, clock_div_by_lanes[lanes - 2] << 3);
 
-	/* Disable internal timing generator */
-	hdmi_write(HDMI_I2C_CEC_ADDR, ADV7533_REG_CEC_DSI_INTERNAL_TIMING, 0x0B);
+	/* JamaisVu: the bridge's own timing generator ON with 1280x720p60, as
+	 * the PS TV's system sets it (read from the running system, 66481a6:
+	 * CEC 0x27 = 0xD0, 0x28-0x37 = htotal 1650, hsync 40, hfp 110,
+	 * hbp 220, vtotal 750, vsync 5, vfp 5, vbp 20). libbaremetal turned
+	 * it off (0x0B): the picture came out as four squashed copies in the
+	 * top half with every other line dark. */
+	for (i = 0; i < ARRAY_SIZE(adv7533_timing_720p); i++)
+		hdmi_write(HDMI_I2C_CEC_ADDR, adv7533_timing_720p[i].reg,
+			   adv7533_timing_720p[i].cmd);
+	hdmi_write(HDMI_I2C_CEC_ADDR, ADV7533_REG_CEC_DSI_INTERNAL_TIMING, 0xD0);
+
+	/* JamaisVu: the bridge's colour conversion OFF (the system leaves it
+	 * on, 0x18 = 0xA8, for its own colour tables): our display controller
+	 * sends RGB, as on the handhelds - with it on, red came out pink,
+	 * green teal. And the video code sent to the TV: 4 = 720p60. */
+	hdmi_clr_bit(HDMI_I2C_ADDR, 0x18, BIT(7));
+	hdmi_write(HDMI_I2C_ADDR, 0x3C, 0x04);
 
 	/* GC Packet Enable */
 	hdmi_write(HDMI_I2C_ADDR, ADV7533_REG_PACKET_ENABLE0, ADV7533_PACKET_ENABLE_GC);
