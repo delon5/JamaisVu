@@ -49,6 +49,9 @@ uint8_t *fk_mc_image;      /* exFAT partition image */
 uint32_t fk_mc_sectors;
 int fk_mc_present = 1;     /* raw device opens */
 char fk_mc_mount[8] = "ux0:"; /* OS mount name of the card, "" = none */
+/* where the mount table says the card belongs although it is not mounted
+ * (usbmc's uma0 after a sleep); "" = only where it is mounted */
+char fk_mc_table[8] = "";
 int64_t fk_host_free = 4ll << 30;
 
 typedef struct {
@@ -382,7 +385,8 @@ JvIoMountPoint *fk_find_mount_point(int id) {
       break;
     case 0xF00: /* uma0 */
       k = 1; root = "uma0:";
-      blk = !strcmp(fk_mc_mount, root) ? MC : "sdstor0:uma-pp-act-a";
+      blk = !strcmp(fk_mc_mount, root) || !strcmp(fk_mc_table, root)
+          ? MC : "sdstor0:uma-pp-act-a";
       break;
     case 0xE00: /* xmc0: always the Memory Card in the system table */
       k = 2; root = "xmc0:";

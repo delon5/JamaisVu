@@ -2641,8 +2641,8 @@ static void card_watch(void) {
   int ok = storage_detect() != NULL;
   if (ok || failures < 3) {
     static char line[160];
-    snprintf(line, sizeof(line), "Memory Card was not mounted on %s (left "
-             "unmounted after a sleep): mounted it again, result 0x%08X, %s\r\n",
+    snprintf(line, sizeof(line), "Memory Card was not mounted anywhere "
+             "(its mount %s was down): mounted it again, result 0x%08X, %s\r\n",
              root ? root : "?", (unsigned)r, ok ? "found" : "still missing");
     log_append(line); /* after storage_detect: written if found */
   }

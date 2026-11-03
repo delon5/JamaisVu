@@ -115,6 +115,16 @@ void storage_set_mount_ops(MountFn mount, UmountFn umount) {
 }
 
 int storage_card_unmounted(const char **root) {
+  /* the card can be mounted only once: if any of its mounts is up (e.g.
+   * uma0), the others (xmc0, the system's default entry for it) stay
+   * down - 1b41e43 tried xmc0 every 4 s, 0x80010078 */
+  for (size_t i = 0; i < N_MOUNTS; i++)
+    if (mount_is_mc(k_mounts[i].id) && mounted(k_mounts[i].root))
+      return 0;
+  /* the card belongs on ux0 (no storage plugin moved it): the system
+   * mounts it there itself */
+  if (mount_is_mc(k_mounts[0].id))
+    return 0;
   for (size_t i = 1; i < N_MOUNTS; i++)
     if (mount_is_mc(k_mounts[i].id) && !mounted(k_mounts[i].root)) {
       if (root)
@@ -127,6 +137,8 @@ int storage_card_unmounted(const char **root) {
 int storage_remount_card(const char **root) {
   if (root)
     *root = NULL;
+  if (!storage_card_unmounted(NULL))
+    return 1;
   /* ux0 is left to the system: it mounts its own card there */
   for (size_t i = 1; i < N_MOUNTS; i++) {
     if (!mount_is_mc(k_mounts[i].id) || mounted(k_mounts[i].root))

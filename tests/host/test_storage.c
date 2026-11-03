@@ -66,6 +66,22 @@ static int count_entries(const char *dir) {
   return n;
 }
 
+static int g_nmount, g_numount, g_mount_id;
+static int fake_mount(int id, const char *path, int perm, int a4, int a5,
+                      int a6) {
+  (void)path; (void)perm; (void)a4; (void)a5; (void)a6;
+  g_nmount++;
+  g_mount_id = id;
+  if (id == 0xF00 && !strcmp(fk_mc_table, "uma0:"))
+    strcpy(fk_mc_mount, "uma0:");
+  return 0;
+}
+static int fake_umount(int id, int a2, int a3, int a4) {
+  (void)id; (void)a2; (void)a3; (void)a4;
+  g_numount++;
+  return 0;
+}
+
 static void scenario(const char *name, const char *mc_mount, int sd_ux0,
                      int usb_uma0) {
   printf("%s\n", name);
@@ -475,6 +491,51 @@ static void test_versions(void) {
   CHECK(!app_versions_match(NULL, "01.02"), "missing version blocks load");
 }
 
+/* usbmc puts the card on uma0 once at boot; after a sleep the system can
+ * leave uma0 unmounted (PS TV, PCH-1000). Mounting it again must happen
+ * only then: never while the card is mounted somewhere (1b41e43 tried
+ * xmc0 every 4 s, which the system table always lists as the card), and
+ * never for a card that belongs on ux0 (the system's job). */
+static void test_remount(void) {
+  const char *root = NULL;
+  storage_set_mount_ops(fake_mount, fake_umount);
+
+  scenario("remount: card on uma0 and mounted (xmc0 down)", "uma0:", 1, 0);
+  strcpy(fk_mc_table, "uma0:");
+  g_nmount = g_numount = 0;
+  CHECK(!storage_card_unmounted(&root), "nothing is missing");
+  CHECK(storage_remount_card(&root) == 1 && g_nmount == 0 && g_numount == 0,
+        "must not mount anything (mounts %d)", g_nmount);
+
+  scenario("remount: uma0 left unmounted after a sleep", "", 1, 0);
+  strcpy(fk_mc_table, "uma0:");
+  g_nmount = g_numount = 0;
+  CHECK(storage_card_unmounted(&root) && root && !strcmp(root, "uma0:"),
+        "uma0 must be reported missing (%s)", root ? root : "(null)");
+  CHECK(storage_remount_card(&root) == 0 && g_nmount == 1 &&
+        g_mount_id == 0xF00 && g_numount == 2,
+        "must mount uma0 once (mounts %d id 0x%X umounts %d)", g_nmount,
+        g_mount_id, g_numount);
+  root = detect_readonly();
+  CHECK(root && !strcmp(root, "uma0:"), "card back on %s",
+        root ? root : "(null)");
+
+  scenario("remount: card belongs on ux0, unmounted", "", 0, 0);
+  fk_mc_table[0] = '\0';
+  g_nmount = 0;
+  CHECK(!storage_card_unmounted(&root), "ux0 is the system's job");
+  CHECK(storage_remount_card(&root) == 1 && g_nmount == 0,
+        "must not mount anything (mounts %d)", g_nmount);
+
+  scenario("remount: no mount functions", "", 1, 0);
+  strcpy(fk_mc_table, "uma0:");
+  storage_set_mount_ops(NULL, NULL);
+  CHECK(storage_remount_card(&root) < 0, "must refuse without functions");
+
+  fk_mc_table[0] = '\0';
+  storage_set_mount_ops(NULL, NULL);
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);
   if (argc < 3) return 2;
@@ -539,6 +600,8 @@ int main(int argc, char **argv) {
     CHECK(count_entries(d_ux0) == 0 && count_entries(d_uma0) == 0,
           "nothing may be written without a Memory Card");
   }
+
+  test_remount();
 
   scenario("mount table unavailable", "ux0:", 0, 0);
   storage_set_mount_lookup(NULL);
