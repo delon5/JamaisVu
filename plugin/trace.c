@@ -85,6 +85,12 @@ static const char *jv_wake_name(uint8_t step) {
     case JV_WAKE_REPORT:    return "report";
     case JV_WAKE_CLOCKS_SET: return "clocks-set";
     case JV_WAKE_CARD_READY: return "card-ready";
+    case JV_WAKE_W_MKDIR:   return "w-mkdir";
+    case JV_WAKE_W_STAT:    return "w-stat";
+    case JV_WAKE_W_OPEN:    return "w-open";
+    case JV_WAKE_W_WRITE:   return "w-write";
+    case JV_WAKE_W_CLOSE:   return "w-close";
+    case JV_WAKE_W_SYNC:    return "w-sync";
     default:                return "?";
   }
 }

@@ -1763,10 +1763,17 @@ static void log_backlog_add(const char *stamp, int n, const char *text) {
   g_log_backlog_len += n + tl;
 }
 
+/* the first log write after a wake-up records each file call in
+ * trace.bin (both consoles with the card on uma0 stopped there after a
+ * load, a4ce776: card-ready, then nothing) */
+static int g_log_trace_once;
+
 static void log_append_locked(const char *text) {
   static char path[64], line[160];
   SceDateTime t;
   SceIoStat st;
+  int tr = g_log_trace_once;
+  g_log_trace_once = 0;
 
   memset(&t, 0, sizeof(t));
   ksceRtcGetCurrentClockLocalTime(&t);
@@ -1777,25 +1784,37 @@ static void log_append_locked(const char *text) {
     log_backlog_add(line, n, text);
     return;
   }
+  if (tr)
+    trace_wake(JV_WAKE_W_MKDIR);
   jv_file_path(path, sizeof(path), "log.txt");
 
   int flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND;
   if (ksceIoGetstat(path, &st) >= 0 && st.st_size > 64 * 1024)
     flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC;
+  if (tr)
+    trace_wake(JV_WAKE_W_STAT);
 
   SceUID fd = ksceIoOpen(path, flags, 0666);
   if (fd < 0) {
     log_backlog_add(line, n, text);
     return;
   }
+  if (tr)
+    trace_wake(JV_WAKE_W_OPEN);
   if (g_log_backlog_len) {
     ksceIoWrite(fd, g_log_backlog, g_log_backlog_len);
     g_log_backlog_len = 0;
   }
   ksceIoWrite(fd, line, n);
   ksceIoWrite(fd, text, strlen(text));
+  if (tr)
+    trace_wake(JV_WAKE_W_WRITE);
   ksceIoClose(fd);
+  if (tr)
+    trace_wake(JV_WAKE_W_CLOSE);
   slots_sync();
+  if (tr)
+    trace_wake(JV_WAKE_W_SYNC);
 }
 
 static void log_result(const char *msg) {
@@ -1854,6 +1873,7 @@ static void after_resume(void) {
     if (card_wait(10000))
       trace_wake(JV_WAKE_CARD_READY);
     snprintf(line, sizeof(line), "    %s\r\n", clk);
+    g_log_trace_once = 1;
     log_append(line);
     trace_wake(JV_WAKE_CLOCKS);
   }

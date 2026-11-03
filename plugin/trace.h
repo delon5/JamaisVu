@@ -48,6 +48,12 @@ enum {
   JV_WAKE_REPORT,         /* result message */
   JV_WAKE_CLOCKS_SET,     /* clocks set back (before logging them) */
   JV_WAKE_CARD_READY,     /* card usable (waited for it if needed) */
+  JV_WAKE_W_MKDIR,        /* first log write: folders checked */
+  JV_WAKE_W_STAT,         /*   log.txt looked up */
+  JV_WAKE_W_OPEN,         /*   opened */
+  JV_WAKE_W_WRITE,        /*   written */
+  JV_WAKE_W_CLOSE,        /*   closed */
+  JV_WAKE_W_SYNC,         /*   card flushed */
   JV_WAKE_FS_MOUNT = 0x40 /* + n: load, remounting filesystem n */
 };
 void trace_wake_begin(const PayloadArguments *pa);
