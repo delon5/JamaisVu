@@ -2807,10 +2807,16 @@ static void mount_watch_install(void) {
   memset(&ti, 0, sizeof(ti));
   ti.size = sizeof(ti);
   if (taiGetModuleInfoForKernel(KERNEL_PID, "SceSdstor", &ti) >= 0) {
+    /* SceModulemgrForKernel, not in the stubs this links: by NID */
+    int (*get_info)(SceUID pid, SceUID modid, SceKernelModuleInfo *info) =
+        NULL;
     SceKernelModuleInfo mi;
     memset(&mi, 0, sizeof(mi));
     mi.size = sizeof(mi);
-    if (ksceKernelGetModuleInfo(KERNEL_PID, ti.modid, &mi) >= 0 &&
+    if (module_get_export_func(KERNEL_PID, "SceKernelModulemgr",
+                               TAI_ANY_LIBRARY, 0xD269F915,
+                               (uintptr_t *)&get_info) >= 0 && get_info &&
+        get_info(KERNEL_PID, ti.modid, &mi) >= 0 &&
         mi.segments[0].vaddr && mi.segments[0].memsz) {
       g_sdstor_lo = (uintptr_t)mi.segments[0].vaddr;
       g_sdstor_hi = g_sdstor_lo + mi.segments[0].memsz;
