@@ -6,6 +6,7 @@
 
 #include <psp2kern/io/stat.h>
 #include <psp2kern/io/fcntl.h>
+#include <psp2kern/kernel/threadmgr.h>
 
 #include <stddef.h>
 #include <stdio.h>
@@ -188,6 +189,32 @@ int storage_force_remount_card(const char **root) {
 static char g_cal_name[N_MOUNTS][40];
 
 volatile int g_storage_probe_busy;
+volatile int64_t g_storage_usb_gone_t, g_storage_usb_back_t;
+static volatile int g_usb_settled;
+
+void storage_usb_reset(void) {
+  g_storage_usb_gone_t = 0;
+  g_storage_usb_back_t = 0;
+  g_usb_settled = 0;
+}
+
+uint32_t storage_wait_usb_settled(uint32_t max_ms) {
+  int64_t t0 = ksceKernelGetSystemTimeWide();
+  if (!g_storage_usb_gone_t)
+    return 0;
+  while (1) {
+    int64_t now = ksceKernelGetSystemTimeWide();
+    if (g_storage_usb_back_t && now >= g_storage_usb_back_t + 1000000)
+      break;
+    if (now >= g_storage_usb_gone_t + 6000000)
+      break;
+    if (now - t0 >= (int64_t)max_ms * 1000)
+      break;
+    ksceKernelDelayThread(100 * 1000);
+  }
+  g_usb_settled = 1;
+  return (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
+}
 
 static int probe_read(const char *blk, int *open_ret) {
   static uint8_t sec[512] __attribute__((aligned(64)));
@@ -290,6 +317,9 @@ int storage_dev_state(const char *root) {
     return STORAGE_DEV_UNCHECKED;
   if (!g_cal_name[i][0])
     return STORAGE_DEV_UNKNOWN;
+  /* gone and not yet settled (PS TV): not read now */
+  if (g_storage_usb_gone_t && !g_usb_settled)
+    return STORAGE_DEV_NOT_READY;
   return probe_read(g_cal_name[i], NULL) == 512 ? STORAGE_DEV_READY
                                                 : STORAGE_DEV_NOT_READY;
 }

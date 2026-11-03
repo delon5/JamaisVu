@@ -104,6 +104,7 @@ static const char *jv_wake_name(uint8_t step) {
     case JV_WAKE_FS_DEV_DONE:    return "dev-checked";
     case JV_WAKE_TICK:           return "t";
     case JV_WAKE_TICK_PROBE:     return "t-in-usb-check";
+    case JV_WAKE_USB_SETTLED:    return "usb-back";
     case JV_WAKE_CARD_REMOUNT:   return "card-remount";
     case JV_WAKE_CARD_REMOUNTED: return "card-remounted";
     case JV_WAKE_W_LOCK:    return "w-lock";

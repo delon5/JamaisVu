@@ -435,14 +435,18 @@ static void check_devices(void) {
       for (int k = 0; k < 4 && name[k]; k++)
         rec->name[k] = name[k];
 
+    /* once SceSdstor has let the USB storage go (PS TV), it is not read
+     * again until it is back - in fs_refresh_late() */
     int st = g_dev_state ? g_dev_state(name) : STORAGE_DEV_UNCHECKED;
-    while (st == STORAGE_DEV_NOT_READY &&
+    while (st == STORAGE_DEV_NOT_READY && !g_storage_usb_gone_t &&
            ksceKernelGetSystemTimeWide() - t0 < FS_DEV_WAIT_MS * 1000LL) {
       ksceKernelDelayThread(50 * 1000);
       if (ksceKernelGetSystemTimeWide() >= next_tick) {
         trace_wake(JV_WAKE_FS_DEV_WAIT);
         next_tick += 500 * 1000;
       }
+      if (g_storage_usb_gone_t)
+        break; /* stays NOT_READY: re-read later */
       st = g_dev_state(name);
     }
     uint32_t w = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
@@ -557,6 +561,11 @@ int fs_refresh_late(uint32_t timeout_ms) {
     if (!(g_late_mask & bit))
       continue;
     const char *name = fs_name((int)i);
+    /* PS TV: not before the USB storage is back */
+    if (g_storage_usb_gone_t) {
+      storage_wait_usb_settled(timeout_ms);
+      trace_wake(JV_WAKE_USB_SETTLED);
+    }
     int st = g_dev_state(name);
     while (st == STORAGE_DEV_NOT_READY &&
            ksceKernelGetSystemTimeWide() - t0 < timeout_ms * 1000LL) {

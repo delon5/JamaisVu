@@ -389,6 +389,7 @@ ev_done:
           memcpy(g_regsnap, (void *)(REGSNAP_PADDR + 4), sizeof(g_regsnap));
           g_regsnap_ok = 1;
         }
+        storage_usb_reset();
         trace_wake_begin(&pargs);
         trace_wake(JV_WAKE_RESUME);
         if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK &&

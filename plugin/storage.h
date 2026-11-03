@@ -102,4 +102,18 @@ int storage_dev_calibrate(const char *root, char *out, int len);
 /* 1 while one of these checks is reading a device (diagnostics) */
 extern volatile int g_storage_probe_busy;
 
+/* PS TV: ~0.8 s after a wake-up SceSdstor unmounts uma0 (refused by the
+ * card guard) - its USB storage going away to come back. Reading the USB
+ * device in that time is what the PS TV died of after loads (4023c9c:
+ * 0.4-0.6 s after that unmount, while the plugin read the USB stick).
+ * menu.c sets these from its mount hooks (system time, 0 = not seen);
+ * main.c clears them at each wake-up. */
+extern volatile int64_t g_storage_usb_gone_t, g_storage_usb_back_t;
+/* waits (at most max_ms) until the USB storage that went away is back -
+ * SceSdstor mounting again, plus 1 s - or 6 s after it went away; returns
+ * at once when nothing went away. Returns the ms waited. */
+uint32_t storage_wait_usb_settled(uint32_t max_ms);
+/* at each wake-up: nothing went away yet */
+void storage_usb_reset(void);
+
 #endif

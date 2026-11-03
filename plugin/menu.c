@@ -1904,6 +1904,12 @@ static void after_resume(void) {
     if (g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_LOAD &&
         g_res_result == JV_OK) {
       const char *root = NULL;
+      /* PS TV: nothing on the card or the USB storage until SceSdstor is
+       * done bringing the USB storage back */
+      if (g_storage_usb_gone_t) {
+        storage_wait_usb_settled(8000);
+        trace_wake(JV_WAKE_USB_SETTLED);
+      }
       trace_wake(JV_WAKE_CARD_REMOUNT);
       g_card_remount_ret = storage_force_remount_card(&root);
       g_card_remount_root = root;
@@ -2936,6 +2942,8 @@ static int umount_hook(int id, int a2, int a3, int a4) {
       g_sdstor_hi && lr >= g_sdstor_lo && lr < g_sdstor_hi &&
       ((id == 0xF00 && g_card_on[0]) || (id == 0xE00 && g_card_on[1]))) {
     mount_note(2, id, a2, 0, lr); /* refused, reported as done */
+    if (!g_storage_usb_gone_t)
+      g_storage_usb_gone_t = ksceKernelGetSystemTimeWide();
     return 0;
   }
   int ret = TAI_CONTINUE(int, g_umount_ref, id, a2, a3, a4);
@@ -2948,6 +2956,10 @@ static int mount_hook(int id, const char *path, int perm, int a4, int a5,
   uintptr_t lr = (uintptr_t)__builtin_return_address(0);
   int ret = TAI_CONTINUE(int, g_mount_ref, id, path, perm, a4, a5, a6);
   mount_note(0, id, perm, ret, lr);
+  /* SceSdstor mounting again after it let the USB storage go */
+  if (g_storage_usb_gone_t && g_sdstor_hi && lr >= g_sdstor_lo &&
+      lr < g_sdstor_hi)
+    g_storage_usb_back_t = ksceKernelGetSystemTimeWide();
   return ret;
 }
 
