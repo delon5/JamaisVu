@@ -2822,6 +2822,15 @@ static void mount_watch_install(void) {
       g_sdstor_hi = g_sdstor_lo + mi.segments[0].memsz;
     }
   }
+  {
+    static char line[160];
+    snprintf(line, sizeof(line), "card mount guard: SceSdstor code %s "
+             "0x%08X-0x%08X, card on uma0 %d, on xmc0 %d\r\n",
+             g_sdstor_hi ? "at" : "NOT FOUND", (unsigned)g_sdstor_lo,
+             (unsigned)g_sdstor_hi, storage_mount_is_card(0xF00),
+             storage_mount_is_card(0xE00));
+    log_queue(line);
+  }
   mount_card_flags_update();
   if (module_get_export_func(KERNEL_PID, "SceKernelModulemgr",
                              TAI_ANY_LIBRARY, 0x8309E043,
