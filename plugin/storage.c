@@ -187,14 +187,18 @@ int storage_force_remount_card(const char **root) {
  * directly (0x80010013 on both consoles, c8d049a). "" = none found. */
 static char g_cal_name[N_MOUNTS][40];
 
+volatile int g_storage_probe_busy;
+
 static int probe_read(const char *blk, int *open_ret) {
   static uint8_t sec[512] __attribute__((aligned(64)));
+  g_storage_probe_busy = 1;
   SceUID fd = ksceIoOpen(blk, SCE_O_RDONLY, 0);
   int r = -1;
   if (fd >= 0) {
     r = ksceIoRead(fd, sec, sizeof(sec));
     ksceIoClose(fd);
   }
+  g_storage_probe_busy = 0;
   if (open_ret)
     *open_ret = fd;
   return r;

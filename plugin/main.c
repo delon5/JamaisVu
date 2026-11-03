@@ -391,6 +391,9 @@ ev_done:
         }
         trace_wake_begin(&pargs);
         trace_wake(JV_WAKE_RESUME);
+        if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK &&
+            pargs.debug_mode == JV_TEST_NONE)
+          menu_heartbeat_arm();
       } else if (eventid == 0x100000) {
         g_t_resumed = ksceKernelGetSystemTimeWide();
         g_t_fs_done = 0;

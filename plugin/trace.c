@@ -66,9 +66,17 @@ const char *jv_stage_name(uint32_t stage) {
 
 static const char *jv_wake_name(uint8_t step) {
   static char fs[12];
+  static char mn[24];
   if (step >= JV_WAKE_FS_MOUNT) {
     snprintf(fs, sizeof(fs), "remount-%u", (unsigned)(step - JV_WAKE_FS_MOUNT));
     return fs;
+  }
+  if (step >= JV_WAKE_MNT && step < JV_WAKE_MNT + 9) {
+    static const char *const kind[] = {"MOUNT", "UNMOUNT", "UNMOUNT-REFUSED"};
+    static const char *const drv[] = {"ux0", "uma0", "xmc0"};
+    unsigned k = step - JV_WAKE_MNT;
+    snprintf(mn, sizeof(mn), "%s-%s", kind[k / 3], drv[k % 3]);
+    return mn;
   }
   switch (step) {
     case JV_WAKE_RESUME:    return "resume";
@@ -94,6 +102,8 @@ static const char *jv_wake_name(uint8_t step) {
     case JV_WAKE_FS_DEV_CHECK:   return "dev-check";
     case JV_WAKE_FS_DEV_WAIT:    return "dev-wait";
     case JV_WAKE_FS_DEV_DONE:    return "dev-checked";
+    case JV_WAKE_TICK:           return "t";
+    case JV_WAKE_TICK_PROBE:     return "t-in-usb-check";
     case JV_WAKE_CARD_REMOUNT:   return "card-remount";
     case JV_WAKE_CARD_REMOUNTED: return "card-remounted";
     case JV_WAKE_W_LOCK:    return "w-lock";
@@ -544,13 +554,28 @@ void trace_wake_io(int on) {
   g_wake_io = on;
 }
 
-void trace_wake(uint8_t step) {
-  if (!g_wake_on || g_wake.wake_n >= sizeof(g_wake.wake_step))
-    return;
+/* several threads record steps now (heartbeat, hooks): one slot each */
+static int wake_record(uint8_t step) {
+  if (!g_wake_on)
+    return 0;
+  uint32_t i = __sync_fetch_and_add(&g_wake.wake_n, 1);
+  if (i >= sizeof(g_wake.wake_step)) {
+    g_wake.wake_n = sizeof(g_wake.wake_step);
+    return 0;
+  }
   uint32_t ms = (uint32_t)((ksceKernelGetSystemTimeWide() - g_wake_t0) / 1000);
-  g_wake.wake_step[g_wake.wake_n] = step;
-  g_wake.wake_ms[g_wake.wake_n] = ms > 0xFFFF ? 0xFFFF : (uint16_t)ms;
-  g_wake.wake_n++;
+  g_wake.wake_ms[i] = ms > 0xFFFF ? 0xFFFF : (uint16_t)ms;
+  g_wake.wake_step[i] = step;
+  return 1;
+}
+
+void trace_wake_mem(uint8_t step) {
+  wake_record(step);
+}
+
+void trace_wake(uint8_t step) {
+  if (!wake_record(step))
+    return;
   /* steps from before the card may be touched are kept in memory and go
    * out with the first write */
   if (!g_wake_io)

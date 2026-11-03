@@ -2864,6 +2864,30 @@ static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
   g_mount_ev[k].lr = lr;
   g_mount_ev[k].pid = ksceKernelGetProcessId();
   g_mount_ev[k].ms = g_t_resume ? (int)((now - g_t_resume) / 1000) : -1;
+  /* into the wake-up record too (PS TV loads: the console died 1-4 s
+   * after the wake-up, around SceSdstor's unmount of uma0) */
+  if (g_t_resume && now - g_t_resume < 15000000)
+    trace_wake_mem((uint8_t)(JV_WAKE_MNT + (unmount > 2 ? 2 : unmount) * 3 +
+                             (id == 0x800 ? 0 : id == 0xF00 ? 1 : 2)));
+}
+
+/* Heartbeat for the first seconds after a load's wake-up: where the PS TV
+ * dies (1-4 s after it, whatever the plugin was doing) */
+static volatile int64_t g_hb_until;
+
+void menu_heartbeat_arm(void) {
+  g_hb_until = ksceKernelGetSystemTimeWide() + 6000000;
+}
+
+static int heartbeat_thread(SceSize args, void *argp) {
+  (void)args;
+  (void)argp;
+  while (1) {
+    ksceKernelDelayThread(250 * 1000);
+    if (g_hb_until && ksceKernelGetSystemTimeWide() < g_hb_until)
+      trace_wake(g_storage_probe_busy ? JV_WAKE_TICK_PROBE : JV_WAKE_TICK);
+  }
+  return 0;
 }
 
 /* io thread */
@@ -3100,6 +3124,11 @@ int menu_init(const char *status_text) {
 
   thid = ksceKernelCreateThread("JamaisVuWorker", worker_thread, 0x60,
                                 0x4000, 0, 0x10000, NULL);
+  if (thid >= 0)
+    ksceKernelStartThread(thid, 0, NULL);
+
+  thid = ksceKernelCreateThread("JamaisVuHeartbeat", heartbeat_thread, 0x40,
+                                0x1000, 0, 0x10000, NULL);
   if (thid >= 0)
     ksceKernelStartThread(thid, 0, NULL);
 

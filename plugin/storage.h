@@ -99,5 +99,7 @@ int storage_dev_state(const char *root);
 /* At start (the drive works then): finds the device name the check above
  * can read, and describes every name tried in out. */
 int storage_dev_calibrate(const char *root, char *out, int len);
+/* 1 while one of these checks is reading a device (diagnostics) */
+extern volatile int g_storage_probe_busy;
 
 #endif
