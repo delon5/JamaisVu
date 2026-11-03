@@ -159,3 +159,22 @@ int storage_remount_card(const char **root) {
   }
   return 1;
 }
+
+int storage_force_remount_card(const char **root) {
+  if (root)
+    *root = NULL;
+  /* ux0 is the system's; only a card moved to uma0/xmc0 by a storage
+   * plugin, and only where it is mounted now */
+  for (size_t i = 1; i < N_MOUNTS; i++) {
+    if (!mount_is_mc(k_mounts[i].id) || !mounted(k_mounts[i].root))
+      continue;
+    if (root)
+      *root = k_mounts[i].root;
+    if (!g_mount || !g_umount)
+      return -1;
+    g_umount(k_mounts[i].id, 0, 0, 0);
+    g_umount(k_mounts[i].id, 1, 0, 0);
+    return g_mount(k_mounts[i].id, NULL, 0, 0, 0, 0);
+  }
+  return 1;
+}

@@ -1870,6 +1870,9 @@ static int card_wait(int ms) {
   return 0;
 }
 
+static int g_card_remount_ret = 1;
+static const char *g_card_remount_root;
+
 static void after_resume(void) {
   static char msg[128];
 
@@ -1882,6 +1885,19 @@ static void after_resume(void) {
     static char clk[192], line[224];
     jv_clocks_restore(clk, sizeof(clk));
     trace_wake(JV_WAKE_CLOCKS_SET);
+    /* After a load with the card on uma0/xmc0 (usbmc/StorageMgr): the
+     * restored image's filesystem there no longer works with the card the
+     * payload restarted - the first file call hung (98c6bf6: w-time, then
+     * nothing; the PCH-2000 with the card on ux0 loads fine). Mount it
+     * afresh before anything touches it. */
+    if (g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_LOAD &&
+        g_res_result == JV_OK) {
+      const char *root = NULL;
+      trace_wake(JV_WAKE_CARD_REMOUNT);
+      g_card_remount_ret = storage_force_remount_card(&root);
+      g_card_remount_root = root;
+      trace_wake(JV_WAKE_CARD_REMOUNTED);
+    }
     /* the card may be away for a moment after the wake-up (usbmc's uma0):
      * no file access until it is usable again (at most 10 s) */
     if (card_wait(10000))
@@ -1889,6 +1905,13 @@ static void after_resume(void) {
     snprintf(line, sizeof(line), "    %s\r\n", clk);
     g_log_trace_once = 1;
     log_append(line);
+    if (g_card_remount_root) {
+      snprintf(line, sizeof(line), "    after the load: Memory Card on %s "
+               "mounted afresh, result 0x%08X\r\n", g_card_remount_root,
+               (unsigned)g_card_remount_ret);
+      log_append(line);
+      g_card_remount_root = NULL;
+    }
     trace_wake(JV_WAKE_CLOCKS);
   }
 

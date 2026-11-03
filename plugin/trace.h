@@ -48,6 +48,8 @@ enum {
   JV_WAKE_REPORT,         /* result message */
   JV_WAKE_CLOCKS_SET,     /* clocks set back (before logging them) */
   JV_WAKE_CARD_READY,     /* card usable (waited for it if needed) */
+  JV_WAKE_CARD_REMOUNT,   /* load, card on uma0/xmc0: remounting it */
+  JV_WAKE_CARD_REMOUNTED, /*   remounted */
   JV_WAKE_W_LOCK,         /* first log write: log lock taken */
   JV_WAKE_W_LOCK_TIMEOUT, /*   log lock NOT taken within 2 s (went on) */
   JV_WAKE_W_TIME,         /*   clock read */

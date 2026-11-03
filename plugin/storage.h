@@ -80,5 +80,9 @@ int storage_remount_card(const char **root);
 int storage_mount_is_card(int id);
 /* 1 if uma0/xmc0 is the Memory Card in the mount table but not mounted */
 int storage_card_unmounted(const char **root);
+/* After a load: the card's uma0/xmc0 mount unmounted and mounted again
+ * (fresh filesystem on the card the payload restarted). 1 = nothing to
+ * do (card on ux0 or not mounted), else the mount result. */
+int storage_force_remount_card(const char **root);
 
 #endif
