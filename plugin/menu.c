@@ -541,6 +541,9 @@ static void set_message(MenuMode mode, const char *msg, int progress,
   model_end();
 }
 
+/* what each memory pool returned the last time (for log.txt) */
+static int g_ovl_alloc_ret[3], g_ovl_alloc_type;
+
 static int overlay_acquire(void) {
   int res = 0;
   void *base;
@@ -552,9 +555,22 @@ static int overlay_acquire(void) {
                     (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_MAX_FB_W * 4 +
                     MENU_W * BAND_ROWS * 4 + 2 * ((sizeof(ExtGlyphs) + 3) & ~3u);
     size = (size + 0xfff) & ~0xfff;
-    g_mem_blk = ksceKernelAllocMemBlock("JamaisVuMenu",
-                                        SCE_KERNEL_MEMBLOCK_TYPE_KERNEL_RW,
-                                        size, NULL);
+    /* The kernel root pool (KERNEL_RW) can be full with many kernel
+     * plugins (PCH-1000 log: "not enough free kernel memory"); then the
+     * root pool's physically contiguous part, then kernel memory from the
+     * user main pool, each only for as long as the menu is shown. */
+    static const SceKernelMemBlockType types[3] = {
+      0x1020D006, /* KERNEL_ROOT_RW (= KERNEL_RW) */
+      0x1080D006, /* KERNEL_ROOT_PHYCONT_RW (2 MB worked in Dead Nation) */
+      0x10C0D006, /* KERNEL_ROOT_UMAIN_RW */
+    };
+    g_mem_blk = -1;
+    for (int i = 0; i < 3 && g_mem_blk < 0; i++) {
+      g_mem_blk = ksceKernelAllocMemBlock("JamaisVuMenu", types[i], size,
+                                          NULL);
+      g_ovl_alloc_ret[i] = g_mem_blk;
+      g_ovl_alloc_type = i;
+    }
     if (g_mem_blk >= 0 && ksceKernelGetMemBlockBase(g_mem_blk, &base) >= 0) {
       uint32_t *p = base;
       g_panel_px = p;  p += MENU_W * MENU_H;
@@ -1205,15 +1221,29 @@ static void perf_report(void) {
 static int open_menu(void) {
   static int warned;
   perf_report();
+  int had = g_overlay_ready;
   if (overlay_acquire() < 0) {
     /* like reVita's "Buy more RAM": refuse rather than take memory the
      * system needs; noted once per boot */
     if (!warned) {
+      static char line[200];
       warned = 1;
-      log_queue("menu not opened: not enough free kernel memory for the "
-                 "overlay (~1.5 MB)\r\n");
+      snprintf(line, sizeof(line), "menu not opened: not enough free kernel "
+               "memory for the overlay (~1.6 MB) in any pool (root 0x%08X, "
+               "root contiguous 0x%08X, user main 0x%08X)\r\n",
+               (unsigned)g_ovl_alloc_ret[0], (unsigned)g_ovl_alloc_ret[1],
+               (unsigned)g_ovl_alloc_ret[2]);
+      log_queue(line);
     }
     return -1;
+  }
+  if (!had && g_ovl_alloc_type > 0) {
+    static char line[200];
+    snprintf(line, sizeof(line), "menu memory from the %s pool (root 0x%08X"
+             "%s)\r\n", g_ovl_alloc_type == 1 ? "root contiguous" :
+             "user main", (unsigned)g_ovl_alloc_ret[0],
+             g_ovl_alloc_type == 2 ? ", root contiguous refused too" : "");
+    log_queue(line);
   }
   g_capture_ok = 0;
   g_fb_rec = 0;
