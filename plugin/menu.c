@@ -2501,16 +2501,32 @@ static void do_load(int slot) {
     fresh_frame();
     if (display_frame_check(why, sizeof(why), 0)) {
       jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h, 0x20);
-      if (slot_frame_read(slot, info.crc, &sf) == 0 && sf.width == 960 &&
-          sf.height == 544 && sf.pitch >= 960 && sf.pitch <= 1024 &&
-          !(sf.paddr & 0xff) && frame_in_cdram(sf.paddr, sf.pitch, 544)) {
+      /* PS TV (HDMI): also a larger game frame - a 1080p game (pstv1080p)
+       * records 1920x1080 pitch 1920, and the payload draws its 960x544
+       * screen into it as it does with the first frame (f88da30: "slot
+       * frame: none" for such a save, the screen dark while restoring) */
+      int hdmi = jv_disp_type() == JV_DISP_HDMI;
+      int fr = slot_frame_read(slot, info.crc, &sf) == 0;
+      int size_ok = fr && (hdmi
+          ? sf.width >= 960 && sf.width <= 1920 && sf.height >= 544 &&
+            sf.height <= 1088 && sf.pitch >= sf.width && sf.pitch <= 2048
+          : sf.width == 960 && sf.height == 544 && sf.pitch >= 960 &&
+            sf.pitch <= 1024);
+      if (size_ok && !(sf.paddr & 0xff) &&
+          frame_in_cdram(sf.paddr, sf.pitch, sf.height)) {
         jv_set_display_frame2(sf.paddr, sf.pitch);
         snprintf(line, sizeof(line), "    slot frame: 0x%08X pitch %u\r\n",
                  (unsigned)sf.paddr, (unsigned)sf.pitch);
       } else {
         jv_set_display_frame2(0, 0);
-        snprintf(line, sizeof(line), "    slot frame: none (older slot) - "
-                 "screen dark while restoring\r\n");
+        if (fr)
+          snprintf(line, sizeof(line), "    slot frame: %ux%u pitch %u not "
+                   "usable - screen dark while restoring\r\n",
+                   (unsigned)sf.width, (unsigned)sf.height,
+                   (unsigned)sf.pitch);
+        else
+          snprintf(line, sizeof(line), "    slot frame: none (older slot) - "
+                   "screen dark while restoring\r\n");
       }
       log_append(line);
     } else {
