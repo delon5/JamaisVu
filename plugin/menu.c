@@ -258,12 +258,24 @@ static int revita_swap_for(const char *tid) {
   return n > 0 ? revita_ini_swaps(buf, n) : -1;
 }
 
+static void model_begin(void);
+static void model_end(void);
+static volatile int g_decide_pending; /* ✕/○ presses wait for this */
+static volatile int64_t g_decide_since;
+
 static void decide_buttons(const char *tid) {
   static char line[192];
   int psvs = psvs_swap_for(tid), revita = revita_swap_for(tid);
   int swap = menu_swap_ox(tid, psvs, revita);
-  if (strncmp(g_swap_tid, tid, sizeof(g_swap_tid)) == 0)
+  if (strncmp(g_swap_tid, tid, sizeof(g_swap_tid)) == 0) {
     g_swap_ox = swap; /* still the same game: refine the quick guess */
+    /* the button hints at once, not at the next press (user: ○ was shown
+     * for "save", then ✕ for confirming it) */
+    model_begin();
+    g_model.swap_ox = swap;
+    model_end();
+  }
+  g_decide_pending = 0;
   snprintf(line, sizeof(line), "menu buttons for %s: confirm with %s "
            "(%s game, PSV-Shell swap %s, reVita swap %s)\r\n", tid,
            swap ? "O" : "X",
@@ -1320,9 +1332,17 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
     ksceKernelLockMutex(g_logq_mtx, 1, NULL);
     strncpy(g_decide_tid, g_swap_tid, sizeof(g_decide_tid) - 1);
     ksceKernelUnlockMutex(g_logq_mtx, 1);
-    if (g_io_evf >= 0)
+    if (g_io_evf >= 0) {
+      g_decide_since = now_us();
+      g_decide_pending = 1;
       ksceKernelSetEventFlag(g_io_evf, IOEV_DECIDE);
+    }
   }
+  /* ✕/○ only once the remap plugins' profiles have been read (normally a
+   * few ms; at most 2 s): a press on the region's guess could mean the
+   * opposite of what the hints show a moment later */
+  if (g_decide_pending && now_us() - g_decide_since < 2000000)
+    pressed &= ~(uint32_t)(SCE_CTRL_CROSS | SCE_CTRL_CIRCLE);
   if (g_swap_ox) {
     uint32_t ox = pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE);
     if (ox == SCE_CTRL_CROSS || ox == SCE_CTRL_CIRCLE)
