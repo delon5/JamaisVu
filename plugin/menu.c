@@ -194,6 +194,13 @@ static int g_disp_ok_mask = -1; /* bit per JV_DISP_*, -1 = not read yet */
 static int display_ok(uint32_t type) {
   if (type == JV_DISP_LCD)
     return 1; /* PCH-2000: tested on hardware */
+  /* PS TV: the test ran through with no timeouts (9d5ff95), but the
+   * picture on the TV was wrong - four squashed copies in the top half,
+   * every other line dark, colours shifted towards blue (user's photos;
+   * the PS TV runs pstv1080p + sharpscale). No progress screen there
+   * until the picture is right, whatever display_ok.txt says. */
+  if (type == JV_DISP_HDMI)
+    return 0;
   if (g_disp_ok_mask < 0) {
     static char path[96], buf[64];
     g_disp_ok_mask = 0;
@@ -214,7 +221,7 @@ static int display_ok(uint32_t type) {
 
 static void display_ok_record(uint32_t type) {
   static char path[96], buf[64];
-  if (type != JV_DISP_OLED && type != JV_DISP_HDMI || display_ok(type))
+  if (type != JV_DISP_OLED || display_ok(type)) /* HDMI: see display_ok */
     return;
   g_disp_ok_mask |= 1 << type;
   int n = 0;
