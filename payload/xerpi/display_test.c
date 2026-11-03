@@ -126,7 +126,7 @@ static void plane_setup(uint32_t paddr) {
 			                             g_out_h);
 			if (g_type == JV_DISP_HDMI)
 				iftu_plane_config_set_scale(g_bus, planes[p],
-				                            cfgs[c], 0xC16C, g_pitch / 4);
+				                            cfgs[c], 0xC16C, 0);
 		}
 	iftu_bus_plane_config_select(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0);
 	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_B, IFTU_PLANE_CONFIG_0, false);
@@ -476,7 +476,7 @@ int jv_screen_switch(uint32_t paddr, uint32_t pitch) {
 	                             &fb, g_dst_x, g_dst_y, g_out_w, g_out_h);
 	if (g_type == JV_DISP_HDMI)
 		iftu_plane_config_set_scale(g_bus, IFTU_PLANE_A,
-		                            IFTU_PLANE_CONFIG_1, 0xC16C, g_pitch / 4);
+		                            IFTU_PLANE_CONFIG_1, 0xC16C, 0);
 	iftu_bus_plane_config_select(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1);
 	g_args = b;
 	return 0;
