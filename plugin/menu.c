@@ -258,24 +258,12 @@ static int revita_swap_for(const char *tid) {
   return n > 0 ? revita_ini_swaps(buf, n) : -1;
 }
 
-static void model_begin(void);
-static void model_end(void);
-static volatile int g_decide_pending; /* ✕/○ presses wait for this */
-static volatile int64_t g_decide_since;
-
 static void decide_buttons(const char *tid) {
   static char line[192];
   int psvs = psvs_swap_for(tid), revita = revita_swap_for(tid);
   int swap = menu_swap_ox(tid, psvs, revita);
-  if (strncmp(g_swap_tid, tid, sizeof(g_swap_tid)) == 0) {
+  if (strncmp(g_swap_tid, tid, sizeof(g_swap_tid)) == 0)
     g_swap_ox = swap; /* still the same game: refine the quick guess */
-    /* the button hints at once, not at the next press (user: ○ was shown
-     * for "save", then ✕ for confirming it) */
-    model_begin();
-    g_model.swap_ox = swap;
-    model_end();
-  }
-  g_decide_pending = 0;
   snprintf(line, sizeof(line), "menu buttons for %s: confirm with %s "
            "(%s game, PSV-Shell swap %s, reVita swap %s)\r\n", tid,
            swap ? "O" : "X",
@@ -1260,7 +1248,7 @@ static int open_menu(void) {
   }
   g_capture_ok = 0;
   g_fb_rec = 0;
-  g_swap_ox = g_system_circle_enter; /* until a game frame is captured */
+  g_swap_ox = 0; /* ✕ confirms, always (see handle_buttons) */
   g_swap_tid[0] = '\0';
   g_capture_req = 1;
   model_begin();
@@ -1321,10 +1309,12 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
     return;
   }
 
-  /* follow the ✕/○ convention of what is running (decided once per game
-   * per menu opening; file reads happen here, not in the display hook).
-   * Everything below is written for ✕ = confirm, ○ = back. */
-  if (g_capture_ok && strncmp(g_swap_tid, g_capture_tid, sizeof(g_swap_tid))) {
+  /* ✕ always confirms and ○ goes back (user: "just default to x and not
+   * even attempt at the remap" - following the game's region and the
+   * remap plugins showed ○ first and then ✕ in a remapped Japanese game).
+   * The detection below is kept but switched off. */
+  if (0 && g_capture_ok &&
+      strncmp(g_swap_tid, g_capture_tid, sizeof(g_swap_tid))) {
     strncpy(g_swap_tid, g_capture_tid, sizeof(g_swap_tid) - 1);
     /* instant, no file access: the game's region; the io thread then
      * checks PSV-Shell-Plus / reVita and corrects it if they swap */
@@ -1332,17 +1322,9 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
     ksceKernelLockMutex(g_logq_mtx, 1, NULL);
     strncpy(g_decide_tid, g_swap_tid, sizeof(g_decide_tid) - 1);
     ksceKernelUnlockMutex(g_logq_mtx, 1);
-    if (g_io_evf >= 0) {
-      g_decide_since = now_us();
-      g_decide_pending = 1;
+    if (g_io_evf >= 0)
       ksceKernelSetEventFlag(g_io_evf, IOEV_DECIDE);
-    }
   }
-  /* ✕/○ only once the remap plugins' profiles have been read (normally a
-   * few ms; at most 2 s): a press on the region's guess could mean the
-   * opposite of what the hints show a moment later */
-  if (g_decide_pending && now_us() - g_decide_since < 2000000)
-    pressed &= ~(uint32_t)(SCE_CTRL_CROSS | SCE_CTRL_CIRCLE);
   if (g_swap_ox) {
     uint32_t ox = pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE);
     if (ox == SCE_CTRL_CROSS || ox == SCE_CTRL_CIRCLE)
