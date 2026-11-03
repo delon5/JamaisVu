@@ -43,6 +43,8 @@ extern volatile int64_t g_t_fs_done;
 #define JV_EV_MAX 64
 extern volatile int g_ev_open, g_ev_normal, g_ev_normal_ready;
 extern int64_t g_ev_t0, g_ev_r0;
+/* first resume event of the last wake-up, any kind of sleep (0 = none) */
+extern volatile int64_t g_last_wake_t;
 extern volatile uint32_t g_ev_n;
 extern uint32_t g_ev_id[JV_EV_MAX];
 extern int64_t g_ev_t[JV_EV_MAX], g_ev_last[JV_EV_MAX];

@@ -1370,7 +1370,11 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
                  jv_disabled_reason());
         set_message(MV_MESSAGE, msg, -1, 1);
       } else if (pressed & SCE_CTRL_CROSS) {
-        if (locked)
+        if (locked && !storage_mc_root())
+          set_message(MV_MESSAGE, "Memory Card not mounted right now (it "
+                      "comes back a few seconds after waking) - try again",
+                      -1, 1);
+        else if (locked)
           set_message(MV_MESSAGE, "Not enough free space - each slot needs "
                       "704 MB", -1, 1);
         else if (g_capture_ok)
@@ -3010,20 +3014,29 @@ static void mount_watch_install(void) {
  * io thread every 2 s (the input thread never touches the card); acted on
  * when it is still missing at the next check, so the system's own remount
  * after a wake-up is not raced. */
+/* the first 15 s after any wake-up: SceSdstor unmounts uma0 ~1 s after
+ * a normal wake-up (PCH-1000 and PS TV), and a menu opened before it was
+ * mounted again showed every slot "Locked" for ~10 s (f88da30) */
+static int just_woke(void) {
+  int64_t w = g_last_wake_t;
+  return w && ksceKernelGetSystemTimeWide() - w < 15000000;
+}
+
 static void card_watch(void) {
   static int64_t next;
   static int missing, failures;
   int64_t t = now_us();
   const char *root = NULL;
+  int woke = just_woke();
   if (t < next || g_busy)
     return;
-  next = t + 2000000;
+  next = t + (woke ? 500000 : 2000000);
   mount_card_flags_update();
   if (!storage_card_unmounted(&root)) {
     missing = 0;
     return;
   }
-  if (++missing < 2)
+  if (++missing < (woke ? 1 : 2))
     return;
   int r = storage_remount_card(&root);
   int ok = storage_detect() != NULL;
@@ -3038,6 +3051,8 @@ static void card_watch(void) {
   missing = 0;
   if (!ok)
     next = t + (failures > 3 ? 30000000 : 5000000);
+  else if (g_menu_open)
+    start_op(OP_REFRESH, 0); /* the slots, now that the card is there */
 }
 
 static int io_thread(SceSize args, void *argp) {
@@ -3046,7 +3061,7 @@ static int io_thread(SceSize args, void *argp) {
 
   while (1) {
     unsigned int out = 0;
-    SceUInt32 timeout = 2000000;
+    SceUInt32 timeout = just_woke() ? 500000 : 2000000;
     int w = ksceKernelWaitEventFlag(g_io_evf, IOEV_LOG | IOEV_DECIDE,
                                     SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
                                     &out, &timeout);

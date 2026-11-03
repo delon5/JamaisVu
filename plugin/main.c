@@ -318,12 +318,15 @@ uint32_t g_ev_cnt[JV_EV_MAX];  /* how often in a row (0x401 repeats every
  * ask for, the first suspend event) until the 0x100000 resume event */
 volatile int g_ev_open, g_ev_normal, g_ev_normal_ready;
 int64_t g_ev_t0, g_ev_r0; /* first suspend / first resume event */
+volatile int64_t g_last_wake_t;
 
 static int savestate_system_event(int resume, int eventid,
                                   void *args, void *opt) {
   {
     uint32_t id = (uint32_t)eventid | (resume ? 0x80000000u : 0);
     int64_t now = ksceKernelGetSystemTimeWide();
+    if (resume && eventid == 0x10000)
+      g_last_wake_t = now;
     if (!resume && pargs.mode == JAMAISVU_MODE_NONE &&
         (!g_ev_open ||
          (g_ev_n && (g_ev_id[g_ev_n - 1] & 0x80000000u)))) {
