@@ -2876,7 +2876,7 @@ static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
   g_mount_ev[k].ms = g_t_resume ? (int)((now - g_t_resume) / 1000) : -1;
   /* into the wake-up record too (PS TV loads: the console died 1-4 s
    * after the wake-up, around SceSdstor's unmount of uma0) */
-  if (g_t_resume && now - g_t_resume < 15000000)
+  if (g_storage_usb_drops && g_t_resume && now - g_t_resume < 15000000)
     trace_wake_mem((uint8_t)(JV_WAKE_MNT + (unmount > 2 ? 2 : unmount) * 3 +
                              (id == 0x800 ? 0 : id == 0xF00 ? 1 : 2)));
 }
@@ -2886,7 +2886,9 @@ static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
 static volatile int64_t g_hb_until;
 
 void menu_heartbeat_arm(void) {
-  g_hb_until = ksceKernelGetSystemTimeWide() + 6000000;
+  /* PS TV only: on the others it would fill the 64-step record */
+  if (g_storage_usb_drops)
+    g_hb_until = ksceKernelGetSystemTimeWide() + 6000000;
 }
 
 static int heartbeat_thread(SceSize args, void *argp) {
@@ -2946,7 +2948,9 @@ static int umount_hook(int id, int a2, int a3, int a4) {
       g_sdstor_hi && lr >= g_sdstor_lo && lr < g_sdstor_hi &&
       ((id == 0xF00 && g_card_on[0]) || (id == 0xE00 && g_card_on[1]))) {
     mount_note(2, id, a2, 0, lr); /* refused, reported as done */
-    if (!g_storage_usb_gone_t)
+    /* PS TV only: the PCH-1000 sees this unmount too (after saves), and
+     * its loads work as they are (f88da30) */
+    if (g_storage_usb_drops && !g_storage_usb_gone_t)
       g_storage_usb_gone_t = ksceKernelGetSystemTimeWide();
     return 0;
   }
