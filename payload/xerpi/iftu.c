@@ -197,7 +197,9 @@ void iftu_plane_config_set_enabled(enum iftu_bus bus, enum iftu_plane plane,
 
 /* JamaisVu: scaling, as the PS TV's system does for HDMI (its own setup,
  * read on hardware: source step 0xC16C in both directions = 960x544 shown
- * as ~1268x718, and 0x100 at config offset 0x54) */
+ * as ~1268x718). Offset 0x54 is the frame's row length in 16-byte units:
+ * the system had 0x100 for a game frame with rows of 1024 pixels; with
+ * that value our rows of 960 came out slanted (user's photo, 09c0ae1). */
 void iftu_plane_config_set_scale(enum iftu_bus bus, enum iftu_plane plane,
 				 enum iftu_plane_config config,
 				 uint32_t step, uint32_t reg54)
