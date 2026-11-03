@@ -85,6 +85,10 @@ static const char *jv_wake_name(uint8_t step) {
     case JV_WAKE_REPORT:    return "report";
     case JV_WAKE_CLOCKS_SET: return "clocks-set";
     case JV_WAKE_CARD_READY: return "card-ready";
+    case JV_WAKE_REPORT_LOGGED:  return "report-logged";
+    case JV_WAKE_FIRST_FRAME:    return "first-frame";
+    case JV_WAKE_TIMING:         return "timing-logged";
+    case JV_WAKE_ALIVE:          return "alive";
     case JV_WAKE_CARD_REMOUNT:   return "card-remount";
     case JV_WAKE_CARD_REMOUNTED: return "card-remounted";
     case JV_WAKE_W_LOCK:    return "w-lock";
@@ -521,10 +525,19 @@ void trace_wake(uint8_t step) {
     g_wake_writes++;
 }
 
+static int g_wake_keep;
+
+void trace_wake_keep(int on) {
+  g_wake_keep = on;
+  if (!on)
+    g_wake_on = 0;
+}
+
 int trace_wake_end(int *last_ret) {
   int n = g_wake_on ? g_wake_writes : -1;
   if (last_ret)
     *last_ret = g_wake_ret;
-  g_wake_on = 0;
+  if (!g_wake_keep)
+    g_wake_on = 0;
   return n;
 }

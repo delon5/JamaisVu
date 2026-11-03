@@ -171,9 +171,9 @@ typedef struct {
    * so a freeze after the payload returned still shows how far the
    * system got (PCH-1000 with the card on uma0: froze twice). */
   uint32_t wake_n;
-  uint8_t wake_step[32];
-  uint16_t wake_ms[32];
-  uint8_t pad[512 - 8 - 16 - 4 * 9 - 24 - 4 * 24 - 4 * 3 - 4 - 32 - 2 * 32];
+  uint8_t wake_step[64];
+  uint16_t wake_ms[64];
+  uint8_t pad[512 - 8 - 16 - 4 * 9 - 24 - 4 * 24 - 4 * 3 - 4 - 64 - 2 * 64];
 } JvTraceSector;
 _Static_assert(sizeof(JvTraceSector) == 512, "one sector");
 

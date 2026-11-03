@@ -1831,6 +1831,8 @@ static void log_append_locked(const char *text) {
     trace_wake(JV_WAKE_W_SYNC);
 }
 
+static int g_trace_keep;
+
 static void log_result(const char *msg) {
   static char text[1200];
   static JvTraceSector t;
@@ -1844,7 +1846,12 @@ static void log_result(const char *msg) {
     snprintf(text + n, sizeof(text) - n, "    wake-up steps written to "
              "trace.bin: %d (last result 0x%08X)\r\n", wn, (unsigned)wret);
   log_append(text);
-  trace_consumed(); /* already logged from the arguments */
+  trace_wake(JV_WAKE_REPORT_LOGGED);
+  /* after a load the record stays open a little longer (run_and_wait):
+   * the PCH-1000 (91bd42b) restarted after "report", when the 32 steps
+   * were full */
+  if (!g_trace_keep)
+    trace_consumed(); /* already logged from the arguments */
 }
 
 static void report(const char *msg, int is_error) {
@@ -2074,6 +2081,9 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   /* NOTE: after a successful load, this point is reached by the worker of
    * the *restored* image, which was waiting here when the snapshot was
    * taken. after_resume() looks only at the payload's result. */
+  /* loads: the step record stays open until 10 s after the timing lines */
+  g_trace_keep = g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_LOAD;
+  trace_wake_keep(g_trace_keep);
   after_resume();
   int64_t t_after = ksceKernelGetSystemTimeWide();
 
@@ -2085,6 +2095,7 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     ksceKernelDelayThread(10000);
   g_wait_first_frame = 0;
   g_wait_first_any = 0;
+  trace_wake(JV_WAKE_FIRST_FRAME);
   {
     static char tl[768];
     int64_t now = ksceKernelGetSystemTimeWide();
@@ -2144,6 +2155,16 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
                (unsigned)f->fnodes, (unsigned)f->fnodes_skipped);
       log_append(tl);
     }
+  }
+  trace_wake(JV_WAKE_TIMING);
+  if (g_trace_keep) {
+    for (int i = 0; i < 10; i++) {
+      ksceKernelDelayThread(1000 * 1000);
+      trace_wake(JV_WAKE_ALIVE);
+    }
+    g_trace_keep = 0;
+    trace_wake_keep(0);
+    trace_consumed();
   }
 }
 

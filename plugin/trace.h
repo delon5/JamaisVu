@@ -25,6 +25,8 @@ int trace_collect(char *out, int len);
 
 /* After a normal resume (the result is logged from the arguments). */
 void trace_consumed(void);
+/* keep recording steps after the result was logged (see run_and_wait) */
+void trace_wake_keep(int on);
 
 void trace_from_args(JvTraceSector *t, const PayloadArguments *pa);
 
@@ -48,6 +50,10 @@ enum {
   JV_WAKE_REPORT,         /* result message */
   JV_WAKE_CLOCKS_SET,     /* clocks set back (before logging them) */
   JV_WAKE_CARD_READY,     /* card usable (waited for it if needed) */
+  JV_WAKE_REPORT_LOGGED,  /* result written to log.txt */
+  JV_WAKE_FIRST_FRAME,    /* first frame seen (or 10 s waited) */
+  JV_WAKE_TIMING,         /* timing lines logged */
+  JV_WAKE_ALIVE,          /* still running, 1 s apart (loads, 10 s) */
   JV_WAKE_CARD_REMOUNT,   /* load, card on uma0/xmc0: remounting it */
   JV_WAKE_CARD_REMOUNTED, /*   remounted */
   JV_WAKE_W_LOCK,         /* first log write: log lock taken */
