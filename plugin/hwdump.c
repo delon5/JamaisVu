@@ -56,20 +56,6 @@ static volatile uint32_t *map_io(uint32_t paddr, uint32_t size, SceUID *uid,
   return base;
 }
 
-/* appends "off=value" for each register offset (word index) */
-static int words(char *out, int len, const char *title,
-                 volatile const uint32_t *regs, const uint16_t *idx, int n,
-                 int byte_offsets) {
-  int k = snprintf(out, len, "    hdmi %s:", title);
-  for (int i = 0; i < n && k > 0 && k < len - 16; i++)
-    k += snprintf(out + k, len - k, " %X=%08X",
-                  (unsigned)(byte_offsets ? idx[i] * 4u : idx[i]),
-                  (unsigned)regs[idx[i]]);
-  if (k > 0 && k < len - 3)
-    k += snprintf(out + k, len - k, "\r\n");
-  return k;
-}
-
 static int (*g_i2c_wr)(int bus, unsigned int waddr, unsigned char *wbuf,
                        int wsize, unsigned int raddr, unsigned char *rbuf,
                        int rsize);
@@ -90,82 +76,66 @@ static int adv_regs(char *out, int len, const char *title, unsigned addr,
   return k;
 }
 
+/* the non-zero words of a register snapshot, by range */
+void hwdump_regs(void (*log)(const char *), const char *who,
+                 const uint32_t *words) {
+  static char line[700];
+  static const JvRegRange r[] = JV_REGSNAP_RANGES;
+  uint32_t k = 0;
+  for (uint32_t n = 0; n < sizeof(r) / sizeof(r[0]); n++) {
+    int len = snprintf(line, sizeof(line), "    hdmi %s %08X:", who,
+                       (unsigned)r[n].paddr);
+    int any = 0;
+    for (uint32_t w = 0; w < r[n].words; w++, k++) {
+      if (!words[k])
+        continue;
+      if (len > (int)sizeof(line) - 20) {
+        snprintf(line + len, sizeof(line) - len, "\r\n");
+        log(line);
+        len = snprintf(line, sizeof(line), "    hdmi %s %08X (cont.):", who,
+                       (unsigned)r[n].paddr);
+      }
+      len += snprintf(line + len, sizeof(line) - len, " %X=%X",
+                      (unsigned)(w * 4), (unsigned)words[k]);
+      any = 1;
+    }
+    snprintf(line + len, sizeof(line) - len, any ? "\r\n" : " all 0\r\n");
+    log(line);
+  }
+}
+
 void hwdump_hdmi(void (*log)(const char *)) {
   static char line[900];
   SceUID uid;
   int err = 0;
 
-  /* IFTU bus 1: planes A (0x0000), B (0x1000), control (0x2000) */
+  /* every IFTU bus 1 / DSI bus 1 register in the snapshot ranges (only
+   * the non-zero ones are logged), the same ranges the payload copies */
+  static uint32_t sys[JV_REGSNAP_WORDS];
+  static const JvRegRange r[] = JV_REGSNAP_RANGES;
+  SceUID uid2 = -1;
+  int err2 = 0;
   volatile uint32_t *iftu = map_io(0xE5030000, 0x3000, &uid, &err);
-  if (!iftu) {
-    snprintf(line, sizeof(line), "    hdmi: display controller registers "
-             "not readable (0x%08X)\r\n", (unsigned)err);
+  volatile uint32_t *dsi = map_io(0xE5060000, 0x1000, &uid2, &err2);
+  if (!iftu || !dsi) {
+    snprintf(line, sizeof(line), "    hdmi: registers not readable (0x%08X "
+             "0x%08X)\r\n", (unsigned)err, (unsigned)err2);
     log(line);
   } else {
-    static const uint16_t cregs[] = { 0x800, 0x801, 0x804, 0x805, 0x806,
-                                      0x807, 0x808 };
-    static const uint16_t plane[] = { 0x23, 0x28, 0x40, 0x41, 0x42, 0x43,
-                                      0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
-                                      0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
-                                      0x50, 0x51, 0x52, 0x53, 0x54, 0x55,
-                                      0x56, 0x57, 0x58, 0x59, 0x5A };
-    /* plane config 0 and 1 (0x200 / 0x300): every word we write and the
-     * unknown ones between them */
-    static const uint16_t cfg[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
-                                    0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
-                                    0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11,
-                                    0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-                                    0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D,
-                                    0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23,
-                                    0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
-                                    0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
-                                    0x30, 0x31, 0x32, 0x33, 0x34, 0x35 };
-    words(line, sizeof(line), "IFTU control (byte offsets)",
-          iftu, cregs, 7, 1);
-    log(line);
-    words(line, sizeof(line), "IFTU plane A (byte offsets)", iftu, plane,
-          (int)(sizeof(plane) / sizeof(plane[0])), 1);
-    log(line);
-    for (int c = 0; c < 2; c++) {
-      words(line, sizeof(line), c ? "IFTU plane A config 1 (byte offsets)"
-                                  : "IFTU plane A config 0 (byte offsets)",
-            iftu + (0x200 + c * 0x100) / 4, cfg,
-            (int)(sizeof(cfg) / sizeof(cfg[0])), 1);
-      log(line);
+    uint32_t k = 0;
+    for (uint32_t n = 0; n < sizeof(r) / sizeof(r[0]); n++) {
+      volatile uint32_t *b = r[n].paddr >= 0xE5060000
+                                 ? dsi + (r[n].paddr - 0xE5060000) / 4
+                                 : iftu + (r[n].paddr - 0xE5030000) / 4;
+      for (uint32_t w = 0; w < r[n].words; w++)
+        sys[k++] = b[w];
     }
-    words(line, sizeof(line), "IFTU plane B config 0 (byte offsets)",
-          iftu + (0x1000 + 0x200) / 4, cfg, 20, 1);
-    log(line);
-    ksceKernelFreeMemBlock(uid);
+    hwdump_regs(log, "system", sys);
   }
-
-  /* DSI bus 1: timing (0x00-0x20), control (0x140-0x146), lane setup
-   * (0x200-0x20F, 0x240-0x253) - word indexes as in dsi.c */
-  volatile uint32_t *dsi = map_io(0xE5060000, 0x1000, &uid, &err);
-  if (!dsi) {
-    snprintf(line, sizeof(line), "    hdmi: display link registers not "
-             "readable (0x%08X)\r\n", (unsigned)err);
-    log(line);
-  } else {
-    static const uint16_t t[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
-                                  0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
-                                  0x0E, 0x0F, 0x10, 0x11, 0x13, 0x14, 0x15,
-                                  0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C,
-                                  0x1D, 0x1E, 0x1F, 0x20 };
-    static const uint16_t l[] = { 0x140, 0x141, 0x142, 0x143, 0x144, 0x145,
-                                  0x146, 0x200, 0x201, 0x202, 0x203, 0x204,
-                                  0x205, 0x206, 0x207, 0x208, 0x209, 0x20A,
-                                  0x20B, 0x20C, 0x20D, 0x20E, 0x20F, 0x240,
-                                  0x241, 0x242, 0x243, 0x250, 0x251, 0x252,
-                                  0x253 };
-    words(line, sizeof(line), "DSI timing (word index)", dsi, t,
-          (int)(sizeof(t) / sizeof(t[0])), 0);
-    log(line);
-    words(line, sizeof(line), "DSI setup (word index)", dsi, l,
-          (int)(sizeof(l) / sizeof(l[0])), 0);
-    log(line);
+  if (iftu)
     ksceKernelFreeMemBlock(uid);
-  }
+  if (dsi)
+    ksceKernelFreeMemBlock(uid2);
 
   /* ADV7533 through the system's I2C driver (it serialises the bus) */
   if (!g_i2c_wr &&

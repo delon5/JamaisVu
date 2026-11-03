@@ -13,4 +13,10 @@
  * through log (one call per line). Reads only. */
 void hwdump_hdmi(void (*log)(const char *));
 
+#include <stdint.h>
+/* logs the non-zero words of a JV_REGSNAP_RANGES snapshot (who = "system"
+ * or "ours") */
+void hwdump_regs(void (*log)(const char *), const char *who,
+                 const uint32_t *words);
+
 #endif

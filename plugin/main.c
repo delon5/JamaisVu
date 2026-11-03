@@ -302,6 +302,8 @@ static int ksceSysconSendCommandPatched(int cmd, void *buffer, uint32_t size) {
 /* Timing around the payload (system time, which stops while the system
  * sleeps): request -> sleep event, wake event -> system resumed. */
 volatile int64_t g_t_request, g_t_suspend, g_t_resume, g_t_resumed;
+uint32_t g_regsnap[JV_REGSNAP_WORDS];
+volatile int g_regsnap_ok;
 volatile int64_t g_t_fs_done; /* load: ux0 re-read (0 = not done) */
 /* Diagnostics: every system event during a save/load (suspend and resume
  * phases) with its time, to see where request -> sleep goes (3.9 s). */
@@ -381,6 +383,12 @@ ev_done:
         menu_arm_first_frame();
         memcpy(&pargs, (void *)PAYLOAD_ARGS_PADDR, sizeof(PayloadArguments));
         memcpy(g_rtc_ctx, pargs.rtc_ctx, SCE_RTC_CTX_SIZE);
+        /* PS TV display test: the payload's HDMI register copy */
+        if (pargs.debug_mode == JV_TEST_DISPLAY &&
+            *(volatile uint32_t *)REGSNAP_PADDR == JV_REGSNAP_MAGIC) {
+          memcpy(g_regsnap, (void *)(REGSNAP_PADDR + 4), sizeof(g_regsnap));
+          g_regsnap_ok = 1;
+        }
         trace_wake_begin(&pargs);
         trace_wake(JV_WAKE_RESUME);
       } else if (eventid == 0x100000) {

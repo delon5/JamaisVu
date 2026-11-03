@@ -1922,6 +1922,11 @@ static void after_resume(void) {
     if (g_res_debug == JV_TEST_DISPLAY && g_res_result == JV_TEST_DONE &&
         g_res_detail == 0)
       display_ok_record(g_res_pa.disp_type);
+    /* PS TV: our HDMI registers during the test picture (payload copy) */
+    if (g_res_debug == JV_TEST_DISPLAY && g_regsnap_ok) {
+      g_regsnap_ok = 0;
+      hwdump_regs(log_append, "ours", g_regsnap);
+    }
     /* diagnostics: report and never touch the slot info */
     if (g_res_result == JV_TEST_DONE)
       snprintf(msg, sizeof(msg), "%s passed - reached stage %u (%s)",

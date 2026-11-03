@@ -682,6 +682,7 @@ int main(void) {
   uint32_t old_vbar;
 
   pargs = (PayloadArguments *)PAYLOAD_ARGS_PADDR;
+  *(volatile uint32_t *)REGSNAP_PADDR = 0; /* filled by the PS TV test */
   g_in_exception = 0;
   g_trace_lba = 0;
 

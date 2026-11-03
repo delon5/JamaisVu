@@ -15,5 +15,8 @@
 #define SCE_RESUME_PADDR   0x1f000000
 #define CONTEXT_PADDR      0x1f001000
 #define SPRAM_PADDR        0x1f840000
+/* PS TV display test: the payload's copy of the HDMI display registers
+ * while its picture is on screen (JamaisVu.h: JV_REGSNAP_*) */
+#define REGSNAP_PADDR      0x1c088000
 
 #endif

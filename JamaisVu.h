@@ -126,6 +126,26 @@ typedef struct {
   uint32_t appdb_changed;
 } PayloadArguments;
 
+/* Register snapshot (REGSNAP_PADDR in shared.h): the PS TV's HDMI display
+ * registers, read in these ranges in this order - by the payload while
+ * its display test picture is on screen, by the plugin while the
+ * system's own picture is (to compare all of them, not only the ones
+ * JamaisVu writes: the display controller is reset during sleep). Word 0
+ * is JV_REGSNAP_MAGIC once the payload has filled it. */
+#define JV_REGSNAP_MAGIC 0x4752564Au /* "JVRG" */
+typedef struct {
+  uint32_t paddr, words;
+} JvRegRange;
+#define JV_REGSNAP_RANGES {                                       \
+  { 0xE5030000, 256 }, /* IFTU bus 1 plane A: 0x000-0x3FC */     \
+  { 0xE5032000,  32 }, /* IFTU bus 1 control: 0x2000-0x207C */  \
+  { 0xE5060000,  64 }, /* DSI bus 1: 0x000-0x0FC */              \
+  { 0xE5060500,   8 }, /* DSI 0x140-0x147 (word index) */        \
+  { 0xE5060800,  16 }, /* DSI 0x200-0x20F */                     \
+  { 0xE5060900,  20 }, /* DSI 0x240-0x253 */                     \
+}
+#define JV_REGSNAP_WORDS (256 + 32 + 64 + 8 + 16 + 20)
+
 /* First sector of data/JamaisVu/trace.bin on the Memory Card. The plugin
  * writes it (through the OS) with a fresh nonce before every run and
  * finds where it lies on the card. Once the card is authenticated, the

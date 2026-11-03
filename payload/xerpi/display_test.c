@@ -24,6 +24,8 @@
 #include "hdmi.h"
 #include "i2c.h"
 #include "utils.h"
+#include "../../JamaisVu.h"
+#include "../../shared.h"
 
 uint32_t g_disp_hw_info, g_disp_hw_flags0; /* read by sysroot.h */
 
@@ -238,6 +240,19 @@ static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
 
 	plane_setup(a->fb_paddr);
 	mark(JV_DISP_STEP_PLANE);
+
+	/* PS TV: every HDMI display register as our picture leaves them, for
+	 * the plugin to log next to the system's own (the picture is still
+	 * wrong while every register we write matches the system) */
+	if (g_type == JV_DISP_HDMI) {
+		static const JvRegRange r[] = JV_REGSNAP_RANGES;
+		volatile uint32_t *d = (volatile uint32_t *)REGSNAP_PADDR;
+		uint32_t k = 1;
+		for (uint32_t i = 0; i < sizeof(r) / sizeof(r[0]); i++)
+			for (uint32_t w = 0; w < r[i].words; w++)
+				d[k++] = *(volatile uint32_t *)(r[i].paddr + 4 * w);
+		d[0] = JV_REGSNAP_MAGIC;
+	}
 }
 
 /* back to how it was: panel and backlight off, link stopped - each step
