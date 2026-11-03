@@ -114,6 +114,10 @@ void storage_set_mount_ops(MountFn mount, UmountFn umount) {
   g_umount = umount;
 }
 
+int storage_mount_is_card(int id) {
+  return mount_is_mc(id);
+}
+
 int storage_card_unmounted(const char **root) {
   /* the card can be mounted only once: if any of its mounts is up (e.g.
    * uma0), the others (xmc0, the system's default entry for it) stay

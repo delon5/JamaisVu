@@ -1848,6 +1848,11 @@ static void after_resume(void) {
   {
     static char clk[192], line[224];
     jv_clocks_restore(clk, sizeof(clk));
+    trace_wake(JV_WAKE_CLOCKS_SET);
+    /* the card may be away for a moment after the wake-up (usbmc's uma0):
+     * no file access until it is usable again (at most 10 s) */
+    if (card_wait(10000))
+      trace_wake(JV_WAKE_CARD_READY);
     snprintf(line, sizeof(line), "    %s\r\n", clk);
     log_append(line);
     trace_wake(JV_WAKE_CLOCKS);
@@ -2712,6 +2717,20 @@ static struct {
 } g_mount_ev[MOUNT_EV_N];
 static volatile uint32_t g_mount_ev_w, g_mount_ev_r;
 
+/* SceSdstor's code: after a wake-up it force-unmounts mount 0xF00, the
+ * system's USB storage mount - with usbmc that is the official card, and
+ * a load's filesystem refresh crashed (PS TV) or froze (PCH-1000) walking
+ * its files while they were freed (66481a6: unmount at 855 ms, refresh of
+ * open files from 897 ms, never finished). Those unmounts are refused
+ * while 0xF00/0xE00 is the card: the card was never removed. */
+static uintptr_t g_sdstor_lo, g_sdstor_hi;
+static volatile int g_card_on[2]; /* 0xF00, 0xE00 are the card (cached) */
+
+static void mount_card_flags_update(void) {
+  g_card_on[0] = storage_mount_is_card(0xF00);
+  g_card_on[1] = storage_mount_is_card(0xE00);
+}
+
 static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
   if (id != 0x800 && id != 0xF00 && id != 0xE00)
     return;
@@ -2749,7 +2768,9 @@ static void mount_events_log(void) {
     int id = g_mount_ev[k].id;
     snprintf(line, sizeof(line), "mount table: %s 0x%X (%s) arg %d -> 0x%08X,"
              " called from %s+0x%X (process 0x%X), %d ms after the last "
-             "wake-up\r\n", g_mount_ev[k].unmount ? "unmount" : "mount", id,
+             "wake-up\r\n", g_mount_ev[k].unmount == 2
+                 ? "REFUSED unmount (the card stays mounted)"
+                 : g_mount_ev[k].unmount ? "unmount" : "mount", id,
              id == 0x800 ? "ux0:" : id == 0xF00 ? "uma0:" : "xmc0:",
              g_mount_ev[k].arg, (unsigned)g_mount_ev[k].ret, name,
              (unsigned)(g_mount_ev[k].lr - (uintptr_t)text),
@@ -2763,6 +2784,11 @@ static void mount_events_log(void) {
 
 static int umount_hook(int id, int a2, int a3, int a4) {
   uintptr_t lr = (uintptr_t)__builtin_return_address(0);
+  if (g_sdstor_hi && lr >= g_sdstor_lo && lr < g_sdstor_hi &&
+      ((id == 0xF00 && g_card_on[0]) || (id == 0xE00 && g_card_on[1]))) {
+    mount_note(2, id, a2, 0, lr); /* refused, reported as done */
+    return 0;
+  }
   int ret = TAI_CONTINUE(int, g_umount_ref, id, a2, a3, a4);
   mount_note(1, id, a2, ret, lr);
   return ret;
@@ -2777,6 +2803,20 @@ static int mount_hook(int id, const char *path, int perm, int a4, int a5,
 }
 
 static void mount_watch_install(void) {
+  tai_module_info_t ti;
+  memset(&ti, 0, sizeof(ti));
+  ti.size = sizeof(ti);
+  if (taiGetModuleInfoForKernel(KERNEL_PID, "SceSdstor", &ti) >= 0) {
+    SceKernelModuleInfo mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.size = sizeof(mi);
+    if (ksceKernelGetModuleInfo(KERNEL_PID, ti.modid, &mi) >= 0 &&
+        mi.segments[0].vaddr && mi.segments[0].memsz) {
+      g_sdstor_lo = (uintptr_t)mi.segments[0].vaddr;
+      g_sdstor_hi = g_sdstor_lo + mi.segments[0].memsz;
+    }
+  }
+  mount_card_flags_update();
   if (module_get_export_func(KERNEL_PID, "SceKernelModulemgr",
                              TAI_ANY_LIBRARY, 0x8309E043,
                              (uintptr_t *)&g_mod_by_addr) < 0)
@@ -2802,6 +2842,7 @@ static void card_watch(void) {
   if (t < next || g_busy)
     return;
   next = t + 2000000;
+  mount_card_flags_update();
   if (!storage_card_unmounted(&root)) {
     missing = 0;
     return;

@@ -76,6 +76,8 @@ typedef int (*MountFn)(int id, const char *path, int permission, int a4,
 typedef int (*UmountFn)(int id, int a2, int a3, int a4);
 void storage_set_mount_ops(MountFn mount, UmountFn umount);
 int storage_remount_card(const char **root);
+/* 1 if the mount table entry id (0x800/0xF00/0xE00) is the Memory Card */
+int storage_mount_is_card(int id);
 /* 1 if uma0/xmc0 is the Memory Card in the mount table but not mounted */
 int storage_card_unmounted(const char **root);
 

@@ -83,6 +83,8 @@ static const char *jv_wake_name(uint8_t step) {
     case JV_WAKE_SLOT_INFO: return "slot-info";
     case JV_WAKE_SLOT_INFO_DONE: return "slot-info-done";
     case JV_WAKE_REPORT:    return "report";
+    case JV_WAKE_CLOCKS_SET: return "clocks-set";
+    case JV_WAKE_CARD_READY: return "card-ready";
     default:                return "?";
   }
 }

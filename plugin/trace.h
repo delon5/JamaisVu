@@ -46,6 +46,8 @@ enum {
   JV_WAKE_SLOT_INFO,      /* save: writing the slot info */
   JV_WAKE_SLOT_INFO_DONE, /* save: slot info written */
   JV_WAKE_REPORT,         /* result message */
+  JV_WAKE_CLOCKS_SET,     /* clocks set back (before logging them) */
+  JV_WAKE_CARD_READY,     /* card usable (waited for it if needed) */
   JV_WAKE_FS_MOUNT = 0x40 /* + n: load, remounting filesystem n */
 };
 void trace_wake_begin(const PayloadArguments *pa);
