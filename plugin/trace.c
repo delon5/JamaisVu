@@ -194,6 +194,34 @@ int trace_format(char *out, int len, const JvTraceSector *t) {
     APP("\r\n");
   }
 
+  const JvWakeFs *f = &t->fs;
+  if (f->n) {
+    static const char *const wm[] = {"allowed", "dropped", "read-only"};
+    APP("    file systems after the load: write mode %s, open files gone "
+        "or unreadable %u, read-only drives 0x%03X, remount errors 0x%03X, "
+        "writes refused %u (+%u unrecognised)",
+        f->write_mode <= 2 ? wm[f->write_mode] : "?", (unsigned)f->stale,
+        (unsigned)f->ro_mask, (unsigned)f->mount_fail,
+        (unsigned)f->writes_refused, (unsigned)f->writes_unknown);
+    if (f->first_err)
+      APP(", first failed look-up 0x%08X on drive %u", (unsigned)f->first_err,
+          (unsigned)f->first_err_drive);
+    APP("\r\n     ");
+    uint32_t dn = f->n > JV_WAKE_FS_MAX ? JV_WAKE_FS_MAX : f->n;
+    for (uint32_t i = 0; i < dn; i++) {
+      const JvWakeFsDrive *d = &f->drive[i];
+      char nm[5];
+      for (int k = 0; k < 4; k++)
+        nm[k] = (d->name[k] >= 0x20 && d->name[k] < 0x7F) ? d->name[k] : 0;
+      nm[4] = 0;
+      if (!nm[0] && !d->lookups)
+        continue;
+      APP(" %u:%s %u/%u %ums", (unsigned)i, nm[0] ? nm : "-",
+          (unsigned)d->fails, (unsigned)d->lookups, (unsigned)d->ms);
+    }
+    APP(" (drive: failed/looked up, time)\r\n");
+  }
+
   if (t->fault_type)
     APP("    crash: %s, fault address 0x%08X, return address 0x%08X\r\n",
             t->fault_type == 1 ? "undefined instruction" :
@@ -492,6 +520,10 @@ void trace_wake_begin(const PayloadArguments *pa) {
   g_wake_t0 = ksceKernelGetSystemTimeWide();
   g_wake_io = 0;
   g_wake_on = 1;
+}
+
+JvWakeFs *trace_wake_fs(void) {
+  return &g_wake.fs;
 }
 
 void trace_wake_io(int on) {

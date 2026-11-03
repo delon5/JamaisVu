@@ -1834,7 +1834,7 @@ static void log_append_locked(const char *text) {
 static int g_trace_keep;
 
 static void log_result(const char *msg) {
-  static char text[1200];
+  static char text[2000];
   static JvTraceSector t;
 
   trace_wake(JV_WAKE_REPORT);
@@ -1995,7 +1995,11 @@ static void after_resume(void) {
     }
   } else if (g_res_mode == JAMAISVU_MODE_LOAD) {
     if (g_res_result == JV_OK) {
-      if (g_res_stale)
+      static char ro[48];
+      if (g_res_stale && fs_read_only_names(ro, sizeof(ro)) > 0)
+        snprintf(msg, sizeof(msg), "Loaded slot %u - %s read-only until "
+                 "restart", (unsigned)g_res_slot + 1, ro);
+      else if (g_res_stale)
         snprintf(msg, sizeof(msg), "Loaded slot %u - Memory Card is "
                  "read-only until restart", (unsigned)g_res_slot + 1);
       else if (g_res_pa.appdb_changed == 2)
@@ -2683,12 +2687,12 @@ static void write_status(void) {
 }
 
 static int worker_thread(SceSize args, void *argp) {
-  static char prev[1200];
+  static char prev[2000];
 
   write_status();
   /* a run that never got back to the system: its trace is in trace.bin */
   if (trace_collect(prev, sizeof(prev) - 120)) {
-    static char text[1300];
+    static char text[2100];
     snprintf(text, sizeof(text), "PREVIOUS RUN DID NOT RETURN (recovered "
              "from trace.bin):\r\n    %s", prev);
     log_append(text);

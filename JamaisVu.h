@@ -153,6 +153,33 @@ typedef struct {
  * every step, so the progress survives even a forced power-off; the
  * plugin copies it into log.txt on the next boot. */
 #define JV_TRACE_MAGIC "JVTRACE1"
+
+/* Loads: what the plugin's file system re-read found, per exFAT file
+ * system (drive), written into the trace sector with the wake-up steps
+ * (PCH-1000: the open-file re-read took 8.0 s on every load, then the
+ * console restarted). */
+#define JV_WAKE_FS_MAX 11
+typedef struct {
+  char name[4];     /* first 4 characters of the drive's name, e.g. "ux0:" */
+  uint8_t lookups;  /* files looked up again (stops counting at 255) */
+  uint8_t fails;    /* of those, how many failed (stops at 255) */
+  uint16_t ms;      /* time spent looking them up */
+} JvWakeFsDrive;
+typedef struct {
+  uint8_t n;               /* drives used in drive[] */
+  uint8_t write_mode;      /* FS_WRITES_* once the re-read was done */
+  uint16_t stale;          /* open files whose look-up failed */
+  uint16_t ro_mask;        /* drives left read-only (bit = index) */
+  uint16_t mount_fail;     /* drives whose remount returned an error */
+  int32_t first_err;       /* first failed look-up's result */
+  uint8_t first_err_drive; /* its drive index */
+  uint8_t writes_unknown;  /* writes refused: drive not recognised */
+  uint16_t writes_refused; /* writes refused on read-only drives */
+  JvWakeFsDrive drive[JV_WAKE_FS_MAX];
+} JvWakeFs;
+#define JV_WAKE_FS_SIZE (16 + 8 * JV_WAKE_FS_MAX)
+_Static_assert(sizeof(JvWakeFs) == JV_WAKE_FS_SIZE, "packed");
+
 typedef struct {
   char magic[8];
   uint8_t nonce[16];
@@ -173,7 +200,9 @@ typedef struct {
   uint32_t wake_n;
   uint8_t wake_step[64];
   uint16_t wake_ms[64];
-  uint8_t pad[512 - 8 - 16 - 4 * 9 - 24 - 4 * 24 - 4 * 3 - 4 - 64 - 2 * 64];
+  JvWakeFs fs;
+  uint8_t pad[512 - 8 - 16 - 4 * 9 - 24 - 4 * 24 - 4 * 3 - 4 - 64 - 2 * 64 -
+              JV_WAKE_FS_SIZE];
 } JvTraceSector;
 _Static_assert(sizeof(JvTraceSector) == 512, "one sector");
 

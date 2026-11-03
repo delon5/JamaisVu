@@ -75,6 +75,9 @@ void trace_wake(uint8_t step);
 void trace_wake_io(int on);
 /* returns how many steps were written and the last write's result */
 int trace_wake_end(int *last_ret);
+/* the load's file system re-read result inside the wake-up record (fs.c
+ * fills it in; it goes out with the next trace_wake). Never NULL. */
+JvWakeFs *trace_wake_fs(void);
 int trace_format(char *out, int len, const JvTraceSector *t);
 
 #endif

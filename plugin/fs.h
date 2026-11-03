@@ -39,13 +39,16 @@ typedef struct {
 /* exFAT write modes */
 #define FS_WRITES_ALLOWED   0
 #define FS_WRITES_DROPPED   1 /* set by the payload in a restored image */
-#define FS_WRITES_READ_ONLY 2 /* after a load with stale open files */
+#define FS_WRITES_READ_ONLY 2 /* after a load with stale open files: only
+                                * the drives they are on */
 
 /* Resolves all offsets and installs the exFAT hooks. < 0 on failure, in
  * which case nothing is left hooked. */
 int fs_init(const FwOffsets *o);
 
 void fs_set_write_mode(uint32_t mode);
+/* the drives FS_WRITES_READ_ONLY applies to, e.g. "ux0:" (empty if none) */
+int fs_read_only_names(char *out, int len);
 uint32_t fs_get_write_mode(void);
 volatile uint32_t *fs_write_mode_addr(void);
 

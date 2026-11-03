@@ -58,6 +58,42 @@ static SceUID g_exfat_modid = -1;
 
 #define SCE_ERROR_ERRNO_EROFS 0x8001001E
 
+/* FS_WRITES_READ_ONLY applies to these drives only (bit = file system
+ * index): the ones with open files that could not be looked up again.
+ * Before, it applied to every exFAT drive - the system's own ur0/vd0/tm0
+ * too - and after loads on the PCH-1000 (an open file on one drive could
+ * not be looked up) even log.txt on the card was refused, then the
+ * console restarted. */
+static volatile uint32_t g_ro_mask;
+
+/* file system index of a fileSystem (or of its drive), -1 if neither */
+static int fs_index(const void *p) {
+  if (!g_shared_resource || !g_off || !p)
+    return -1;
+  uintptr_t base = (uintptr_t)g_shared_resource;
+  uintptr_t a = (uintptr_t)p;
+  if (a >= base && (a - base) % g_off->fs_stride == 0 &&
+      (a - base) / g_off->fs_stride < g_off->fs_count)
+    return (int)((a - base) / g_off->fs_stride);
+  return -1;
+}
+
+static int fs_index_any(const void *p) {
+  int i = fs_index(p);
+  if (i >= 0 || !g_off)
+    return i;
+  for (uint32_t k = 0; k < g_off->fs_count && k < 32; k++) {
+    void *fsys = (void *)(g_shared_resource + g_off->fs_stride * k);
+    if (*(uintptr_t **)(fsys + 0xac) && *(void **)(fsys + 0xac) == p)
+      return (int)k;
+  }
+  return -1;
+}
+
+static JvWakeFsDrive *fs_rec(int i) {
+  return (i >= 0 && i < JV_WAKE_FS_MAX) ? &trace_wake_fs()->drive[i] : NULL;
+}
+
 static void invalidate_file_caches(void) {
   uint32_t num = *(uint32_t *)(g_shared_resource + g_off->sr_num_files);
   void *files = *(uintptr_t **)(g_shared_resource + g_off->sr_files);
@@ -109,6 +145,9 @@ static int update_fnode(void *fnode, int *looked_up) {
     return FNODE_UNUSED;
 
   void *drive = *(uintptr_t **)(fileSystem + 0xac);
+  int fsi = fs_index(fileSystem);
+  JvWakeFsDrive *rec = fs_rec(fsi);
+  int64_t t0 = ksceKernelGetSystemTimeWide();
 
   res = ksceKernelLockFastMutex(drive + 0x1e0);
   if (res < 0)
@@ -134,6 +173,23 @@ static int update_fnode(void *fnode, int *looked_up) {
 
   ksceKernelUnlockFastMutex(drive + 0x1e0);
   *looked_up = 1;
+
+  if (rec) {
+    uint32_t ms = rec->ms + (uint32_t)((ksceKernelGetSystemTimeWide() - t0) /
+                                       1000);
+    rec->ms = ms > 0xFFFF ? 0xFFFF : (uint16_t)ms;
+    if (rec->lookups < 255)
+      rec->lookups++;
+    if (res < 0 && rec->fails < 255)
+      rec->fails++;
+  }
+  if (res < 0) {
+    JvWakeFs *f = trace_wake_fs();
+    if (!f->first_err) {
+      f->first_err = res;
+      f->first_err_drive = (uint8_t)(fsi < 0 ? 0xFF : fsi);
+    }
+  }
 
   return res;
 }
@@ -185,6 +241,10 @@ static int update_vnodes(void) {
           vfs_free_vnode(vp);
         } else {
           stale_open++;
+          void *fsys = *(uintptr_t **)(fnode + 0x20c);
+          int fsi = fs_index(fsys);
+          /* a drive we cannot tell: all of them, as before */
+          g_ro_mask |= fsi >= 0 && fsi < 32 ? 1u << fsi : 0xFFFFFFFFu;
         }
       } else if (res != FNODE_UNUSED) {
         *(uint64_t *)(vp + 0x80) = *(uint64_t *)(fnode + 0x218);
@@ -234,7 +294,13 @@ static void remount_filesystems(void) {
         uint32_t args[2];
         args[0] = (uint32_t)drive;
         args[1] = flags;
-        UVFAT_Mount(g_shared_resource, assignName, 1, args);
+        int mr = UVFAT_Mount(g_shared_resource, assignName, 1, args);
+        JvWakeFsDrive *rec = fs_rec((int)i);
+        if (rec && assignName)
+          for (int k = 0; k < 4 && assignName[k]; k++)
+            rec->name[k] = assignName[k];
+        if (mr < 0 && i < 16)
+          trace_wake_fs()->mount_fail |= (uint16_t)(1u << i);
 
         ksceKernelUnlockFastMutex(drive + 0x1e0);
       }
@@ -278,6 +344,10 @@ int update_filesystem(void) {
   memset(tm, 0, sizeof(*tm));
   tm->vnodes = (uint32_t)*g_num_vnodes;
   memset(g_fnode_done, 0, sizeof(g_fnode_done));
+  g_ro_mask = 0;
+  JvWakeFs *f = trace_wake_fs();
+  f->n = (uint8_t)(g_off->fs_count > JV_WAKE_FS_MAX ? JV_WAKE_FS_MAX
+                                                     : g_off->fs_count);
   invalidate_buff_caches();
   tm->ms[0] = fs_ms_since(&t);
   invalidate_file_caches();
@@ -297,6 +367,8 @@ int update_filesystem(void) {
   trace_wake(JV_WAKE_FS_FNODES);
   tm->fnodes = update_fnodes(&tm->fnodes_skipped);
   tm->ms[4] = fs_ms_since(&t);
+  f->stale = (uint16_t)(stale_open > 0xFFFF ? 0xFFFF : stale_open);
+  f->ro_mask = (uint16_t)g_ro_mask;
   return stale_open;
 }
 
@@ -307,8 +379,20 @@ static int UVFAT_WriteDevice_Patched(void *fileSystem, int unused,
 
   if (mode == FS_WRITES_DROPPED)
     return 0; /* restored OS before remount: stale caches, discard */
-  if (mode == FS_WRITES_READ_ONLY)
-    return SCE_ERROR_ERRNO_EROFS;
+  if (mode == FS_WRITES_READ_ONLY) {
+    int fsi = fs_index_any(fileSystem);
+    JvWakeFs *f = trace_wake_fs();
+    if (fsi < 0) {
+      if (f->writes_unknown < 255)
+        f->writes_unknown++;
+      return SCE_ERROR_ERRNO_EROFS;
+    }
+    if (fsi >= 32 || (g_ro_mask & (1u << fsi))) {
+      if (f->writes_refused < 0xFFFF)
+        f->writes_refused++;
+      return SCE_ERROR_ERRNO_EROFS;
+    }
+  }
 
   return TAI_CONTINUE(int, UVFAT_WriteDevice_Ref, fileSystem, unused,
                                                   sector, size, buf);
@@ -316,6 +400,26 @@ static int UVFAT_WriteDevice_Patched(void *fileSystem, int unused,
 
 void fs_set_write_mode(uint32_t mode) {
   g_ignore_writedevice = mode;
+  trace_wake_fs()->write_mode = (uint8_t)mode;
+}
+
+int fs_read_only_names(char *out, int len) {
+  int n = 0;
+  out[0] = 0;
+  if (g_ignore_writedevice != FS_WRITES_READ_ONLY || !g_off)
+    return 0;
+  for (uint32_t i = 0; i < g_off->fs_count && i < 32 && n < len - 8; i++) {
+    if (!(g_ro_mask & (1u << i)))
+      continue;
+    void *fsys = (void *)(g_shared_resource + g_off->fs_stride * i);
+    void *drive = *(uintptr_t **)(fsys + 0xac);
+    const char *nm = drive ? *(char **)(drive + 0xc0) : NULL;
+    int r = snprintf(out + n, len - n, "%s%s", n ? ", " : "",
+                     nm && nm[0] ? nm : "?");
+    if (r > 0)
+      n = n + r >= len ? len - 1 : n + r;
+  }
+  return n;
 }
 
 uint32_t fs_get_write_mode(void) {
