@@ -1740,11 +1740,24 @@ static const char *storage_problem(void) {
 static void log_append_locked(const char *text);
 
 /* worker and io thread only (never the input thread) */
+static int g_log_trace_once;
+
 static void log_append(const char *text) {
-  if (g_log_mtx >= 0)
-    ksceKernelLockMutex(g_log_mtx, 1, NULL);
+  int locked = 0;
+  if (g_log_mtx >= 0) {
+    if (g_log_trace_once) {
+      /* first write after a wake-up: does another thread of the restored
+       * image hold the log? (a4ce776/b879a47 stopped before the card was
+       * touched) - at most 2 s, then on without it */
+      SceUInt32 to = 2000000;
+      locked = ksceKernelLockMutex(g_log_mtx, 1, &to) >= 0;
+      trace_wake(locked ? JV_WAKE_W_LOCK : JV_WAKE_W_LOCK_TIMEOUT);
+    } else {
+      locked = ksceKernelLockMutex(g_log_mtx, 1, NULL) >= 0;
+    }
+  }
   log_append_locked(text);
-  if (g_log_mtx >= 0)
+  if (locked)
     ksceKernelUnlockMutex(g_log_mtx, 1);
 }
 
@@ -1765,8 +1778,7 @@ static void log_backlog_add(const char *stamp, int n, const char *text) {
 
 /* the first log write after a wake-up records each file call in
  * trace.bin (both consoles with the card on uma0 stopped there after a
- * load, a4ce776: card-ready, then nothing) */
-static int g_log_trace_once;
+ * load, a4ce776: card-ready, then nothing); g_log_trace_once above */
 
 static void log_append_locked(const char *text) {
   static char path[64], line[160];
@@ -1777,6 +1789,8 @@ static void log_append_locked(const char *text) {
 
   memset(&t, 0, sizeof(t));
   ksceRtcGetCurrentClockLocalTime(&t);
+  if (tr)
+    trace_wake(JV_WAKE_W_TIME);
   int n = snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d ",
                    t.year, t.month, t.day, t.hour, t.minute, t.second);
 

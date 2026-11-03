@@ -85,6 +85,9 @@ static const char *jv_wake_name(uint8_t step) {
     case JV_WAKE_REPORT:    return "report";
     case JV_WAKE_CLOCKS_SET: return "clocks-set";
     case JV_WAKE_CARD_READY: return "card-ready";
+    case JV_WAKE_W_LOCK:    return "w-lock";
+    case JV_WAKE_W_LOCK_TIMEOUT: return "w-lock-TIMEOUT";
+    case JV_WAKE_W_TIME:    return "w-time";
     case JV_WAKE_W_MKDIR:   return "w-mkdir";
     case JV_WAKE_W_STAT:    return "w-stat";
     case JV_WAKE_W_OPEN:    return "w-open";

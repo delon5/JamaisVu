@@ -48,7 +48,10 @@ enum {
   JV_WAKE_REPORT,         /* result message */
   JV_WAKE_CLOCKS_SET,     /* clocks set back (before logging them) */
   JV_WAKE_CARD_READY,     /* card usable (waited for it if needed) */
-  JV_WAKE_W_MKDIR,        /* first log write: folders checked */
+  JV_WAKE_W_LOCK,         /* first log write: log lock taken */
+  JV_WAKE_W_LOCK_TIMEOUT, /*   log lock NOT taken within 2 s (went on) */
+  JV_WAKE_W_TIME,         /*   clock read */
+  JV_WAKE_W_MKDIR,        /*   folders checked */
   JV_WAKE_W_STAT,         /*   log.txt looked up */
   JV_WAKE_W_OPEN,         /*   opened */
   JV_WAKE_W_WRITE,        /*   written */
