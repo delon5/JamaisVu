@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "compat.h"
 #include "hwdump.h"
 
 /* SceKernelAllocMemBlockKernelOpt (3.60), only the fields used */
