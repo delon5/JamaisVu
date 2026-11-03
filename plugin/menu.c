@@ -111,6 +111,9 @@ static volatile uint32_t g_model_seq;
 static volatile int g_menu_open;
 static volatile int64_t g_block_input_until;
 static volatile int64_t g_lockskip_until; /* 0 = no patch to remove */
+/* diagnostics: data/JamaisVu/no_cardguard.txt (read at each save/load
+ * start) - SceSdstor's unmount of the card is let through, not refused */
+static volatile int g_no_cardguard;
 
 static char g_toast_msg[128];
 static volatile int g_toast_err;
@@ -2108,6 +2111,13 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
       snprintf(line, sizeof(line), "    %s\r\n", ls);
     }
     log_append(line);
+    /* diagnostics: no_cardguard.txt - SceSdstor may unmount the card
+     * after the wake-up (PS TV: it tries ~0.77 s after every wake-up,
+     * right where loads freeze) */
+    jv_file_path(nls, sizeof(nls), "no_cardguard.txt");
+    g_no_cardguard = storage_mc_root() && ksceIoGetstat(nls, &nst) >= 0;
+    if (g_no_cardguard)
+      log_append("    card guard: off (no_cardguard.txt)\r\n");
   }
 
   if (jv_request(mode, slot, nonce, debug_mode, trel,
@@ -2964,6 +2974,7 @@ static int umount_hook(int id, int a2, int a3, int a4) {
                              : -1;
   if (since >= 0 && since < 15000000 &&
       g_sdstor_hi && lr >= g_sdstor_lo && lr < g_sdstor_hi &&
+      !g_no_cardguard &&
       ((id == 0xF00 && g_card_on[0]) || (id == 0xE00 && g_card_on[1]))) {
     mount_note(2, id, a2, 0, lr); /* refused, reported as done */
     /* PS TV only: the PCH-1000 sees this unmount too (after saves), and

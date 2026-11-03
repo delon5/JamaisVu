@@ -393,10 +393,9 @@ ev_done:
           g_regsnap_ok = 1;
         }
         storage_usb_reset();
-        g_storage_card_hold = g_storage_usb_drops &&
-                              pargs.mode == JAMAISVU_MODE_LOAD &&
-                              pargs.result == JV_OK &&
-                              pargs.debug_mode == JV_TEST_NONE;
+        /* 76dc33d held all card I/O during PS TV load wake-ups: it still
+         * froze, so the record is written again (it shows when) */
+        g_storage_card_hold = 0;
         trace_wake_begin(&pargs);
         trace_wake(JV_WAKE_RESUME);
         if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK &&
