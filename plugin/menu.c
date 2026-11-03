@@ -2094,8 +2094,19 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
      * this patch again before the sleep: seen at 21:58:49, one second
      * after a load started within 10 s of the save before it */
     g_lockskip_until = 0;
-    lockskip_apply(ls, sizeof(ls));
-    snprintf(line, sizeof(line), "    %s\r\n", ls);
+    /* diagnostics: data/JamaisVu/no_lockskip.txt leaves SceShell alone
+     * (PS TV loads hang; it is the only console here where JamaisVu
+     * patches the lock screen itself - the PCH-1000 has NoLockScreen) */
+    static char nls[80];
+    SceIoStat nst;
+    jv_file_path(nls, sizeof(nls), "no_lockskip.txt");
+    if (storage_mc_root() && ksceIoGetstat(nls, &nst) >= 0) {
+      snprintf(line, sizeof(line), "    lock screen skip: off "
+               "(no_lockskip.txt)\r\n");
+    } else {
+      lockskip_apply(ls, sizeof(ls));
+      snprintf(line, sizeof(line), "    %s\r\n", ls);
+    }
     log_append(line);
   }
 
