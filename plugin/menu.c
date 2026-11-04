@@ -111,6 +111,9 @@ static volatile uint32_t g_model_seq;
 static volatile int g_menu_open;
 static volatile int64_t g_block_input_until;
 static volatile int64_t g_lockskip_until; /* 0 = no patch to remove */
+/* a finished load's record, kept open until then (heartbeat thread) */
+static volatile int64_t g_alive_until;
+static void alive_stop(void);
 /* diagnostics: data/JamaisVu/no_cardguard.txt (read at each save/load
  * start) - SceSdstor's unmount of the card is let through, not refused */
 static volatile int g_no_cardguard;
@@ -1812,8 +1815,16 @@ static void log_append_locked(const char *text) {
   jv_file_path(path, sizeof(path), "log.txt");
 
   int flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND;
-  if (ksceIoGetstat(path, &st) >= 0 && st.st_size > 64 * 1024)
-    flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC;
+  if (ksceIoGetstat(path, &st) >= 0 && st.st_size > 64 * 1024) {
+    /* kept as log.old.txt, not cleared: a full log was emptied by the
+     * first line after a restart - with the lines about why it restarted
+     * (PS TV, 0dfdf8a) */
+    static char old[64];
+    jv_file_path(old, sizeof(old), "log.old.txt");
+    ksceIoRemove(old);
+    if (ksceIoRename(path, old) < 0)
+      flags = SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC;
+  }
   if (tr)
     trace_wake(JV_WAKE_W_STAT);
 
@@ -2060,6 +2071,7 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   static uint8_t tnonce[16];
   uint32_t trel = 0;
   const char *why = "";
+  alive_stop(); /* the last load's record, if still open */
   int tok = trace_prepare(&trel, tnonce, &why) == 0;
   snprintf(start, sizeof(start), "starting %s%s slot=%d build=%s payload=%s; "
            "trace.bin: %s\r\n", mode == JAMAISVU_MODE_LOAD ? "load" : "save",
@@ -2085,8 +2097,8 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   }
   /* PS TV: the system's own HDMI setup while its picture is on screen
    * (read only), to compare with the progress screen's */
-  if (jv_disp_type() == JV_DISP_HDMI &&
-      (debug_mode == JV_TEST_DISPLAY || debug_mode == JV_TEST_NONE))
+  /* only for the display test now: ~5 KB per run filled the log */
+  if (jv_disp_type() == JV_DISP_HDMI && debug_mode == JV_TEST_DISPLAY)
     hwdump_hdmi(log_append);
 
   /* no lock screen on the way back (both the save and the load path:
@@ -2227,8 +2239,10 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
       trace_wake(JV_WAKE_ALIVE);
     }
     g_trace_keep = 0;
-    trace_wake_keep(0);
-    trace_consumed();
+    /* then every 5 s up to 60 s, from the heartbeat thread (the menu is
+     * free again): PS TV, 0dfdf8a - the console restarted some time after
+     * a load that had finished, and nothing showed when */
+    g_alive_until = ksceKernelGetSystemTimeWide() + 50000000;
   }
 }
 
@@ -2929,6 +2943,15 @@ static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
  * dies (1-4 s after it, whatever the plugin was doing) */
 static volatile int64_t g_hb_until;
 
+/* before a new run: the last load's record is closed first */
+static void alive_stop(void) {
+  if (!g_alive_until)
+    return;
+  g_alive_until = 0;
+  trace_wake_keep(0);
+  ksceKernelDelayThread(50 * 1000); /* a write in progress ends */
+}
+
 void menu_heartbeat_arm(void) {
   /* PS TV only: on the others it would fill the 64-step record */
   if (g_storage_usb_drops)
@@ -2938,10 +2961,28 @@ void menu_heartbeat_arm(void) {
 static int heartbeat_thread(SceSize args, void *argp) {
   (void)args;
   (void)argp;
+  int64_t next_alive = 0;
   while (1) {
     ksceKernelDelayThread(250 * 1000);
-    if (g_hb_until && ksceKernelGetSystemTimeWide() < g_hb_until)
+    int64_t now = ksceKernelGetSystemTimeWide();
+    if (g_hb_until && now < g_hb_until)
       trace_wake(g_storage_probe_busy ? JV_WAKE_TICK_PROBE : JV_WAKE_TICK);
+    int64_t until = g_alive_until;
+    if (!until) {
+      next_alive = 0;
+    } else if (now >= until) {
+      g_alive_until = 0;
+      trace_wake(JV_WAKE_ALIVE);
+      trace_wake_keep(0);
+      trace_consumed();
+    } else {
+      if (!next_alive)
+        next_alive = now + 5000000;
+      if (now >= next_alive) {
+        trace_wake(JV_WAKE_ALIVE);
+        next_alive += 5000000;
+      }
+    }
   }
   return 0;
 }
