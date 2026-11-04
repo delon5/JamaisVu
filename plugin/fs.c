@@ -421,27 +421,6 @@ static void mount_failed(uint32_t i, int mr) {
  * (ed20f94). Such a drive is left completely alone (no cache dropped, no
  * remount, no look-ups: the restored image's own view of it stays as it
  * was) and read-only; fs_refresh_late() re-reads it once it is back. */
-static int root_is(const char *name, const char *root) {
-  int n = (int)strlen(root) - 1; /* without the ':' */
-  return name && strncmp(name, root, n) == 0 &&
-         (name[n] == ':' || name[n] == '\0');
-}
-
-/* PS TV: by the drive's name only - nothing of the mount table or the
- * devices is touched during the wake-up there (7a523c1 died 20 ms into
- * this check without reading any device; what it still did was look the
- * drives up in the mount table, ux0's entry being the USB stick that is
- * going away then) */
-static int dev_state_by_name(const char *name) {
-  const char *mc = storage_mc_root();
-  int card_elsewhere = mc && !root_is(mc, "ux0:");
-  if (root_is(name, "ux0:"))
-    return card_elsewhere ? STORAGE_DEV_NOT_READY : STORAGE_DEV_UNCHECKED;
-  if (root_is(name, "uma0:") || root_is(name, "xmc0:"))
-    return card_elsewhere ? STORAGE_DEV_CARD_LATER : STORAGE_DEV_NOT_READY;
-  return STORAGE_DEV_UNCHECKED;
-}
-
 static void check_devices(void) {
   JvWakeFs *f = trace_wake_fs();
   int64_t t0 = ksceKernelGetSystemTimeWide();
@@ -455,21 +434,25 @@ static void check_devices(void) {
     if (rec && name)
       for (int k = 0; k < 4 && name[k]; k++)
         rec->name[k] = name[k];
+    /* a drive without a name is being unmounted (PS TV with the card
+     * guard off, e49cbdd: SceSdstor unmounted uma0 ~0.8 s after the
+     * wake-up, and its remount here at 1.26 s took the console down):
+     * not touched at all */
+    if (!name || !name[0]) {
+      g_skip_mask |= 1u << i;
+      if (i < 16)
+        f->deferred |= (uint16_t)(1u << i);
+      continue;
+    }
 
-    /* once SceSdstor has let the USB storage go (PS TV), it is not read
-     * again until it is back - in fs_refresh_late() */
-    int st = g_storage_usb_drops ? dev_state_by_name(name)
-             : g_dev_state ? g_dev_state(name) : STORAGE_DEV_UNCHECKED;
-    while (st == STORAGE_DEV_NOT_READY && !g_storage_usb_gone_t &&
-           !g_storage_usb_drops &&
+    int st = g_dev_state ? g_dev_state(name) : STORAGE_DEV_UNCHECKED;
+    while (st == STORAGE_DEV_NOT_READY &&
            ksceKernelGetSystemTimeWide() - t0 < FS_DEV_WAIT_MS * 1000LL) {
       ksceKernelDelayThread(50 * 1000);
       if (ksceKernelGetSystemTimeWide() >= next_tick) {
         trace_wake(JV_WAKE_FS_DEV_WAIT);
         next_tick += 500 * 1000;
       }
-      if (g_storage_usb_gone_t)
-        break; /* stays NOT_READY: re-read later */
       st = g_dev_state(name);
     }
     uint32_t w = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
@@ -495,6 +478,10 @@ static void remount_filesystems(void) {
     if (!*(uintptr_t **)(fs_at(i) + 0xac) || (g_skip_mask & (1u << i)))
       continue;
     const char *name = fs_name((int)i);
+    if (!name || !name[0]) { /* went away since check_devices() */
+      g_skip_mask |= 1u << i;
+      continue;
+    }
     trace_wake((uint8_t)(JV_WAKE_FS_MOUNT + (i > 0x3F ? 0x3F : i)));
     int mr = remount_one(i);
     if (mr < 0) {
@@ -584,11 +571,6 @@ int fs_refresh_late(uint32_t timeout_ms) {
     if (!(g_late_mask & bit))
       continue;
     const char *name = fs_name((int)i);
-    /* PS TV: not before the USB storage is back */
-    if (g_storage_usb_gone_t || g_storage_usb_drops) {
-      storage_wait_usb_settled(timeout_ms);
-      trace_wake(JV_WAKE_USB_SETTLED);
-    }
     int st = g_dev_state(name);
     while (st == STORAGE_DEV_NOT_READY &&
            ksceKernelGetSystemTimeWide() - t0 < timeout_ms * 1000LL) {

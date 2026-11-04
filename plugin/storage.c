@@ -6,7 +6,6 @@
 
 #include <psp2kern/io/stat.h>
 #include <psp2kern/io/fcntl.h>
-#include <psp2kern/kernel/threadmgr.h>
 
 #include <stddef.h>
 #include <stdio.h>
@@ -188,56 +187,14 @@ int storage_force_remount_card(const char **root) {
  * directly (0x80010013 on both consoles, c8d049a). "" = none found. */
 static char g_cal_name[N_MOUNTS][40];
 
-volatile int g_storage_probe_busy;
-volatile int64_t g_storage_usb_gone_t, g_storage_usb_back_t;
-volatile int g_storage_usb_drops;
-volatile int g_storage_card_hold;
-static volatile int g_usb_settled;
-static int64_t g_usb_wake_t;
-
-void storage_usb_reset(void) {
-  g_storage_usb_gone_t = 0;
-  g_storage_usb_back_t = 0;
-  g_usb_settled = 0;
-  g_usb_wake_t = ksceKernelGetSystemTimeWide();
-}
-
-uint32_t storage_wait_usb_settled(uint32_t max_ms) {
-  int64_t t0 = ksceKernelGetSystemTimeWide();
-  if (!g_storage_usb_gone_t && !g_storage_usb_drops) {
-    g_usb_settled = 1;
-    g_storage_card_hold = 0;
-    return 0;
-  }
-  while (1) {
-    int64_t now = ksceKernelGetSystemTimeWide();
-    if (g_storage_usb_gone_t) {
-      if (g_storage_usb_back_t && now >= g_storage_usb_back_t + 1000000)
-        break;
-      if (now >= g_storage_usb_gone_t + 6000000)
-        break;
-    } else if (now >= g_usb_wake_t + 4000000) {
-      break; /* expected to go away, but did not within 4 s */
-    }
-    if (now - t0 >= (int64_t)max_ms * 1000)
-      break;
-    ksceKernelDelayThread(100 * 1000);
-  }
-  g_usb_settled = 1;
-  g_storage_card_hold = 0;
-  return (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
-}
-
 static int probe_read(const char *blk, int *open_ret) {
   static uint8_t sec[512] __attribute__((aligned(64)));
-  g_storage_probe_busy = 1;
   SceUID fd = ksceIoOpen(blk, SCE_O_RDONLY, 0);
   int r = -1;
   if (fd >= 0) {
     r = ksceIoRead(fd, sec, sizeof(sec));
     ksceIoClose(fd);
   }
-  g_storage_probe_busy = 0;
   if (open_ret)
     *open_ret = fd;
   return r;
@@ -329,10 +286,6 @@ int storage_dev_state(const char *root) {
     return STORAGE_DEV_UNCHECKED;
   if (!g_cal_name[i][0])
     return STORAGE_DEV_UNKNOWN;
-  /* PS TV (its USB storage goes away and comes back after every wake-up)
-   * or gone: not read until it has settled */
-  if ((g_storage_usb_drops || g_storage_usb_gone_t) && !g_usb_settled)
-    return STORAGE_DEV_NOT_READY;
   return probe_read(g_cal_name[i], NULL) == 512 ? STORAGE_DEV_READY
                                                 : STORAGE_DEV_NOT_READY;
 }

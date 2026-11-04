@@ -70,19 +70,10 @@ enum {
   JV_WAKE_FS_DEV_CHECK,   /* load: checking which drives are there */
   JV_WAKE_FS_DEV_WAIT,    /*   still waiting for one (every 0.5 s) */
   JV_WAKE_FS_DEV_DONE,    /*   checked */
-  JV_WAKE_TICK,           /* heartbeat (separate thread, 0.25 s, loads) */
-  JV_WAKE_TICK_PROBE,     /*   ... while a USB device check was running */
-  JV_WAKE_USB_SETTLED,    /* load: USB storage back after going away */
-  /* + kind * 3 + drive (0 ux0, 1 uma0, 2 xmc0); kind 0 mount, 1 unmount,
-   * 2 unmount refused (the card guard) - from the mount hooks */
-  JV_WAKE_MNT = 0x30,
   JV_WAKE_FS_MOUNT = 0x40 /* + n: load, remounting filesystem n */
 };
 void trace_wake_begin(const PayloadArguments *pa);
 void trace_wake(uint8_t step);
-/* records a step without writing the sector (hooks: no card I/O there);
- * it goes out with the next trace_wake */
-void trace_wake_mem(uint8_t step);
 /* steps are only written to the card once this is on: not during the
  * early resume events (the card's driver may not be back yet) - from the
  * load's filesystem refresh (which uses the card anyway) or the worker */

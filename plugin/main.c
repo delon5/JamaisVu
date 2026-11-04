@@ -392,25 +392,15 @@ ev_done:
           memcpy(g_regsnap, (void *)(REGSNAP_PADDR + 4), sizeof(g_regsnap));
           g_regsnap_ok = 1;
         }
-        storage_usb_reset();
-        /* 76dc33d held all card I/O during PS TV load wake-ups: it still
-         * froze, so the record is written again (it shows when) */
-        g_storage_card_hold = 0;
         trace_wake_begin(&pargs);
         trace_wake(JV_WAKE_RESUME);
-        if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK &&
-            pargs.debug_mode == JV_TEST_NONE)
-          menu_heartbeat_arm();
       } else if (eventid == 0x100000) {
         g_t_resumed = ksceKernelGetSystemTimeWide();
         g_t_fs_done = 0;
         int stale = 0;
 
         if (pargs.mode == JAMAISVU_MODE_LOAD && pargs.result == JV_OK) {
-          /* the refresh below reads the card anyway - not on the PS TV,
-           * where card I/O during the wake-up hung it */
-          if (!g_storage_card_hold)
-            trace_wake_io(1);
+          trace_wake_io(1); /* the refresh below reads the card anyway */
           trace_wake(JV_WAKE_RESUMED);
           /* We are the restored image and the payload has armed
            * FS_WRITES_DROPPED. Re-read ux0 from the card, then allow
@@ -687,13 +677,6 @@ static int arm(void) {
       storage_set_mount_ops((MountFn)mnt, (UmountFn)umnt);
   }
   fs_set_dev_check(storage_dev_state);
-  /* The PS TV special handling (USB storage left alone until it is back,
-   * 232d976-249ee2f) was written while its loads froze; that freeze went
-   * away with the user's LiveArea database clean-up, and f88da30's way -
-   * wait for the USB drive during the wake-up - worked there then (509
-   * ms). Off, so the PS TV runs what was tested; the code stays. */
-  g_storage_usb_drops = 0;
-  (void)ksceSblAimgrIsDolce;
 
   if (patch_syscon() < 0) {
     g_disabled_reason = "could not hook SceSyscon";

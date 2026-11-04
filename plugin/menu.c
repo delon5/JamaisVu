@@ -114,9 +114,6 @@ static volatile int64_t g_lockskip_until; /* 0 = no patch to remove */
 /* a finished load's record, kept open until then (heartbeat thread) */
 static volatile int64_t g_alive_until;
 static void alive_stop(void);
-/* diagnostics: data/JamaisVu/no_cardguard.txt (read at each save/load
- * start) - SceSdstor's unmount of the card is let through, not refused */
-static volatile int g_no_cardguard;
 
 static char g_toast_msg[128];
 static volatile int g_toast_err;
@@ -711,22 +708,56 @@ static void capture(const SceDisplayFrameBuf *p) {
  * without reading it first. Reading the game's framebuffer back is very
  * slow in some games (Trails: 8-47 ms per frame with the old per-row
  * read-modify-write), and it runs in the game's own rendering thread. */
-static uint8_t g_panel_blend[MENU_H], g_toast_blend[TOAST_H];
+/* Per canvas row: how many pixels at its left (l) and right (r) end are
+ * not fully opaque (rounded corners, translucent edges); everything in
+ * between is opaque. l = r = 0: an opaque row; l = w: the whole row is
+ * blended. Only those end pieces read the game's pixels: reading whole
+ * rows back cost ~7 ms per frame at 1080p on the PS TV (e49cbdd log,
+ * compose-read), with the menu flickering. */
+typedef struct {
+  uint16_t l, r;
+} RowSpan;
+static RowSpan g_panel_blend[MENU_H], g_toast_blend[TOAST_H];
 
-static void scan_blend_rows(const Canvas *c, uint8_t *rows) {
+static void scan_blend_rows(const Canvas *c, RowSpan *rows) {
   for (int y = 0; y < c->h; y++) {
     const uint32_t *r = &c->px[y * c->w];
-    int blend = 0;
-    for (int x = 0; x < c->w && !blend; x++)
-      blend = (r[x] >> 24) != 255;
-    rows[y] = (uint8_t)blend;
+    int w = c->w, l = 0;
+    while (l < w && (r[l] >> 24) != 255)
+      l++;
+    int e = w;
+    while (e > l && (r[e - 1] >> 24) != 255)
+      e--;
+    for (int x = l; x < e; x++)
+      if ((r[x] >> 24) != 255) { /* see-through inside: blend it all */
+        l = w;
+        e = w;
+        break;
+      }
+    rows[y].l = (uint16_t)l;
+    rows[y].r = (uint16_t)(w - e);
   }
+}
+
+/* one canvas row at the framebuffer's width, every pixel opaque */
+static void build_row(uint32_t *out, const uint32_t *src, const int *xmap,
+                      int sw, int fw) {
+  if (fw == 2 * sw) { /* the PS TV at 1080p: exactly double, no maths */
+    for (int i = 0; i < sw; i++) {
+      uint32_t v = 0xff000000u | (src[i] & 0x00ffffffu);
+      out[2 * i] = v;
+      out[2 * i + 1] = v;
+    }
+    return;
+  }
+  for (int i = 0; i < fw; i++)
+    out[i] = 0xff000000u | (src[xmap[i]] & 0x00ffffffu);
 }
 
 /* Puts canvas c, laid out at (dx,dy) on a 960x544 screen, onto the
  * framebuffer, scaling to the framebuffer's resolution. */
 static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
-                    const uint8_t *blend_rows, int dx, int dy, int record) {
+                    const RowSpan *spans, int dx, int dy, int record) {
   static int xmap[JV_MAX_FB_W];
   int w = p->width, h = p->height;
   int fx0 = dx * w / JV_SCREEN_W, fy0 = dy * h / JV_SCREEN_H;
@@ -741,35 +772,62 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
   /* time split for log.txt: reading the game's rows, building our rows,
    * copying them into the frame, the final cache clean */
   uint32_t t_read = 0, t_build = 0, t_write = 0, t;
+  int built_sy = -1; /* the canvas row g_rowbuf holds, built opaque */
   for (int j = 0; j < fh; j++) {
     int sy = j * c->h / fh;
     const uint32_t *src = &c->px[sy * c->w];
     uint32_t *dst = (uint32_t *)p->base + (fy0 + j) * p->pitch + fx0;
+    RowSpan sp = spans[sy];
     t = prof_now();
-    if (blend_rows[sy]) {
-      /* only these few rows read the game's pixels */
-      fb_cache_sync(dst, fw * 4);
-      if (jv_copy_from_user(g_rowbuf, dst, fw * 4) < 0)
-        return;
+    if (sp.l == 0 && sp.r == 0) {
+      if (fw == c->w) {
+        /* opaque row at full size (the usual case): every pixel already
+         * has alpha 255, so the panel row is exactly what goes on screen -
+         * copy it straight from there (a copy of each row first cost
+         * ~9.5 ms per frame in Trails, compose-build) */
+        uint32_t t1 = prof_now();
+        t_build += t1 - t;
+        if (jv_copy_to_user(dst, src, fw * 4) < 0) {
+          g_fbd.copy_fail++;
+          return;
+        }
+        t_write += prof_now() - t1;
+        continue;
+      }
+      /* scaled: each canvas row is built once and written to every frame
+       * row it covers (two at 1080p) */
+      if (sy != built_sy) {
+        build_row(g_rowbuf, src, xmap, c->w, fw);
+        built_sy = sy;
+      }
+    } else {
+      /* only the see-through ends read the game's pixels */
+      int dl = sp.l >= c->w ? fw : (sp.l * fw + c->w - 1) / c->w;
+      int dr = sp.l >= c->w ? fw
+                            : ((c->w - sp.r) * fw + c->w - 1) / c->w;
+      if (dl > fw)
+        dl = fw;
+      if (dr < dl)
+        dr = dl;
+      if (dr > fw)
+        dr = fw;
+      built_sy = -1;
+      if (dl > 0) {
+        fb_cache_sync(dst, dl * 4);
+        if (jv_copy_from_user(g_rowbuf, dst, dl * 4) < 0)
+          return;
+      }
+      if (dr < fw) {
+        fb_cache_sync(dst + dr, (fw - dr) * 4);
+        if (jv_copy_from_user(g_rowbuf + dr, dst + dr, (fw - dr) * 4) < 0)
+          return;
+      }
       uint32_t t1 = prof_now();
       t_read += t1 - t;
       t = t1;
-      cv_compose_row(g_rowbuf, src, xmap, fw);
-    } else if (fw == c->w) {
-      /* opaque row at full size (the usual case): every pixel already has
-       * alpha 255, so the panel row is exactly what goes on screen - copy
-       * it straight from there. Building a copy of each row first cost
-       * ~9.5 ms per frame in Trails (log.txt, compose-build). */
-      uint32_t t1 = prof_now();
-      t_build += t1 - t;
-      if (jv_copy_to_user(dst, src, fw * 4) < 0) {
-        g_fbd.copy_fail++;
-        return;
-      }
-      t_write += prof_now() - t1;
-      continue;
-    } else {
-      for (int i = 0; i < fw; i++)
+      cv_compose_row(g_rowbuf, src, xmap, dl);
+      cv_compose_row(g_rowbuf + dr, src, xmap + dr, fw - dr);
+      for (int i = dl; i < dr; i++)
         g_rowbuf[i] = 0xff000000u | (src[xmap[i]] & 0x00ffffffu);
     }
     uint32_t t1 = prof_now();
@@ -810,7 +868,7 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
     int n = 0;
     for (int k = 1; k <= 8; k++) {
       int j = k * fh / 9, sy = j * c->h / fh;
-      if (blend_rows[sy])
+      if (spans[sy].l || spans[sy].r)
         continue;
       for (int q = 1; q <= 4 && n < CHK_N; q++) {
         int x = q * fw / 5;
@@ -833,7 +891,7 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
 /* The render thread: brings the panel up to date with the model. */
 static void render_panel(void) {
   static MenuModel local;
-  static uint8_t blend[BAND_ROWS];
+  static RowSpan blend[BAND_ROWS];
 
   __sync_fetch_and_add(&g_overlay_users, 1);
   __sync_synchronize();
@@ -872,7 +930,7 @@ static void render_panel(void) {
       menu_view_render(&b, &local);
       scan_blend_rows(&b, blend);
       memcpy(&g_panel_px[y0 * MENU_W], g_band_px, rows * MENU_W * 4);
-      memcpy(&g_panel_blend[y0], blend, rows);
+      memcpy(&g_panel_blend[y0], blend, rows * sizeof(RowSpan));
       __sync_synchronize();
     }
     if (xi >= 0)
@@ -1806,7 +1864,7 @@ static void log_append_locked(const char *text) {
   int n = snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d ",
                    t.year, t.month, t.day, t.hour, t.minute, t.second);
 
-  if (g_storage_card_hold || !storage_mc_root() || slots_mkdirs() < 0) {
+  if (!storage_mc_root() || slots_mkdirs() < 0) {
     log_backlog_add(line, n, text);
     return;
   }
@@ -1905,13 +1963,6 @@ static const char *g_card_remount_root;
 static void after_resume(void) {
   static char msg[128];
 
-  /* PS TV after a load: the card only once the wake-up is over and the
-   * USB storage has settled (the record is kept in memory until then) */
-  if (g_storage_card_hold) {
-    trace_wake(JV_WAKE_WORKER);
-    storage_wait_usb_settled(8000);
-    trace_wake(JV_WAKE_USB_SETTLED);
-  }
   trace_wake_io(1);
   trace_wake(JV_WAKE_WORKER);
 
@@ -1929,12 +1980,6 @@ static void after_resume(void) {
     if (g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_LOAD &&
         g_res_result == JV_OK) {
       const char *root = NULL;
-      /* PS TV: nothing on the card or the USB storage until SceSdstor is
-       * done bringing the USB storage back */
-      if (g_storage_usb_gone_t || g_storage_usb_drops) {
-        storage_wait_usb_settled(8000);
-        trace_wake(JV_WAKE_USB_SETTLED);
-      }
       trace_wake(JV_WAKE_CARD_REMOUNT);
       g_card_remount_ret = storage_force_remount_card(&root);
       g_card_remount_root = root;
@@ -2109,27 +2154,9 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
      * this patch again before the sleep: seen at 21:58:49, one second
      * after a load started within 10 s of the save before it */
     g_lockskip_until = 0;
-    /* diagnostics: data/JamaisVu/no_lockskip.txt leaves SceShell alone
-     * (PS TV loads hang; it is the only console here where JamaisVu
-     * patches the lock screen itself - the PCH-1000 has NoLockScreen) */
-    static char nls[80];
-    SceIoStat nst;
-    jv_file_path(nls, sizeof(nls), "no_lockskip.txt");
-    if (storage_mc_root() && ksceIoGetstat(nls, &nst) >= 0) {
-      snprintf(line, sizeof(line), "    lock screen skip: off "
-               "(no_lockskip.txt)\r\n");
-    } else {
-      lockskip_apply(ls, sizeof(ls));
-      snprintf(line, sizeof(line), "    %s\r\n", ls);
-    }
+    lockskip_apply(ls, sizeof(ls));
+    snprintf(line, sizeof(line), "    %s\r\n", ls);
     log_append(line);
-    /* diagnostics: no_cardguard.txt - SceSdstor may unmount the card
-     * after the wake-up (PS TV: it tries ~0.77 s after every wake-up,
-     * right where loads freeze) */
-    jv_file_path(nls, sizeof(nls), "no_cardguard.txt");
-    g_no_cardguard = storage_mc_root() && ksceIoGetstat(nls, &nst) >= 0;
-    if (g_no_cardguard)
-      log_append("    card guard: off (no_cardguard.txt)\r\n");
   }
 
   if (jv_request(mode, slot, nonce, debug_mode, trel,
@@ -2932,16 +2959,7 @@ static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
   g_mount_ev[k].lr = lr;
   g_mount_ev[k].pid = ksceKernelGetProcessId();
   g_mount_ev[k].ms = g_t_resume ? (int)((now - g_t_resume) / 1000) : -1;
-  /* into the wake-up record too (PS TV loads: the console died 1-4 s
-   * after the wake-up, around SceSdstor's unmount of uma0) */
-  if (g_storage_usb_drops && g_t_resume && now - g_t_resume < 15000000)
-    trace_wake_mem((uint8_t)(JV_WAKE_MNT + (unmount > 2 ? 2 : unmount) * 3 +
-                             (id == 0x800 ? 0 : id == 0xF00 ? 1 : 2)));
 }
-
-/* Heartbeat for the first seconds after a load's wake-up: where the PS TV
- * dies (1-4 s after it, whatever the plugin was doing) */
-static volatile int64_t g_hb_until;
 
 /* before a new run: the last load's record is closed first */
 static void alive_stop(void) {
@@ -2952,12 +2970,6 @@ static void alive_stop(void) {
   ksceKernelDelayThread(50 * 1000); /* a write in progress ends */
 }
 
-void menu_heartbeat_arm(void) {
-  /* PS TV only: on the others it would fill the 64-step record */
-  if (g_storage_usb_drops)
-    g_hb_until = ksceKernelGetSystemTimeWide() + 6000000;
-}
-
 static int heartbeat_thread(SceSize args, void *argp) {
   (void)args;
   (void)argp;
@@ -2965,8 +2977,6 @@ static int heartbeat_thread(SceSize args, void *argp) {
   while (1) {
     ksceKernelDelayThread(250 * 1000);
     int64_t now = ksceKernelGetSystemTimeWide();
-    if (g_hb_until && now < g_hb_until)
-      trace_wake(g_storage_probe_busy ? JV_WAKE_TICK_PROBE : JV_WAKE_TICK);
     int64_t until = g_alive_until;
     if (!until) {
       next_alive = 0;
@@ -3031,13 +3041,8 @@ static int umount_hook(int id, int a2, int a3, int a4) {
                              : -1;
   if (since >= 0 && since < 15000000 &&
       g_sdstor_hi && lr >= g_sdstor_lo && lr < g_sdstor_hi &&
-      !g_no_cardguard &&
       ((id == 0xF00 && g_card_on[0]) || (id == 0xE00 && g_card_on[1]))) {
     mount_note(2, id, a2, 0, lr); /* refused, reported as done */
-    /* PS TV only: the PCH-1000 sees this unmount too (after saves), and
-     * its loads work as they are (f88da30) */
-    if (g_storage_usb_drops && !g_storage_usb_gone_t)
-      g_storage_usb_gone_t = ksceKernelGetSystemTimeWide();
     return 0;
   }
   int ret = TAI_CONTINUE(int, g_umount_ref, id, a2, a3, a4);
@@ -3050,10 +3055,6 @@ static int mount_hook(int id, const char *path, int perm, int a4, int a5,
   uintptr_t lr = (uintptr_t)__builtin_return_address(0);
   int ret = TAI_CONTINUE(int, g_mount_ref, id, path, perm, a4, a5, a6);
   mount_note(0, id, perm, ret, lr);
-  /* SceSdstor mounting again after it let the USB storage go */
-  if (g_storage_usb_gone_t && g_sdstor_hi && lr >= g_sdstor_lo &&
-      lr < g_sdstor_hi)
-    g_storage_usb_back_t = ksceKernelGetSystemTimeWide();
   return ret;
 }
 

@@ -99,33 +99,6 @@ int storage_dev_state(const char *root);
 /* At start (the drive works then): finds the device name the check above
  * can read, and describes every name tried in out. */
 int storage_dev_calibrate(const char *root, char *out, int len);
-/* 1 while one of these checks is reading a device (diagnostics) */
-extern volatile int g_storage_probe_busy;
 
-/* PS TV: ~0.8 s after a wake-up SceSdstor unmounts uma0 (refused by the
- * card guard) - its USB storage going away to come back. Reading the USB
- * device in that time is what the PS TV died of after loads (4023c9c:
- * 0.4-0.6 s after that unmount, while the plugin read the USB stick).
- * menu.c sets these from its mount hooks (system time, 0 = not seen);
- * main.c clears them at each wake-up. */
-extern volatile int64_t g_storage_usb_gone_t, g_storage_usb_back_t;
-/* waits (at most max_ms) until the USB storage that went away is back -
- * SceSdstor mounting again, plus 1 s - or 6 s after it went away; returns
- * at once when nothing went away. Returns the ms waited. */
-uint32_t storage_wait_usb_settled(uint32_t max_ms);
-/* at each wake-up: nothing went away yet */
-void storage_usb_reset(void);
-/* set at start on the PS TV: its USB storage goes away ~0.8 s after
- * every wake-up and comes back - reading it around then killed the PS TV
- * (232d976: within 0.15 s of the first read, 0.73 s after waking) */
-extern volatile int g_storage_usb_drops;
-/* PS TV, after a load: no card I/O at all until the wake-up is over and
- * the USB storage has settled (set at the first resume event, cleared by
- * storage_wait_usb_settled). The record and the log lines stay in memory
- * meanwhile. Writing the card from within the wake-up is what hung the
- * PS TV: no picture ever came back, a fresh boot 5-10 s later, and the
- * record always ended at the first write in the wake-up (249ee2f:
- * dev-check@667, then not even the next step 1 ms later). */
-extern volatile int g_storage_card_hold;
 
 #endif
