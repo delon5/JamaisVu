@@ -6,19 +6,24 @@
 
 ## Status
 
-> **Tested on a 3.60 PCH-2000** with an official Memory Card as ux0: dry run, save and load passed on hardware. It is still young software, so back up your Memory Card (at least `ux0:user/00/savedata` and `ux0:data/JamaisVu`) before relying on it.
+> **Tested on 3.60** on three consoles, save and load passed on hardware:
+> - **PCH-2000** with an official Memory Card as ux0
+> - **PCH-1000 (OLED)** with usbmc: a PSVSD (USB) as ux0, the Memory Card on uma0
+> - **PS TV** with usbmc: a USB stick as ux0, the Memory Card on uma0, pstv1080p + sharpscale (1080p games)
+>
+> It is still young software, so back up your Memory Card (at least `ux0:user/00/savedata` and `ux0:data/JamaisVu`) before relying on it.
 
 | Firmware | Status |
 | --- | --- |
 | 3.65 | Supported (the only firmware the original plugin was tested on) |
 | 3.67, 3.68, 3.69–3.73 | Offsets present but **unverified**. Disabled unless built with `-DJAMAISVU_ALLOW_UNVERIFIED_FW=ON` |
-| 3.60 | **Supported**: offsets checked against a dump of a retail 3.60 console ([details](docs/porting-3.60.md)); save and load tested on a PCH-2000 |
+| 3.60 | **Supported**: offsets checked against a dump of a retail 3.60 console ([details](docs/porting-3.60.md)); save and load tested on a PCH-2000, a PCH-1000 and a PS TV |
 
 On any firmware without a verified offset table, the plugin installs no filesystem hooks and changes nothing. START + UP still opens the menu in **preview mode**, so the interface can be tried, but Save and Load explain why they are unavailable. `ux0:data/JamaisVu/status.txt` records the reason and the module NIDs it found. To help add 3.60, run the read-only [jvdump](tools/jvdump/README.md) plugin once and share its output.
 
 ## Requirements
 
-- **An official Sony Memory Card.** JamaisVu writes **only** to the official Memory Card: slot files, slot info, thumbnails and `status.txt`. It never writes to an SD2Vita, PSVSD, USB stick or the internal storage. Ideally use a card dedicated to savestates, so the worst a failure can cost is savestates. The card may be mounted as ux0, or as uma0/xmc0 when a storage plugin (StorageMgr, YAMT, gamesd) put an SD2Vita/PSVSD/USB stick on ux0. JamaisVu reads the system's mount table to find which mount is the card (device `sdstor0:xmc-…`); finding it writes nothing.
+- **An official Sony Memory Card.** JamaisVu writes **only** to the official Memory Card: slot files, slot info, thumbnails and `status.txt`. It never writes to an SD2Vita, PSVSD, USB stick or the internal storage. Ideally use a card dedicated to savestates, so the worst a failure can cost is savestates. The card may be mounted as ux0, or as uma0/xmc0 when a storage plugin (StorageMgr, YAMT, gamesd, usbmc) put an SD2Vita/PSVSD/USB stick on ux0. JamaisVu reads the system's mount table to find which mount is the card (device `sdstor0:xmc-…`); finding it writes nothing.
   - Savedata is only rolled back by a load when it lives on the Memory Card, i.e. when the card is ux0. With an SD2Vita/PSVSD as ux0, a load restores the game but **not** its savedata (the load prompt says so).
 - **704 MB of free space on the Memory Card per slot.** Each slot is a fixed-size file that is created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free. To avoid the wait in a game, open the menu from the **LiveArea** and prepare slots ahead of time: ✕ prepares the selected slot, △ all slots that fit. Prepared but unused slots show **READY**.
 - **Slots unlock with free space** on the Memory Card. Slots you have already used stay available. Each new slot needs 704 MB: about 1 GB free unlocks one slot, 1.5 GB two, and so on. Locked slots show a padlock.
@@ -68,6 +73,8 @@ Each slot shows a thumbnail of the game screen at the moment you saved, the game
 - **Loading** works from inside a game and from the **LiveArea**. Saving does not: Save only appears when a running game is on screen, and this is checked again right before the save starts. A game suspended in the background doesn't count, so the LiveArea/shell can never be snapshotted.
 - **No lock screen after a save or load** (handhelds and PS TV, no NoLockScreen plugin needed). JamaisVu patches SceShell in memory just for that wake-up and removes the patch about 10 s later, so ordinary sleep still locks. Retail 3.60 and 3.65–3.74 only; on other SceShell builds the lock screen appears as usual. `log.txt` says whether it was applied.
 - During save and load **the game card LED is on**. If it **blinks rapidly**, see [If a load fails](#if-a-load-fails).
+- **After a load with a USB drive as ux0** (usbmc), the game comes back a little later than after a save: JamaisVu first waits for the USB drive to be back from the wake-up (about 0.5–0.8 s) before re-reading it. On the PCH-1000 re-checking the files open on the internal storage adds several more seconds; the game picture returns about 10 s after the wake-up there.
+- **After a normal sleep** (power button), usbmc's Memory Card mount (uma0) drops out. JamaisVu mounts the card again within about half a second of the wake-up; a slot pressed before that says the card isn't mounted yet.
 
 A savestate contains the savedata of the games that were running. Loading a slot puts that savedata back, so progress made after the snapshot is lost.
 
@@ -100,7 +107,12 @@ A corrupted or tampered state is rejected with nothing changed.
 - Savedata restore can only write inside ux0's exFAT area, never the partition table or boot sectors.
 - The mediaid sector is restored only to the sector it came from, and can no longer fall back to sector 0 (the MBR), which the original could.
 
-**The restored OS cannot write with stale caches.** The payload arms a write block *inside the restored memory image*. The plugin remounts ux0 from the card before writes are allowed again. If a file that was open at snapshot time no longer exists, ux0 stays **read-only until restart** rather than risk writing to the wrong clusters.
+**The restored OS cannot write with stale caches.** The payload arms a write block *inside the restored memory image*. The plugin re-reads every exFAT drive from its storage before writes are allowed again. If a file that was open at snapshot time no longer exists, **that drive** stays **read-only until restart** rather than risk writing to the wrong clusters. The other drives, including the system's own internal storage, stay writable. (Blocking writes on every drive, as an earlier version did, left the system unable to write anything and made it restart.)
+
+**Storage that is away during the wake-up is not touched.** With a storage plugin, the drives behind ux0 and uma0 come back from the wake-up at their own pace:
+- **A USB drive as ux0** (usbmc's PSVSD or USB stick) is only re-read once one sector of it can be read again. JamaisVu waits up to 3 s during the wake-up, and up to 20 s more afterwards. Until then it stays exactly as it was and read-only. Re-reading it too early failed and left ux0 unusable: the game went black, VitaShell reported its data as corrupt, and the PS TV restarted.
+- **The Memory Card on uma0/xmc0** is not re-read in place. It is mounted afresh once the wake-up is over. During the first 15 s after JamaisVu's own wake-ups, the **card guard** refuses the system storage driver's attempt to unmount it.
+- **A drive that disappears** while the wake-up checks the drives (its mount is being taken down) is left alone, neither remounted nor read.
 
 **Unsupported firmware is never patched.** The original hooked 3.65 offsets on every firmware. On 3.60 that means patching random instructions inside the filesystem driver.
 
@@ -112,9 +124,12 @@ A corrupted or tampered state is rejected with nothing changed.
 
 No software can promise "100 %". These are the remaining risks:
 
-- **Hardware coverage.** Tested on one console model and firmware (3.60, PCH-2000, Memory Card as ux0). See *Status* above.
+- **Hardware coverage.** Tested on 3.60 only: a PCH-2000 (card as ux0), a PCH-1000 and a PS TV (both with usbmc). Other storage plugins and setups are untested. See *Status* above.
 - **Load is inherently invasive.** It replaces the entire OS memory. The ux0 remount (`plugin/fs.c`, inherited from the original) refreshes the exFAT driver's caches, but it is reverse-engineered code. JamaisVu's protections make an inconsistency fail safe (read-only) rather than silently corrupt, but it can't rule out every bug in that path.
 - **A card I/O error in the middle of a load.** The payload stops (the LED blinks) instead of resuming a half-restored system. Savedata of the loaded game may be partially restored, as after a power cut.
+- **A slot brings back the system as it was when it was saved**, plugin settings included. A slot saved while something was wrong will bring it back on every load. Overwrite it with a new save rather than loading it again.
+- **An oversized home screen.** On the PS TV, loads froze while the LiveArea had more apps than it could show and rebuilt its database at every restart. They worked again once the home screen was cleaned up. This is likely but not proven to be the cause. If loads start freezing, check that every installed app has a bubble.
+- **What the log shows.** Every run is recorded in `data/JamaisVu/log.txt`. When it grows past 64 KB it is renamed `log.old.txt` and a new one starts, so the run before a restart is always kept. A load's step record (`trace.bin`) stays open for 60 s after the wake-up, so a later restart still shows how long the system lived.
 
 ### If a load fails
 
