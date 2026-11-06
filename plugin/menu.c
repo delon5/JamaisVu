@@ -54,7 +54,10 @@ static volatile int g_cancel_req; /* ○ while preparing a slot */
  * during gameplay JamaisVu holds none of this memory. The display hook
  * counts itself in g_overlay_users, so the memory is only freed once no
  * frame is being drawn with it. */
-static SceUID g_mem_blk = -1;
+/* the menu's memory, in three blocks (one 1.6 MB block was refused in
+ * Chinatown Wars on the PS TV, by every pool): image, thumbnails, rest */
+#define OVL_PIECES 3
+static SceUID g_mem_blks[OVL_PIECES] = { -1, -1, -1 };
 static SceUID g_ovl_mtx = -1;
 static volatile int g_overlay_ready;
 static volatile int g_overlay_users;
@@ -548,43 +551,99 @@ static void set_message(MenuMode mode, const char *msg, int progress,
 }
 
 /* what each memory pool returned the last time (for log.txt) */
-static int g_ovl_alloc_ret[3], g_ovl_alloc_type;
+/* The kernel root pool (KERNEL_RW) can be full with many kernel plugins
+ * (PCH-1000 log: "not enough free kernel memory"); then the root pool's
+ * physically contiguous part, then kernel memory from the user main pool,
+ * each only for as long as the menu is shown. */
+static const SceKernelMemBlockType k_ovl_types[3] = {
+  0x1020D006, /* KERNEL_ROOT_RW (= KERNEL_RW) */
+  0x1080D006, /* KERNEL_ROOT_PHYCONT_RW (2 MB worked in Dead Nation) */
+  0x10C0D006, /* KERNEL_ROOT_UMAIN_RW */
+};
+static const char *const k_ovl_pool_names[3] = { "root", "root contiguous",
+                                                 "user main" };
+static const char *const k_ovl_piece_names[OVL_PIECES] = {
+  "menu image", "thumbnails", "buffers" };
+static uint8_t g_ovl_piece_pool[OVL_PIECES];
+static int g_ovl_fail_piece = -1;
+static uint32_t g_ovl_fail_size;
+static int g_ovl_fail_ret[3];
+
+static uint32_t ovl_piece_size(int k) {
+  uint32_t ext = 2 * ((sizeof(ExtGlyphs) + 3) & ~3u);
+  uint32_t n = k == 0 ? MENU_W * MENU_H * 4
+             : k == 1 ? (JV_NUM_SLOTS + 1) * THUMB_PX * 4
+             : TOAST_W * TOAST_H * 4 + JV_MAX_FB_W * 4 +
+               MENU_W * BAND_ROWS * 4 + ext;
+  return (n + 0xfff) & ~0xfff;
+}
+
+static void *ovl_piece_alloc(int k) {
+  uint32_t size = ovl_piece_size(k);
+  for (int i = 0; i < 3; i++) {
+    SceUID uid = ksceKernelAllocMemBlock("JamaisVuMenu", k_ovl_types[i], size,
+                                         NULL);
+    g_ovl_fail_ret[i] = uid;
+    void *base = NULL;
+    if (uid >= 0 && ksceKernelGetMemBlockBase(uid, &base) >= 0 && base) {
+      g_mem_blks[k] = uid;
+      g_ovl_piece_pool[k] = (uint8_t)i;
+      return base;
+    }
+    if (uid >= 0)
+      ksceKernelFreeMemBlock(uid);
+  }
+  g_ovl_fail_piece = k;
+  g_ovl_fail_size = size;
+  return NULL;
+}
+
+static void ovl_pieces_free(void) {
+  for (int k = 0; k < OVL_PIECES; k++) {
+    if (g_mem_blks[k] >= 0)
+      ksceKernelFreeMemBlock(g_mem_blks[k]);
+    g_mem_blks[k] = -1;
+  }
+}
+
+/* diagnostics, only after a refusal: the largest block each pool would
+ * still give (found by trying, in 64 KB steps, and freeing at once) */
+static uint32_t ovl_largest_free(SceKernelMemBlockType t) {
+  uint32_t lo = 0, hi = 4u << 20;
+  while (hi - lo > 0x10000) {
+    uint32_t mid = ((lo + hi) / 2) & ~0xffffu;
+    if (mid <= lo)
+      mid = lo + 0x10000;
+    SceUID uid = ksceKernelAllocMemBlock("JamaisVuProbe", t, mid, NULL);
+    if (uid >= 0) {
+      ksceKernelFreeMemBlock(uid);
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
 
 static int overlay_acquire(void) {
   int res = 0;
-  void *base;
 
   if (g_ovl_mtx >= 0)
     ksceKernelLockMutex(g_ovl_mtx, 1, NULL);
   if (!g_overlay_ready) {
-    uint32_t size = MENU_W * MENU_H * 4 + TOAST_W * TOAST_H * 4 +
-                    (JV_NUM_SLOTS + 1) * THUMB_PX * 4 + JV_MAX_FB_W * 4 +
-                    MENU_W * BAND_ROWS * 4 + 2 * ((sizeof(ExtGlyphs) + 3) & ~3u);
-    size = (size + 0xfff) & ~0xfff;
-    /* The kernel root pool (KERNEL_RW) can be full with many kernel
-     * plugins (PCH-1000 log: "not enough free kernel memory"); then the
-     * root pool's physically contiguous part, then kernel memory from the
-     * user main pool, each only for as long as the menu is shown. */
-    static const SceKernelMemBlockType types[3] = {
-      0x1020D006, /* KERNEL_ROOT_RW (= KERNEL_RW) */
-      0x1080D006, /* KERNEL_ROOT_PHYCONT_RW (2 MB worked in Dead Nation) */
-      0x10C0D006, /* KERNEL_ROOT_UMAIN_RW */
-    };
-    g_mem_blk = -1;
-    for (int i = 0; i < 3 && g_mem_blk < 0; i++) {
-      g_mem_blk = ksceKernelAllocMemBlock("JamaisVuMenu", types[i], size,
-                                          NULL);
-      g_ovl_alloc_ret[i] = g_mem_blk;
-      g_ovl_alloc_type = i;
-    }
-    if (g_mem_blk >= 0 && ksceKernelGetMemBlockBase(g_mem_blk, &base) >= 0) {
-      uint32_t *p = base;
-      g_panel_px = p;  p += MENU_W * MENU_H;
-      g_toast_px = p;  p += TOAST_W * TOAST_H;
+    g_ovl_fail_piece = -1;
+    uint32_t *panel = ovl_piece_alloc(0);
+    uint32_t *thumbs = panel ? ovl_piece_alloc(1) : NULL;
+    uint32_t *rest = thumbs ? ovl_piece_alloc(2) : NULL;
+    if (rest) {
+      g_panel_px = panel;
+      uint32_t *p = thumbs;
       for (int i = 0; i <= JV_NUM_SLOTS; i++) {
         g_thumbs[i] = p;
         p += THUMB_PX;
       }
+      p = rest;
+      g_toast_px = p;  p += TOAST_W * TOAST_H;
       g_rowbuf = p;    p += JV_MAX_FB_W;
       g_band_px = p;   p += MENU_W * BAND_ROWS;
       for (int k = 0; k < 2; k++) {
@@ -597,9 +656,7 @@ static int overlay_acquire(void) {
       __sync_synchronize();
       g_overlay_ready = 1;
     } else {
-      if (g_mem_blk >= 0)
-        ksceKernelFreeMemBlock(g_mem_blk);
-      g_mem_blk = -1;
+      ovl_pieces_free();
       res = -1;
     }
   }
@@ -619,8 +676,7 @@ static void overlay_release(void) {
       ksceKernelDelayThread(1000);
     if (g_overlay_users == 0) {
       model_clear_thumbs(); /* the model must not point into freed memory */
-      ksceKernelFreeMemBlock(g_mem_blk);
-      g_mem_blk = -1;
+      ovl_pieces_free();
       g_panel_px = g_toast_px = g_rowbuf = g_band_px = NULL;
       g_ext_set[0] = g_ext_set[1] = NULL;
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
@@ -1286,30 +1342,46 @@ static void perf_report(void) {
 }
 
 static int open_menu(void) {
-  static int warned;
   perf_report();
   int had = g_overlay_ready;
   if (overlay_acquire() < 0) {
     /* like reVita's "Buy more RAM": refuse rather than take memory the
-     * system needs; noted once per boot */
-    if (!warned) {
-      static char line[200];
-      warned = 1;
+     * system needs; noted once per game (title) with what is free */
+    static char last_tid[16];
+    char tid[16];
+    memset(tid, 0, sizeof(tid));
+    ksceKernelGetProcessTitleId(ksceKernelGetProcessId(), tid, sizeof(tid));
+    tid[sizeof(tid) - 1] = '\0';
+    if (strcmp(tid, last_tid) != 0) {
+      static char line[320];
+      memcpy(last_tid, tid, sizeof(last_tid));
+      int k = g_ovl_fail_piece < 0 ? 0 : g_ovl_fail_piece;
       snprintf(line, sizeof(line), "menu not opened: not enough free kernel "
-               "memory for the overlay (~1.6 MB) in any pool (root 0x%08X, "
-               "root contiguous 0x%08X, user main 0x%08X)\r\n",
-               (unsigned)g_ovl_alloc_ret[0], (unsigned)g_ovl_alloc_ret[1],
-               (unsigned)g_ovl_alloc_ret[2]);
+               "memory for the %s (%u KB; root 0x%08X, root contiguous "
+               "0x%08X, user main 0x%08X); largest free blocks now: root %u "
+               "KB, root contiguous %u KB, user main %u KB (menu needs %u + "
+               "%u + %u KB)\r\n", k_ovl_piece_names[k],
+               (unsigned)(g_ovl_fail_size >> 10),
+               (unsigned)g_ovl_fail_ret[0], (unsigned)g_ovl_fail_ret[1],
+               (unsigned)g_ovl_fail_ret[2],
+               (unsigned)(ovl_largest_free(k_ovl_types[0]) >> 10),
+               (unsigned)(ovl_largest_free(k_ovl_types[1]) >> 10),
+               (unsigned)(ovl_largest_free(k_ovl_types[2]) >> 10),
+               (unsigned)(ovl_piece_size(0) >> 10),
+               (unsigned)(ovl_piece_size(1) >> 10),
+               (unsigned)(ovl_piece_size(2) >> 10));
       log_queue(line);
     }
     return -1;
   }
-  if (!had && g_ovl_alloc_type > 0) {
+  if (!had && (g_ovl_piece_pool[0] || g_ovl_piece_pool[1] ||
+               g_ovl_piece_pool[2])) {
     static char line[200];
-    snprintf(line, sizeof(line), "menu memory from the %s pool (root 0x%08X"
-             "%s)\r\n", g_ovl_alloc_type == 1 ? "root contiguous" :
-             "user main", (unsigned)g_ovl_alloc_ret[0],
-             g_ovl_alloc_type == 2 ? ", root contiguous refused too" : "");
+    snprintf(line, sizeof(line), "menu memory: %s from the %s pool, %s from "
+             "the %s pool, %s from the %s pool\r\n", k_ovl_piece_names[0],
+             k_ovl_pool_names[g_ovl_piece_pool[0]], k_ovl_piece_names[1],
+             k_ovl_pool_names[g_ovl_piece_pool[1]], k_ovl_piece_names[2],
+             k_ovl_pool_names[g_ovl_piece_pool[2]]);
     log_queue(line);
   }
   g_capture_ok = 0;
