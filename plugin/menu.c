@@ -108,6 +108,11 @@ static inline int img_edge(const Img16 *im, int y) {
 static inline uint16_t *img_row16(const Img16 *im, int y) {
   return im->strip[y / im->strip_rows] + (y % im->strip_rows) * im->w;
 }
+/* 0: test build without the process-event hook (random reboots since it
+ * was added, one as VitaShell was started from the LiveArea) */
+#ifndef JV_PROCEV_HOOK
+#define JV_PROCEV_HOOK 0
+#endif
 static volatile SceUID g_fg_pid; /* app in the foreground, 0: none known */
 static SceUID g_ovl_mtx = -1;
 static volatile int g_overlay_ready;
@@ -1544,7 +1549,7 @@ static void fg_title(char *tid, int len) {
   SceUID pid = g_fg_pid;
   memset(tid, 0, len);
   if (!pid || ksceKernelGetProcessTitleId(pid, tid, len) < 0 || !tid[0])
-    snprintf(tid, len, pid ? "?" : "LiveArea");
+    snprintf(tid, len, pid || !JV_PROCEV_HOOK ? "?" : "LiveArea");
   tid[len - 1] = '\0';
 }
 
@@ -3678,10 +3683,18 @@ int menu_init(const char *status_text) {
   CTRL_HOOKS(INSTALL_CTRL_HOOK)
 
   /* app starts/resumes: is the PSP emulator in front? (as PSV-Shell-Plus) */
+#if JV_PROCEV_HOOK
   g_procev_hook = taiHookFunctionImportForKernel(
       KERNEL_PID, &g_procev_ref, "SceProcessmgr", 0x887F19D0, 0x414CC813,
       procev_hook);
-  if (g_procev_hook < 0) {
+#else
+  /* test build: the process-event hook stays out (reboots when apps start,
+   * e.g. VitaShell from the LiveArea, since d132bb4) */
+  (void)procev_hook;
+  log_queue("test build: PSP emulator check (process-event hook) off - "
+            "the menu also opens in PSP/PS1 games\r\n");
+#endif
+  if (JV_PROCEV_HOOK && g_procev_hook < 0) {
     static char line[96];
     snprintf(line, sizeof(line), "PSP emulator check not available (hook "
              "0x%08X): the menu also opens in PSP/PS1 games\r\n",
