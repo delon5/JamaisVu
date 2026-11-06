@@ -920,108 +920,41 @@ static void scan_blend_rows(const Canvas *c, RowSpan *rows) {
   }
 }
 
-/* one canvas row at the framebuffer's width, every pixel opaque */
-static void build_row(uint32_t *out, const uint32_t *src, const int *xmap,
-                      int sw, int fw) {
-  if (fw == 2 * sw) { /* the PS TV at 1080p: exactly double, no maths */
-    for (int i = 0; i < sw; i++) {
-      uint32_t v = 0xff000000u | (src[i] & 0x00ffffffu);
-      out[2 * i] = v;
-      out[2 * i + 1] = v;
+/* One stored (RGB565) row at the framebuffer's width, every pixel opaque:
+ * converted and scaled in one pass (3401860..86d4b1c converted it into a
+ * separate row first: ~11 ms per frame at 1080p in GTA: San Andreas). */
+static void build_row565(uint32_t *out, const uint16_t *src, const int *xmap,
+                         int sw, int fw) {
+  /* rows are 4-byte aligned and an even number of pixels wide: two pixels
+   * per read */
+  const uint32_t *two = (const uint32_t *)src;
+  if (fw == sw && !(sw & 1)) {
+    for (int i = 0; i < sw / 2; i++) {
+      uint32_t v = two[i];
+      out[2 * i] = rgb565_to_rgba((uint16_t)v);
+      out[2 * i + 1] = rgb565_to_rgba((uint16_t)(v >> 16));
+    }
+    return;
+  }
+  if (fw == 2 * sw && !(sw & 1)) { /* the PS TV at 1080p: exactly double */
+    for (int i = 0; i < sw / 2; i++) {
+      uint32_t v = two[i];
+      uint32_t a = rgb565_to_rgba((uint16_t)v);
+      uint32_t b = rgb565_to_rgba((uint16_t)(v >> 16));
+      out[4 * i] = a;
+      out[4 * i + 1] = a;
+      out[4 * i + 2] = b;
+      out[4 * i + 3] = b;
     }
     return;
   }
   for (int i = 0; i < fw; i++)
-    out[i] = 0xff000000u | (src[xmap[i]] & 0x00ffffffu);
-}
-
-/* an image as compose reads it: one 32-bit row at a time */
-typedef struct {
-  const uint32_t *(*row)(int y);
-  int w, h;
-} Image;
-
-static inline const uint32_t *image_row(const Image *c, int y) {
-  return c->row(y);
-}
-
-/* row y of a 16-bit image as 32-bit pixels in buf (corners as stored) */
-static const uint32_t *img_row32(const Img16 *im, int y, uint32_t *buf) {
-  const uint16_t *s = img_row16(im, y);
-  for (int x = 0; x < im->w; x++)
-    buf[x] = rgb565_to_rgba(s[x]);
-  int e = img_edge(im, y);
-  if (e >= 0) {
-    const uint32_t *c = im->corner + e * 2 * MENU_EDGE_COLS;
-    memcpy(buf, c, MENU_EDGE_COLS * 4);
-    memcpy(buf + im->w - MENU_EDGE_COLS, c + MENU_EDGE_COLS,
-           MENU_EDGE_COLS * 4);
-  }
-  return buf;
-}
-
-/* compose reads one row at a time: converted once per row and call */
-static uint32_t g_row32[MENU_W], g_trow32[TOAST_W];
-static int g_row32_y = -1, g_trow32_y = -1;
-
-static const uint32_t *panel_src_row(int y) {
-  if (y != g_row32_y) {
-    img_row32(&g_panel_img, y, g_row32);
-    g_row32_y = y;
-  }
-  return g_row32;
-}
-
-static const uint32_t *toast_src_row(int y) {
-  if (y != g_trow32_y) {
-    img_row32(&g_toast_img, y, g_trow32);
-    g_trow32_y = y;
-  }
-  return g_trow32;
-}
-
-/* Stores rendered band rows (32-bit, image rows y0 ..) in a 16-bit image:
- * every pixel as RGB565 (nearest shade), the corners also 32-bit (alpha
- * kept, colours rounded the same way). Only the corners may be
- * see-through: anything else is shown opaque (noted once in log.txt). */
-static void img_store_rows(Img16 *im, const uint32_t *band, int y0,
-                           int rows, RowSpan *blend) {
-  static int warned;
-  for (int r = 0; r < rows; r++) {
-    int y = y0 + r;
-    const uint32_t *src = band + r * im->w;
-    uint16_t *dst = img_row16(im, y);
-    for (int x = 0; x < im->w; x++)
-      dst[x] = rgba_to_565_round(src[x]);
-    int e = img_edge(im, y);
-    int lim = e >= 0 ? MENU_EDGE_COLS : 0;
-    if (e >= 0) {
-      uint32_t *c = im->corner + e * 2 * MENU_EDGE_COLS;
-      for (int x = 0; x < MENU_EDGE_COLS; x++) {
-        c[x] = rgba_as_565(src[x]);
-        c[MENU_EDGE_COLS + x] = rgba_as_565(src[im->w - MENU_EDGE_COLS + x]);
-      }
-    }
-    if (blend[r].l > lim || blend[r].r > lim) {
-      if (!warned) {
-        static char line[112];
-        warned = 1;
-        snprintf(line, sizeof(line), "menu image %dx%d: row %d see-through "
-                 "beyond its corners (%u/%u) - shown opaque\r\n", im->w,
-                 im->h, y, blend[r].l, blend[r].r);
-        log_queue(line);
-      }
-      if (blend[r].l > lim)
-        blend[r].l = (uint16_t)lim;
-      if (blend[r].r > lim)
-        blend[r].r = (uint16_t)lim;
-    }
-  }
+    out[i] = rgb565_to_rgba(src[xmap[i]]);
 }
 
 /* Puts image c, laid out at (dx,dy) on a 960x544 screen, onto the
  * framebuffer, scaling to the framebuffer's resolution. */
-static void compose(const SceDisplayFrameBuf *p, const Image *c,
+static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
                     const RowSpan *spans, int dx, int dy, int record) {
   static int xmap[JV_MAX_FB_W];
   int w = p->width, h = p->height;
@@ -1030,40 +963,26 @@ static void compose(const SceDisplayFrameBuf *p, const Image *c,
 
   if (fw <= 0 || fh <= 0 || fx0 + fw > w || fy0 + fh > h)
     return;
-  g_row32_y = g_trow32_y = -1; /* the images may have changed meanwhile */
 
   for (int i = 0; i < fw; i++)
     xmap[i] = i * c->w / fw;
 
-  /* time split for log.txt: reading the game's rows, building our rows,
-   * copying them into the frame, the final cache clean */
+  /* time split for log.txt: reading the game's rows, building our rows
+   * (16-bit -> 32-bit included), copying them into the frame, the final
+   * cache clean */
   uint32_t t_read = 0, t_build = 0, t_write = 0, t;
-  int built_sy = -1; /* the canvas row g_rowbuf holds, built opaque */
+  int built_sy = -1; /* the image row g_rowbuf holds, built opaque */
   for (int j = 0; j < fh; j++) {
     int sy = j * c->h / fh;
-    const uint32_t *src = image_row(c, sy);
     uint32_t *dst = (uint32_t *)p->base + (fy0 + j) * p->pitch + fx0;
     RowSpan sp = spans[sy];
     t = prof_now();
     if (sp.l == 0 && sp.r == 0) {
-      if (fw == c->w) {
-        /* opaque row at full size (the usual case): every pixel already
-         * has alpha 255, so the panel row is exactly what goes on screen -
-         * copy it straight from there (a copy of each row first cost
-         * ~9.5 ms per frame in Trails, compose-build) */
-        uint32_t t1 = prof_now();
-        t_build += t1 - t;
-        if (jv_copy_to_user(dst, src, fw * 4) < 0) {
-          g_fbd.copy_fail++;
-          return;
-        }
-        t_write += prof_now() - t1;
-        continue;
-      }
-      /* scaled: each canvas row is built once and written to every frame
-       * row it covers (two at 1080p) */
+      /* opaque (nearly every row): converted and scaled in one pass, once
+       * per image row, written to every frame row it covers (two at
+       * 1080p) */
       if (sy != built_sy) {
-        build_row(g_rowbuf, src, xmap, c->w, fw);
+        build_row565(g_rowbuf, img_row16(c, sy), xmap, c->w, fw);
         built_sy = sy;
       }
     } else {
@@ -1091,6 +1010,7 @@ static void compose(const SceDisplayFrameBuf *p, const Image *c,
       uint32_t t1 = prof_now();
       t_read += t1 - t;
       t = t1;
+      const uint32_t *src = img_row32(c, sy, g_row32);
       cv_compose_row(g_rowbuf, src, xmap, dl);
       cv_compose_row(g_rowbuf + dr, src, xmap + dr, fw - dr);
       for (int i = dl; i < dr; i++)
@@ -1139,7 +1059,7 @@ static void compose(const SceDisplayFrameBuf *p, const Image *c,
       for (int q = 1; q <= 4 && n < CHK_N; q++) {
         int x = q * fw / 5;
         g_chk.off[n] = (uint32_t)((fy0 + j) * p->pitch + fx0 + x);
-        g_chk.val[n] = image_row(c, sy)[x];
+        g_chk.val[n] = rgb565_to_rgba(img_row16(c, sy)[x]);
         n++;
       }
     }
@@ -1241,8 +1161,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       ksceKernelSignalSema(g_render_sema, 1);
     if (g_panel_gen == g_overlay_gen && !(g_panel_seq & 1)) {
       uint32_t t0 = prof_now();
-      Image c = { panel_src_row, MENU_W, MENU_H };
-      compose(p, &c, g_panel_blend, MENU_X, MENU_Y, 1);
+      compose(p, &g_panel_img, g_panel_blend, MENU_X, MENU_Y, 1);
       prof_add(PROF_COMPOSE, t0);
     }
   } else if (g_menu_open) { /* no render thread: draw here */
@@ -1275,8 +1194,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     }
     if (!(rendered_seq & 1)) {
       uint32_t t0 = prof_now();
-      Image c = { panel_src_row, MENU_W, MENU_H };
-      compose(p, &c, g_panel_blend, MENU_X, MENU_Y, 1);
+      compose(p, &g_panel_img, g_panel_blend, MENU_X, MENU_Y, 1);
       prof_add(PROF_COMPOSE, t0);
     }
   }
@@ -1294,8 +1212,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
                        &g_toast_blend[y0]);
       }
     }
-    Image im = { toast_src_row, TOAST_W, TOAST_H };
-    compose(p, &im, g_toast_blend, TOAST_X, TOAST_Y, 0);
+    compose(p, &g_toast_img, g_toast_blend, TOAST_X, TOAST_Y, 0);
   }
 }
 
@@ -2185,7 +2102,7 @@ static void refresh_slots(void) {
   static SlotEnv env;
   config_fingerprint(cfg_state, cfg_md5);
   JV_LAP(ms_cfg);
-  tai_fingerprint(tai_now);
+  tai_fingerprint_quick(tai_now);
   JV_LAP(ms_tai);
 
   int prepare_count = 0;

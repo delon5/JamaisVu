@@ -152,6 +152,9 @@ typedef struct {
 int appdb_fingerprint(uint8_t md5[16], uint32_t *size);
 /* the plugin folders now */
 void tai_fingerprint(TaiPrint out[JV_TAI_DIRS]);
+/* the same, re-read only for a folder whose listing (file names, sizes,
+ * times) changed since the last call: for the slot list, not save/load */
+void tai_fingerprint_quick(TaiPrint out[JV_TAI_DIRS]);
 /* 1 if every folder equals the record; else 0, *which = the first that
  * differs */
 int tai_matches(const TaiPrint rec[JV_TAI_DIRS],

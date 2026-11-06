@@ -799,6 +799,78 @@ void tai_fingerprint(TaiPrint out[JV_TAI_DIRS]) {
   }
 }
 
+/* The folders' listing - every file's name, size and modification time,
+ * XORed per file like the contents - read without opening any file. */
+static int tai_stamp_dir(const char *dir, const char *relbase, int depth,
+                         uint8_t stamp[16]) {
+  static SceIoDirent ent[2];
+  static char path[2][256], rel[2][256];
+  SceUID dfd = ksceIoDopen(dir);
+  if (dfd < 0)
+    return depth == 0 ? 1 : -1;
+  int res = 0;
+  while (res == 0 && ksceIoDread(dfd, &ent[depth]) > 0) {
+    const char *name = ent[depth].d_name;
+    if (!name[0] || !strcmp(name, ".") || !strcmp(name, ".."))
+      continue;
+    if (depth == 0 && is_jamaisvu_file(name))
+      continue;
+    snprintf(path[depth], sizeof(path[depth]), "%s/%s", dir, name);
+    snprintf(rel[depth], sizeof(rel[depth]), "%s%s%s", relbase,
+             relbase[0] ? "/" : "", name);
+    if ((ent[depth].d_stat.st_mode & SCE_S_IFMT) == SCE_S_IFDIR) {
+      if (depth == 0)
+        res = tai_stamp_dir(path[0], rel[0], 1, stamp);
+    } else {
+      Md5 m;
+      uint8_t d[16];
+      md5_init(&m);
+      md5_update(&m, rel[depth], (uint32_t)strlen(rel[depth]) + 1);
+      md5_update(&m, &ent[depth].d_stat.st_size,
+                 sizeof(ent[depth].d_stat.st_size));
+      md5_update(&m, &ent[depth].d_stat.st_mtime,
+                 sizeof(ent[depth].d_stat.st_mtime));
+      md5_final(&m, d);
+      for (int i = 0; i < 16; i++)
+        stamp[i] ^= d[i];
+    }
+  }
+  ksceIoDclose(dfd);
+  return res;
+}
+
+/* As tai_fingerprint, but a folder whose listing (names, sizes, times) is
+ * unchanged since the last call keeps its last fingerprint instead of
+ * reading every plugin again (2.6 s in GTA: San Andreas on the PS TV, each
+ * time the menu opened). For the slot list only: save and load still
+ * read everything (tai_fingerprint). */
+void tai_fingerprint_quick(TaiPrint out[JV_TAI_DIRS]) {
+  static TaiPrint cache[JV_TAI_DIRS];
+  static uint8_t cache_stamp[JV_TAI_DIRS][16];
+  static int cache_ok[JV_TAI_DIRS];
+  for (int i = 0; i < JV_TAI_DIRS; i++) {
+    uint8_t stamp[16];
+    memset(stamp, 0, sizeof(stamp));
+    int r = tai_stamp_dir(jv_tai_dirs[i], "", 0, stamp);
+    if (r == 0 && cache_ok[i] && memcmp(stamp, cache_stamp[i], 16) == 0) {
+      out[i] = cache[i];
+      continue;
+    }
+    memset(&out[i], 0, sizeof(out[i]));
+    int h = tai_hash_dir(jv_tai_dirs[i], "", 0, &out[i]);
+    out[i].state = h == 0 ? JV_CFG_PRESENT : h > 0 ? JV_CFG_ABSENT
+                                                   : JV_CFG_UNREADABLE;
+    if (out[i].state != JV_CFG_PRESENT) {
+      out[i].files = out[i].bytes = 0;
+      memset(out[i].md5, 0, 16);
+    }
+    /* only a folder read completely both ways is remembered */
+    cache_ok[i] = r == 0 && h == 0;
+    cache[i] = out[i];
+    memcpy(cache_stamp[i], stamp, 16);
+  }
+}
+
 int tai_matches(const TaiPrint rec[JV_TAI_DIRS],
                 const TaiPrint now[JV_TAI_DIRS], int *which) {
   for (int i = 0; i < JV_TAI_DIRS; i++) {

@@ -20,10 +20,17 @@ typedef struct {
   unsigned int microsecond;
 } SceDateTime;
 
+/* the host's <sys/stat.h> makes st_atime/st_ctime/st_mtime macros: take
+ * it first (include guard), then drop them for the SDK's field names */
+#include <sys/stat.h>
+#undef st_atime
+#undef st_ctime
+#undef st_mtime
 typedef struct {
   SceMode st_mode;
   unsigned int st_attr;
   SceOff st_size;
+  SceDateTime st_ctime, st_atime, st_mtime; /* as in the SDK */
 } SceIoStat;
 
 #define SCE_O_RDONLY 0x0001
