@@ -48,6 +48,23 @@ void cv_round_rect(Canvas *c, int x, int y, int w, int h, int r, uint32_t color)
 void cv_round_frame(Canvas *c, int x, int y, int w, int h, int r, int t,
                     uint32_t color);
 void cv_image(Canvas *c, int x, int y, const uint32_t *img, int iw, int ih);
+/* the same for an RGB565 image (thumbnails are kept as RGB565, as in the
+ * slot files) */
+void cv_image565(Canvas *c, int x, int y, const uint16_t *img, int iw,
+                 int ih);
+
+static inline uint16_t rgba_to_565(uint32_t c) {
+  uint32_t r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
+  return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
+static inline uint32_t rgb565_to_rgba(uint16_t v) {
+  uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+  r = (r << 3) | (r >> 2);
+  g = (g << 2) | (g >> 4);
+  b = (b << 3) | (b >> 2);
+  return r | (g << 8) | (b << 16) | 0xff000000u;
+}
 int cv_text(Canvas *c, const Font *f, int x, int y, const char *s,
             uint32_t color);
 int cv_text_width(const Font *f, const char *s);

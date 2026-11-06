@@ -43,7 +43,7 @@ static int mem_read(void *ctx, uint32_t off, void *buf, uint32_t len) {
 
 static uint32_t whole[MENU_W * MENU_H], banded[MENU_W * MENU_H];
 static uint32_t band[MENU_W * MENU_H];
-static uint32_t thumbs[JV_NUM_SLOTS][JV_THUMB_W * JV_THUMB_H];
+static uint16_t thumbs[JV_NUM_SLOTS][JV_THUMB_W * JV_THUMB_H]; /* RGB565 */
 
 static int check(const char *name, const MenuModel *m) {
   static const int sizes[] = { 1, 7, 20, 64, MENU_H };
@@ -156,7 +156,7 @@ int main(int argc, char **argv) {
 
   for (int i = 0; i < JV_NUM_SLOTS; i++)
     for (int p = 0; p < JV_THUMB_W * JV_THUMB_H; p++)
-      thumbs[i][p] = (uint32_t)(p * 2654435761u) ^ (uint32_t)i;
+      thumbs[i][p] = (uint16_t)((p * 2654435761u) >> 7 ^ (uint32_t)i);
 
   memset(&m, 0, sizeof(m));
   m.can_load = m.can_save = 1;

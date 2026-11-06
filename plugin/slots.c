@@ -15,31 +15,20 @@
 #include <string.h>
 
 #include "slots.h"
+#include "gui/render.h"
 #include "md5.h"
 #include "appdb.h"
 #include "storage.h"
 #include "../payload/crc32.h"
 
 #define THUMB_PIXELS  (JV_THUMB_W * JV_THUMB_H)
-#define THUMB_BYTES   (THUMB_PIXELS * 4) /* in memory; v2/v3 files */
+#define THUMB_BYTES   (THUMB_PIXELS * 4) /* v2/v3 files: RGBA8888 */
 #define THUMB_BYTES16 (THUMB_PIXELS * 2) /* v4 files: RGB565      */
 
-/* In memory thumbnails are RGBA8888 (R in the low byte, see render.h). */
-static uint16_t to_565(uint32_t c) {
-  uint32_t r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
-  return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-}
-
-static uint32_t from_565(uint16_t v) {
-  uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
-  r = (r << 3) | (r >> 2);
-  g = (g << 2) | (g >> 4);
-  b = (b << 3) | (b >> 2);
-  return r | (g << 8) | (b << 16) | 0xff000000u;
-}
-
-#define CHUNK_PX 2048
-static uint16_t g_px16[CHUNK_PX]; /* conversion chunk (worker thread) */
+/* In memory thumbnails are RGB565, exactly as stored in v4 files; v2/v3
+ * files (RGBA8888, R in the low byte) are converted when read. */
+#define CHUNK_PX 1024
+static uint32_t g_px32[CHUNK_PX]; /* v2/v3 conversion chunk (worker) */
 
 #define SLOT_SUBDIR "data/JamaisVu"
 
@@ -216,24 +205,19 @@ int slot_stamp(int slot, uint8_t nonce[16]) {
 
 /* CRC of the slot info (up to crc) and, as stored in v4, the RGB565
  * thumbnail; with fd >= 0 the thumbnail is also written. */
-static int info_crc_write565(const SlotInfo *info, const uint32_t *thumb,
+static int info_crc_write565(const SlotInfo *info, const uint16_t *thumb,
                              SceUID fd, uint32_t *crc_out) {
   uint32_t crc = crc32_update(0, info, offsetof(SlotInfo, crc));
   if (info->has_thumb) {
-    for (int done = 0; done < THUMB_PIXELS; done += CHUNK_PX) {
-      int n = THUMB_PIXELS - done < CHUNK_PX ? THUMB_PIXELS - done : CHUNK_PX;
-      for (int i = 0; i < n; i++)
-        g_px16[i] = to_565(thumb[done + i]);
-      crc = crc32_update(crc, g_px16, n * 2);
-      if (fd >= 0 && ksceIoWrite(fd, g_px16, n * 2) != n * 2)
-        return -1;
-    }
+    crc = crc32_update(crc, thumb, THUMB_BYTES16);
+    if (fd >= 0 && ksceIoWrite(fd, thumb, THUMB_BYTES16) != THUMB_BYTES16)
+      return -1;
   }
   *crc_out = crc;
   return 0;
 }
 
-int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
+int slot_info_write(int slot, SlotInfo *info, const uint16_t *thumb) {
   static char path[80], tmp[80];
   int res = 0;
 
@@ -273,44 +257,43 @@ int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb) {
   return res;
 }
 
-/* v4: reads the RGB565 thumbnail through the CRC and, if thumb is not
- * NULL, expands it to RGBA8888. */
-static int read_thumb565(SceUID fd, uint32_t *thumb, uint32_t *crc) {
-  for (int done = 0; done < THUMB_PIXELS; done += CHUNK_PX) {
-    int n = THUMB_PIXELS - done < CHUNK_PX ? THUMB_PIXELS - done : CHUNK_PX;
-    if (ksceIoRead(fd, g_px16, n * 2) != n * 2)
+/* v4: reads the RGB565 thumbnail through the CRC into thumb, or, if
+ * thumb is NULL, only through the CRC in small chunks. */
+static int read_thumb565(SceUID fd, uint16_t *thumb, uint32_t *crc) {
+  if (thumb) {
+    if (ksceIoRead(fd, thumb, THUMB_BYTES16) != THUMB_BYTES16)
       return -1;
-    *crc = crc32_update(*crc, g_px16, n * 2);
-    if (thumb)
-      for (int i = 0; i < n; i++)
-        thumb[done + i] = from_565(g_px16[i]);
+    *crc = crc32_update(*crc, thumb, THUMB_BYTES16);
+    return 0;
+  }
+  for (uint32_t left = THUMB_BYTES16; left > 0;) {
+    uint32_t n = left < sizeof(g_px32) ? left : sizeof(g_px32);
+    if (ksceIoRead(fd, g_px32, n) != (int)n)
+      return -1;
+    *crc = crc32_update(*crc, g_px32, n);
+    left -= n;
   }
   return 0;
 }
 
-/* v2/v3: reads the RGBA8888 thumbnail that follows the slot info into
- * thumb, or, if thumb is NULL, only through the CRC in small chunks. */
-static int read_thumb(SceUID fd, uint32_t *thumb, uint32_t *crc) {
-  static uint8_t chunk[4096];
-  if (thumb) {
-    if (ksceIoRead(fd, thumb, THUMB_BYTES) != THUMB_BYTES)
+/* v2/v3: reads the RGBA8888 thumbnail that follows the slot info through
+ * the CRC in chunks, converting it to RGB565 into thumb (if not NULL). */
+static int read_thumb(SceUID fd, uint16_t *thumb, uint32_t *crc) {
+  for (int done = 0; done < THUMB_PIXELS; done += CHUNK_PX) {
+    int n = THUMB_PIXELS - done < CHUNK_PX ? THUMB_PIXELS - done : CHUNK_PX;
+    if (ksceIoRead(fd, g_px32, n * 4) != n * 4)
       return -1;
-    *crc = crc32_update(*crc, thumb, THUMB_BYTES);
-    return 0;
-  }
-  for (uint32_t left = THUMB_BYTES; left > 0;) {
-    uint32_t n = left < sizeof(chunk) ? left : sizeof(chunk);
-    if (ksceIoRead(fd, chunk, n) != (int)n)
-      return -1;
-    *crc = crc32_update(*crc, chunk, n);
-    left -= n;
+    *crc = crc32_update(*crc, g_px32, n * 4);
+    if (thumb)
+      for (int i = 0; i < n; i++)
+        thumb[done + i] = rgba_to_565(g_px32[i]);
   }
   return 0;
 }
 
 /* Version 2 (before the config.txt check): converted to the current
  * layout; its plugin configuration is unknown (JV_CFG_UNKNOWN). */
-static int slot_info_read_v2(SceUID fd, SlotInfo *info, uint32_t *thumb) {
+static int slot_info_read_v2(SceUID fd, SlotInfo *info, uint16_t *thumb) {
   static SlotInfoV2 v2;
   uint32_t crc;
 
@@ -344,7 +327,7 @@ static int slot_info_read_v2(SceUID fd, SlotInfo *info, uint32_t *thumb) {
   return 0;
 }
 
-int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb) {
+int slot_info_read(int slot, SlotInfo *info, uint16_t *thumb) {
   static char path[80];
   int res = 0;
 

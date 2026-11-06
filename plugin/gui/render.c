@@ -206,6 +206,18 @@ void cv_image(Canvas *c, int x, int y, const uint32_t *img, int iw, int ih) {
       put(c, x + i, y + j, img[j * iw + i] | 0xff000000, 255);
 }
 
+void cv_image565(Canvas *c, int x, int y, const uint16_t *img, int iw,
+                 int ih) {
+  int j0 = 0, j1 = ih;
+  if (j0 < c->y0 - y)
+    j0 = c->y0 - y;
+  if (j1 > c->y0 + c->h - y)
+    j1 = c->y0 + c->h - y;
+  for (int j = j0; j < j1; j++)
+    for (int i = 0; i < iw; i++)
+      put(c, x + i, y + j, rgb565_to_rgba(img[j * iw + i]), 255);
+}
+
 static const FontGlyph *glyph(const Font *f, char ch) {
   unsigned char u = (unsigned char)ch;
   if (u < f->first || u > f->last)

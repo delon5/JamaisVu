@@ -89,7 +89,7 @@ static void draw_slot(Canvas *c, const MenuModel *m, int i) {
   }
 
   if (s->used && s->thumb) {
-    cv_image(c, x, y, s->thumb, JV_THUMB_W, JV_THUMB_H);
+    cv_image565(c, x, y, s->thumb, JV_THUMB_W, JV_THUMB_H);
   } else {
     cv_fill(c, x, y, JV_THUMB_W, JV_THUMB_H, C_EMPTY);
     /* dashed inner outline */

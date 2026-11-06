@@ -42,7 +42,7 @@ typedef struct {
   char installed_ver[8];  /* game version installed now ("" = unknown) */
   int outdated;           /* versions differ: the slot cannot be loaded */
   int config_changed;     /* tai/config.txt differs: cannot be loaded */
-  const uint32_t *thumb;  /* JV_THUMB_W * JV_THUMB_H pixels, or NULL */
+  const uint16_t *thumb;  /* JV_THUMB_W * JV_THUMB_H RGB565, or NULL */
 } MenuSlot;
 
 typedef enum {

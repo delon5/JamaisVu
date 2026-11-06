@@ -118,7 +118,7 @@ static const char *detect_readonly(void) {
 /* Every write path JamaisVu has: folders, slot file, token, slot info.
  * Afterwards the other storage must still be completely empty. */
 static void exercise_writes(int slot) {
-  static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
+  static uint16_t thumb[JV_THUMB_W * JV_THUMB_H];
   static char want[64];
   SlotInfo info;
   uint8_t nonce[16];
@@ -347,10 +347,25 @@ static void test_config(void) {
         "fingerprint only reads");
 }
 
+/* RGB565 of an RGBA8888 pixel (R in the low byte), computed here on its
+ * own: thumbnails are kept as RGB565 in memory and in v4 files */
+static uint16_t to565(uint32_t c) {
+  uint32_t r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
+  return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
+static int same565(const uint32_t *rgba, const uint16_t *px) {
+  for (int i = 0; i < JV_THUMB_W * JV_THUMB_H; i++)
+    if (px[i] != to565(rgba[i]))
+      return 0;
+  return 1;
+}
+
 /* A slot written by the previous version (slot info v2, no config
  * fingerprint) must still read as a normal, loadable snapshot. */
 static void test_slot_info_v2(void) {
-  static uint32_t thumb[JV_THUMB_W * JV_THUMB_H], back_thumb[JV_THUMB_W * JV_THUMB_H];
+  static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
+  static uint16_t back_thumb[JV_THUMB_W * JV_THUMB_H];
   static SlotInfoV2 v2;
   static SlotInfo info;
   static char path[128];
@@ -384,7 +399,7 @@ static void test_slot_info_v2(void) {
   CHECK(slot_info_read(1, &info, back_thumb) == 0, "v2 info reads");
   CHECK(!strcmp(info.titleid, "PCSB00001") && !strcmp(info.title, "Old Save")
         && !strcmp(info.app_ver, "01.00") && info.has_thumb &&
-        !memcmp(thumb, back_thumb, sizeof(thumb)), "v2 fields and thumbnail");
+        same565(thumb, back_thumb), "v2 fields and thumbnail (as RGB565)");
   CHECK(slot_is_loadable(1), "v2 slot is loadable");
   CHECK(config_matches(&info, NULL), "no fingerprint -> config check skipped");
 
@@ -398,17 +413,12 @@ static void test_slot_info_v2(void) {
   CHECK(!slot_is_loadable(1), "damaged thumbnail caught by the chunked CRC");
 }
 
-static uint32_t q565(uint32_t c) { /* what a v4 file gives back */
-  uint32_t r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
-  r >>= 3; g >>= 2; b >>= 3;
-  r = (r << 3) | (r >> 2); g = (g << 2) | (g >> 4); b = (b << 3) | (b >> 2);
-  return r | (g << 8) | (b << 16) | 0xff000000u;
-}
 
 /* v4 stores the thumbnail as RGB565 (half the size); v3 files with an
  * RGBA8888 thumbnail must still read. */
 static void test_thumb_formats(void) {
-  static uint32_t thumb[JV_THUMB_W * JV_THUMB_H], back[JV_THUMB_W * JV_THUMB_H];
+  static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
+  static uint16_t thumb16[JV_THUMB_W * JV_THUMB_H], back[JV_THUMB_W * JV_THUMB_H];
   static SlotInfo info, got;
   static char path[128];
   SceIoStat st;
@@ -427,17 +437,25 @@ static void test_thumb_formats(void) {
   strcpy(info.title, "Thumb Test");
   strcpy(info.app_ver, "01.00");
   info.has_thumb = 1;
-  CHECK(slot_info_write(3, &info, thumb) == 0, "v4 write");
+  for (int i = 0; i < JV_THUMB_W * JV_THUMB_H; i++)
+    thumb16[i] = to565(thumb[i]);
+  CHECK(slot_info_write(3, &info, thumb16) == 0, "v4 write");
   slot_path(path, sizeof(path), 3, "jvi");
   CHECK(ksceIoGetstat(path, &st) >= 0 &&
         st.st_size == (SceOff)(sizeof(SlotInfo) + JV_THUMB_W * JV_THUMB_H * 2),
         "v4 file is %u + 28800 bytes (got %lld)", (unsigned)sizeof(SlotInfo),
         (long long)st.st_size);
   CHECK(slot_info_read(3, &got, back) == 0 && got.version == 4, "v4 read");
-  int same = 1;
-  for (int i = 0; i < JV_THUMB_W * JV_THUMB_H; i++)
-    if (back[i] != q565(thumb[i])) { same = 0; break; }
-  CHECK(same, "v4 thumbnail == RGB565 of the original");
+  CHECK(!memcmp(back, thumb16, sizeof(back)), "v4 thumbnail read back exactly");
+  /* the v4 file layout is unchanged: the thumbnail bytes as written */
+  {
+    static uint16_t raw[JV_THUMB_W * JV_THUMB_H];
+    SceUID rfd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+    ksceIoLseek(rfd, sizeof(SlotInfo), SCE_SEEK_SET);
+    CHECK(ksceIoRead(rfd, raw, sizeof(raw)) == (int)sizeof(raw) &&
+          !memcmp(raw, thumb16, sizeof(raw)), "v4 file holds the RGB565 pixels");
+    ksceIoClose(rfd);
+  }
   CHECK(slot_is_loadable(3), "v4 slot loadable (chunked CRC)");
 
   /* a v3 file: same header, RGBA8888 thumbnail */
@@ -457,7 +475,7 @@ static void test_thumb_formats(void) {
   ksceIoWrite(fd, thumb, sizeof(thumb));
   ksceIoClose(fd);
   CHECK(slot_info_read(3, &got, back) == 0 && got.version == 3 &&
-        !memcmp(back, thumb, sizeof(thumb)), "v3 (RGBA8888) still reads");
+        same565(thumb, back), "v3 (RGBA8888) still reads (as RGB565)");
   CHECK(slot_is_loadable(3), "v3 slot loadable");
 }
 
@@ -612,7 +630,7 @@ int main(int argc, char **argv) {
   printf("  -> \"%s\"\n", storage_reason());
   CHECK(root == NULL, "must not find a Memory Card");
   {
-    static uint32_t thumb[JV_THUMB_W * JV_THUMB_H];
+    static uint16_t thumb[JV_THUMB_W * JV_THUMB_H];
     SlotInfo info;
     uint8_t nonce[16];
     memset(&info, 0, sizeof(info));

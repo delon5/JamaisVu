@@ -99,8 +99,9 @@ int slot_prepare(int slot, int (*progress)(int pct));
  * flushes it; the payload verifies it. */
 int slot_stamp(int slot, uint8_t nonce[16]);
 
-int slot_info_write(int slot, SlotInfo *info, const uint32_t *thumb);
-int slot_info_read(int slot, SlotInfo *info, uint32_t *thumb);
+/* thumb: JV_THUMB_W * JV_THUMB_H RGB565 pixels (as stored in v4 files) */
+int slot_info_write(int slot, SlotInfo *info, const uint16_t *thumb);
+int slot_info_read(int slot, SlotInfo *info, uint16_t *thumb);
 
 /* slotN.jvf: physical address of the game's frame when the snapshot was
  * taken, for the progress screen during a load (drawn there once the

@@ -58,16 +58,18 @@ static volatile int g_cancel_req; /* ○ while preparing a slot */
  * block was refused in Chinatown Wars on the PS TV by every pool, and
  * then three blocks too (its largest free blocks: 1024 KB and 640 KB, the
  * menu image alone needed 1032 KB). The menu image is kept in strips of
- * PANEL_STRIP_ROWS rows, the thumbnails in pairs. */
+ * PANEL_STRIP_ROWS rows, the thumbnails (RGB565, as in the slot files)
+ * three to a block. */
 #define PANEL_STRIP_ROWS 100
 #define PANEL_STRIPS ((MENU_H + PANEL_STRIP_ROWS - 1) / PANEL_STRIP_ROWS)
-#define THUMB_PAIRS ((JV_NUM_SLOTS + 2) / 2)
+#define THUMB_PER_BLOCK 3
+#define THUMB_BLOCKS ((JV_NUM_SLOTS + THUMB_PER_BLOCK) / THUMB_PER_BLOCK)
 /* in allocation order, largest first */
 enum {
   OVL_P_PANEL = 0,                       /* PANEL_STRIPS strips, 344 KB */
   OVL_P_TOAST = PANEL_STRIPS,            /* 124 KB */
-  OVL_P_THUMBS,                          /* THUMB_PAIRS pairs, 116 KB */
-  OVL_P_BAND = OVL_P_THUMBS + THUMB_PAIRS, /* band + row buffer, 76 KB */
+  OVL_P_THUMBS,                          /* THUMB_BLOCKS, 3 x 16-bit, 88 KB */
+  OVL_P_BAND = OVL_P_THUMBS + THUMB_BLOCKS, /* band + row buffer, 80 KB */
   OVL_P_EXT0,                            /* Japanese glyph sets */
   OVL_P_EXT1,
   OVL_PIECES
@@ -108,7 +110,7 @@ static int g_dolce; /* PS TV: also controller port 1 */
 static SceUID g_render_sema = -1;
 static int g_render_thread_ok;
 static volatile uint32_t g_panel_seq = 1, g_panel_gen;
-static uint32_t *g_thumbs[JV_NUM_SLOTS + 1];
+static uint16_t *g_thumbs[JV_NUM_SLOTS + 1]; /* RGB565 */
 static void model_clear_thumbs(void);
 
 /* Glyphs for Japanese (non-ASCII) game names, read from jpfont.bin on
@@ -616,8 +618,8 @@ static uint32_t ovl_piece_bytes(int k) {
   if (k == OVL_P_TOAST)
     return TOAST_W * TOAST_H * 4;
   if (k < OVL_P_BAND) {
-    int n = JV_NUM_SLOTS + 1 - (k - OVL_P_THUMBS) * 2;
-    return (n > 2 ? 2 : n) * THUMB_PX * 4;
+    int n = JV_NUM_SLOTS + 1 - (k - OVL_P_THUMBS) * THUMB_PER_BLOCK;
+    return (n > THUMB_PER_BLOCK ? THUMB_PER_BLOCK : n) * THUMB_PX * 2;
   }
   if (k == OVL_P_BAND)
     return MENU_W * BAND_ROWS * 4 + JV_MAX_FB_W * 4;
@@ -731,8 +733,8 @@ static int overlay_acquire(void) {
       for (int k = 0; k < PANEL_STRIPS; k++)
         g_panel_strip[k] = base[OVL_P_PANEL + k];
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
-        g_thumbs[i] = (uint32_t *)base[OVL_P_THUMBS + i / 2] +
-                      (i % 2) * THUMB_PX;
+        g_thumbs[i] = (uint16_t *)base[OVL_P_THUMBS + i / THUMB_PER_BLOCK] +
+                      (i % THUMB_PER_BLOCK) * THUMB_PX;
       g_toast_px = base[OVL_P_TOAST];
       g_band_px = base[OVL_P_BAND];
       g_rowbuf = g_band_px + MENU_W * BAND_ROWS;
@@ -820,7 +822,7 @@ static void capture(const SceDisplayFrameBuf *p) {
       !valid_game_titleid(tid))
     return; /* not the game (e.g. the shell); wait for its next frame */
 
-  uint32_t *thumb = g_thumbs[PENDING];
+  uint16_t *thumb = g_thumbs[PENDING];
   int w = p->width, h = p->height;
 
   for (int ty = 0; ty < JV_THUMB_H; ty++) {
@@ -839,7 +841,7 @@ static void capture(const SceDisplayFrameBuf *p) {
         b += (px >> 16) & 0xff;
       }
       thumb[ty * JV_THUMB_W + tx] =
-          RGBA(r / n, g / n, b / n, 255);
+          rgba_to_565(RGBA(r / n, g / n, b / n, 255));
     }
   }
 

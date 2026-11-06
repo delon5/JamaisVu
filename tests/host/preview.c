@@ -20,7 +20,8 @@ static uint32_t bg[JV_SCREEN_W * JV_SCREEN_H];
 static uint32_t fb[JV_SCREEN_W * JV_SCREEN_H];
 static uint32_t panel_px[MENU_W * MENU_H];
 static uint32_t toast_px[TOAST_W * TOAST_H];
-static uint32_t thumbs[JV_NUM_SLOTS][JV_THUMB_W * JV_THUMB_H];
+static uint32_t thumbs32[JV_NUM_SLOTS][JV_THUMB_W * JV_THUMB_H];
+static uint16_t thumbs[JV_NUM_SLOTS][JV_THUMB_W * JV_THUMB_H]; /* RGB565 */
 
 static ExtGlyphs ext;
 
@@ -64,9 +65,12 @@ int main(int argc, char **argv) {
     return 1;
   fclose(f);
   f = fopen(argv[2], "rb");
-  if (fread(thumbs, 4, sizeof(thumbs) / 4, f) != sizeof(thumbs) / 4)
+  if (fread(thumbs32, 4, sizeof(thumbs32) / 4, f) != sizeof(thumbs32) / 4)
     return 1;
   fclose(f);
+  for (int i = 0; i < JV_NUM_SLOTS; i++)
+    for (int p = 0; p < JV_THUMB_W * JV_THUMB_H; p++)
+      thumbs[i][p] = rgba_to_565(thumbs32[i][p]);
 
   MenuModel m;
   memset(&m, 0, sizeof(m));
