@@ -58,6 +58,7 @@ static volatile int g_cancel_req; /* ○ while preparing a slot */
  * Chinatown Wars on the PS TV, by every pool): image, thumbnails, rest */
 #define OVL_PIECES 3
 static SceUID g_mem_blks[OVL_PIECES] = { -1, -1, -1 };
+static volatile SceUID g_fg_pid; /* app in the foreground, 0: none known */
 static SceUID g_ovl_mtx = -1;
 static volatile int g_overlay_ready;
 static volatile int g_overlay_users;
@@ -1341,26 +1342,33 @@ static void perf_report(void) {
   }
 }
 
+/* the app in the foreground (from the app start/resume events): the menu
+ * is opened from JamaisVu's own input thread, whose process is the
+ * kernel's, so its title ID is not the game's */
+static void fg_title(char *tid, int len) {
+  SceUID pid = g_fg_pid;
+  memset(tid, 0, len);
+  if (!pid || ksceKernelGetProcessTitleId(pid, tid, len) < 0 || !tid[0])
+    snprintf(tid, len, pid ? "?" : "LiveArea");
+  tid[len - 1] = '\0';
+}
+
 static int open_menu(void) {
   perf_report();
   int had = g_overlay_ready;
+  char tid[16];
+  fg_title(tid, sizeof(tid));
   if (overlay_acquire() < 0) {
     /* like reVita's "Buy more RAM": refuse rather than take memory the
-     * system needs; noted once per game (title) with what is free */
-    static char last_tid[16];
-    char tid[16];
-    memset(tid, 0, sizeof(tid));
-    ksceKernelGetProcessTitleId(ksceKernelGetProcessId(), tid, sizeof(tid));
-    tid[sizeof(tid) - 1] = '\0';
-    if (strcmp(tid, last_tid) != 0) {
-      static char line[320];
-      memcpy(last_tid, tid, sizeof(last_tid));
+     * system needs; every refusal is noted, with what is free */
+    {
+      static char line[360];
       int k = g_ovl_fail_piece < 0 ? 0 : g_ovl_fail_piece;
-      snprintf(line, sizeof(line), "menu not opened: not enough free kernel "
-               "memory for the %s (%u KB; root 0x%08X, root contiguous "
+      snprintf(line, sizeof(line), "menu not opened in %s: not enough free "
+               "kernel memory for the %s (%u KB; root 0x%08X, root contiguous "
                "0x%08X, user main 0x%08X); largest free blocks now: root %u "
                "KB, root contiguous %u KB, user main %u KB (menu needs %u + "
-               "%u + %u KB)\r\n", k_ovl_piece_names[k],
+               "%u + %u KB)\r\n", tid, k_ovl_piece_names[k],
                (unsigned)(g_ovl_fail_size >> 10),
                (unsigned)g_ovl_fail_ret[0], (unsigned)g_ovl_fail_ret[1],
                (unsigned)g_ovl_fail_ret[2],
@@ -1374,11 +1382,11 @@ static int open_menu(void) {
     }
     return -1;
   }
-  if (!had && (g_ovl_piece_pool[0] || g_ovl_piece_pool[1] ||
-               g_ovl_piece_pool[2])) {
-    static char line[200];
-    snprintf(line, sizeof(line), "menu memory: %s from the %s pool, %s from "
-             "the %s pool, %s from the %s pool\r\n", k_ovl_piece_names[0],
+  if (!had) {
+    static char line[220];
+    snprintf(line, sizeof(line), "menu opened in %s, memory: %s from the %s "
+             "pool, %s from the %s pool, %s from the %s pool\r\n", tid,
+             k_ovl_piece_names[0],
              k_ovl_pool_names[g_ovl_piece_pool[0]], k_ovl_piece_names[1],
              k_ovl_pool_names[g_ovl_piece_pool[1]], k_ovl_piece_names[2],
              k_ovl_pool_names[g_ovl_piece_pool[2]]);
@@ -1435,9 +1443,12 @@ static volatile SceUID g_pspemu_pid; /* 0: no PSP emulator in front */
 
 static int procev_hook(int pid, int ev, int a3, int a4, int *a5, int a6) {
   if (ev == 1 || ev == 5) { /* startup, resume */
+    g_fg_pid = pid;
     if (ksceSblACMgrIsPspEmu(pid))
       g_pspemu_pid = pid;
   } else if (ev == 3 || ev == 4) { /* exit, suspend */
+    if (pid == g_fg_pid)
+      g_fg_pid = 0;
     if (pid == g_pspemu_pid)
       g_pspemu_pid = 0;
   }
