@@ -86,6 +86,13 @@ enum {
   OVL_FIXED = OVL_P_EXT0                 /* blocks taken when it opens */
 };
 static SceUID g_mem_blks[OVL_PIECES];
+/* Bookkeeping for log.txt (reboots and frozen app starts since d132bb4,
+ * suspected: kernel memory not given back): KB of each block held, the
+ * blocks and KB JamaisVu holds now, and frees the system refused. */
+static uint32_t g_mem_kb[OVL_PIECES];
+static volatile int g_held_blocks;
+static volatile uint32_t g_held_kb, g_taken_total, g_freed_total;
+static volatile int g_free_errs, g_free_err_last;
 
 /* a 16-bit image with 32-bit corners */
 typedef struct {
@@ -700,6 +707,10 @@ static void *ovl_alloc(int k, uint32_t size) {
     void *base = NULL;
     if (uid >= 0 && ksceKernelGetMemBlockBase(uid, &base) >= 0 && base) {
       g_mem_blks[k] = uid;
+      g_mem_kb[k] = size >> 10;
+      g_held_blocks++;
+      g_held_kb += size >> 10;
+      g_taken_total++;
       g_ovl_pool_kb[i] += size >> 10;
       return base;
     }
@@ -715,12 +726,26 @@ static void *ovl_piece_alloc(int k) {
   return ovl_alloc(k, ovl_piece_size(k));
 }
 
-static void ovl_pieces_free(void) {
-  for (int k = 0; k < OVL_PIECES; k++) {
-    if (g_mem_blks[k] > 0)
-      ksceKernelFreeMemBlock(g_mem_blks[k]);
-    g_mem_blks[k] = 0;
+/* gives block k back, counting refusals (the block is then lost) */
+static void ovl_block_free(int k) {
+  if (g_mem_blks[k] <= 0)
+    return;
+  int r = ksceKernelFreeMemBlock(g_mem_blks[k]);
+  if (r < 0) {
+    g_free_errs++;
+    g_free_err_last = r;
+  } else {
+    g_held_blocks--;
+    g_held_kb -= g_mem_kb[k];
+    g_freed_total++;
   }
+  g_mem_blks[k] = 0;
+  g_mem_kb[k] = 0;
+}
+
+static void ovl_pieces_free(void) {
+  for (int k = 0; k < OVL_PIECES; k++)
+    ovl_block_free(k);
 }
 
 /* diagnostics, only after a refusal: the largest block each pool would
@@ -802,7 +827,22 @@ static void overlay_release(void) {
       ksceKernelDelayThread(1000);
     if (g_overlay_users == 0) {
       model_clear_thumbs(); /* the model must not point into freed memory */
+      int errs = g_free_errs;
       ovl_pieces_free();
+      {
+        static char line[200];
+        snprintf(line, sizeof(line), "menu memory given back: JamaisVu now "
+                 "holds %d blocks, %u KB (taken %u, given back %u since the "
+                 "start)%s\r\n", g_held_blocks, (unsigned)g_held_kb,
+                 (unsigned)g_taken_total, (unsigned)g_freed_total,
+                 g_free_errs != errs ? " - the system REFUSED a free" : "");
+        log_queue(line);
+        if (g_free_errs != errs) {
+          snprintf(line, sizeof(line), "    refused frees so far: %d, last "
+                   "0x%08X\r\n", g_free_errs, (unsigned)g_free_err_last);
+          log_queue(line);
+        }
+      }
       g_toast_band = g_rowbuf = g_band_px = NULL;
       for (int k = 0; k < PANEL_STRIPS; k++)
         g_panel_img.strip[k] = NULL;
@@ -813,6 +853,10 @@ static void overlay_release(void) {
         g_thumbs[i] = NULL;
     } else {
       g_overlay_ready = 1; /* still in use: try again later */
+      static int noted;
+      if (noted++ < 5)
+        log_queue("menu memory: a frame was still drawing with it after "
+                  "0.5 s - kept, tried again later\r\n");
     }
   }
   if (g_ovl_mtx >= 0)
@@ -1918,6 +1962,23 @@ static int input_thread(SceSize args, void *argp) {
         now_us() >= g_toast_until)
       overlay_release();
 
+    /* memory still held while nothing is shown: noted once a minute */
+    {
+      static int64_t next_check;
+      int64_t tn = now_us();
+      if (tn >= next_check) {
+        next_check = tn + 60000000;
+        if (!g_overlay_ready && (g_held_blocks || g_held_kb)) {
+          static char line[160];
+          snprintf(line, sizeof(line), "menu memory: JamaisVu still holds "
+                   "%d blocks, %u KB with the menu closed (refused frees "
+                   "%d)\r\n", g_held_blocks, (unsigned)g_held_kb,
+                   g_free_errs);
+          log_queue(line);
+        }
+      }
+    }
+
     uint32_t pressed = pad.buttons & ~prev;
     prev = pad.buttons;
     prof_add(PROF_INPUT, t0); /* the poll itself, not the menu actions */
@@ -1980,9 +2041,7 @@ static void ext_free(int k) {
     ksceKernelLockMutex(g_ovl_mtx, 1, NULL);
   g_ext_set[k] = NULL;
   __sync_synchronize();
-  if (g_mem_blks[OVL_P_EXT0 + k] > 0)
-    ksceKernelFreeMemBlock(g_mem_blks[OVL_P_EXT0 + k]);
-  g_mem_blks[OVL_P_EXT0 + k] = 0;
+  ovl_block_free(OVL_P_EXT0 + k);
   if (g_ovl_mtx >= 0)
     ksceKernelUnlockMutex(g_ovl_mtx, 1);
 }
