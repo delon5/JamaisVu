@@ -57,30 +57,49 @@ static volatile int g_cancel_req; /* ○ while preparing a slot */
 /* The menu's memory, in small blocks, none over ~344 KB: one 1.6 MB
  * block was refused in Chinatown Wars on the PS TV by every pool, and
  * then three blocks too (its largest free blocks: 1024 KB and 640 KB, the
- * menu image alone needed 1032 KB). The menu image is kept in strips of
- * PANEL_STRIP_ROWS rows, the thumbnails (RGB565, as in the slot files)
- * three to a block. */
-#define PANEL_STRIP_ROWS 100
-#define PANEL_STRIPS ((MENU_H + PANEL_STRIP_ROWS - 1) / PANEL_STRIP_ROWS)
+ * menu image alone needed 1032 KB).
+ *
+ * The menu image is stored 16-bit (RGB565, rounded to the nearest shade):
+ * it is drawn 32-bit in bands as before and converted when a band is
+ * stored, and converted back row by row when put on the frame. Only the
+ * rows with the see-through rounded corners (PANEL_EDGE_ROWS at the top
+ * and at the bottom) keep 32 bits, for their alpha, with the same rounded
+ * colours; every other row is opaque (checked by the host tests).
+ * 564 KB instead of 1032 KB.
+ * The thumbnails (RGB565, as in the slot files) are three to a block. */
+#define PANEL_EDGE_ROWS MENU_EDGE_ROWS
+#define PANEL_MID_ROWS (MENU_H - 2 * PANEL_EDGE_ROWS)
+#define PANEL_MID_STRIP_ROWS 92
+#define PANEL_MID_STRIPS \
+  ((PANEL_MID_ROWS + PANEL_MID_STRIP_ROWS - 1) / PANEL_MID_STRIP_ROWS)
 #define THUMB_PER_BLOCK 3
 #define THUMB_BLOCKS ((JV_NUM_SLOTS + THUMB_PER_BLOCK) / THUMB_PER_BLOCK)
 /* in allocation order, largest first */
 enum {
-  OVL_P_PANEL = 0,                       /* PANEL_STRIPS strips, 344 KB */
-  OVL_P_TOAST = PANEL_STRIPS,            /* 124 KB */
+  OVL_P_PANEL = 0,                       /* PANEL_MID_STRIPS, 16-bit, 160 KB */
+  OVL_P_TOAST = PANEL_MID_STRIPS,        /* 124 KB */
   OVL_P_THUMBS,                          /* THUMB_BLOCKS, 3 x 16-bit, 88 KB */
-  OVL_P_BAND = OVL_P_THUMBS + THUMB_BLOCKS, /* band + row buffer, 80 KB */
+  OVL_P_EDGE = OVL_P_THUMBS + THUMB_BLOCKS, /* corner rows, 32-bit, 84 KB */
+  OVL_P_BAND,                            /* band + row buffer, 80 KB */
   OVL_P_EXT0,                            /* Japanese glyph sets */
   OVL_P_EXT1,
   OVL_PIECES
 };
-_Static_assert(PANEL_STRIP_ROWS % 20 == 0,
-               "render bands (BAND_ROWS) must not cross a strip");
 static SceUID g_mem_blks[OVL_PIECES];
-static uint32_t *g_panel_strip[PANEL_STRIPS];
-static inline uint32_t *panel_row(int y) {
-  return g_panel_strip[y / PANEL_STRIP_ROWS] +
-         (y % PANEL_STRIP_ROWS) * MENU_W;
+static uint16_t *g_panel_mid[PANEL_MID_STRIPS];
+static uint32_t *g_panel_edge;
+
+static inline int panel_is_edge(int y) {
+  return y < PANEL_EDGE_ROWS || y >= MENU_H - PANEL_EDGE_ROWS;
+}
+static inline uint32_t *panel_edge_row(int y) {
+  int e = y < PANEL_EDGE_ROWS ? y : y - PANEL_MID_ROWS;
+  return g_panel_edge + e * MENU_W;
+}
+static inline uint16_t *panel_mid_row(int y) {
+  int m = y - PANEL_EDGE_ROWS;
+  return g_panel_mid[m / PANEL_MID_STRIP_ROWS] +
+         (m % PANEL_MID_STRIP_ROWS) * MENU_W;
 }
 static volatile SceUID g_fg_pid; /* app in the foreground, 0: none known */
 static SceUID g_ovl_mtx = -1;
@@ -601,8 +620,10 @@ static const char *ovl_piece_name(int k) {
     return "menu image";
   if (k == OVL_P_TOAST)
     return "message box";
-  if (k < OVL_P_BAND)
+  if (k < OVL_P_EDGE)
     return "thumbnails";
+  if (k == OVL_P_EDGE)
+    return "menu image corners";
   if (k == OVL_P_BAND)
     return "drawing buffers";
   return "Japanese glyphs";
@@ -610,14 +631,16 @@ static const char *ovl_piece_name(int k) {
 
 static uint32_t ovl_piece_bytes(int k) {
   if (k < OVL_P_TOAST) {
-    int rows = MENU_H - k * PANEL_STRIP_ROWS;
-    if (rows > PANEL_STRIP_ROWS)
-      rows = PANEL_STRIP_ROWS;
-    return rows * MENU_W * 4;
+    int rows = PANEL_MID_ROWS - k * PANEL_MID_STRIP_ROWS;
+    if (rows > PANEL_MID_STRIP_ROWS)
+      rows = PANEL_MID_STRIP_ROWS;
+    return rows * MENU_W * 2;
   }
   if (k == OVL_P_TOAST)
     return TOAST_W * TOAST_H * 4;
-  if (k < OVL_P_BAND) {
+  if (k == OVL_P_EDGE)
+    return 2 * PANEL_EDGE_ROWS * MENU_W * 4;
+  if (k < OVL_P_EDGE) {
     int n = JV_NUM_SLOTS + 1 - (k - OVL_P_THUMBS) * THUMB_PER_BLOCK;
     return (n > THUMB_PER_BLOCK ? THUMB_PER_BLOCK : n) * THUMB_PX * 2;
   }
@@ -730,8 +753,9 @@ static int overlay_acquire(void) {
       }
     }
     if (ok) {
-      for (int k = 0; k < PANEL_STRIPS; k++)
-        g_panel_strip[k] = base[OVL_P_PANEL + k];
+      for (int k = 0; k < PANEL_MID_STRIPS; k++)
+        g_panel_mid[k] = base[OVL_P_PANEL + k];
+      g_panel_edge = base[OVL_P_EDGE];
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = (uint16_t *)base[OVL_P_THUMBS + i / THUMB_PER_BLOCK] +
                       (i % THUMB_PER_BLOCK) * THUMB_PX;
@@ -769,8 +793,9 @@ static void overlay_release(void) {
       model_clear_thumbs(); /* the model must not point into freed memory */
       ovl_pieces_free();
       g_toast_px = g_rowbuf = g_band_px = NULL;
-      for (int k = 0; k < PANEL_STRIPS; k++)
-        g_panel_strip[k] = NULL;
+      for (int k = 0; k < PANEL_MID_STRIPS; k++)
+        g_panel_mid[k] = NULL;
+      g_panel_edge = NULL;
       g_ext_set[0] = g_ext_set[1] = NULL;
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = NULL;
@@ -903,16 +928,66 @@ static void build_row(uint32_t *out, const uint32_t *src, const int *xmap,
     out[i] = 0xff000000u | (src[xmap[i]] & 0x00ffffffu);
 }
 
-/* an image kept in strips of equal height (the menu image) or in one
- * piece (strip_rows == h) */
+/* an image as compose reads it: one 32-bit row at a time */
 typedef struct {
-  uint32_t *const *strip;
-  int strip_rows;
+  const uint32_t *(*row)(int y);
   int w, h;
 } Image;
 
 static inline const uint32_t *image_row(const Image *c, int y) {
-  return c->strip[y / c->strip_rows] + (y % c->strip_rows) * c->w;
+  return c->row(y);
+}
+
+/* the menu image's row y, 32-bit: the corner rows as stored, the others
+ * converted from RGB565 (once per row and compose call) */
+static uint32_t g_row32[MENU_W];
+static int g_row32_y = -1;
+
+static const uint32_t *panel_src_row(int y) {
+  if (panel_is_edge(y))
+    return panel_edge_row(y);
+  if (y != g_row32_y) {
+    const uint16_t *s = panel_mid_row(y);
+    for (int x = 0; x < MENU_W; x++)
+      g_row32[x] = rgb565_to_rgba(s[x]);
+    g_row32_y = y;
+  }
+  return g_row32;
+}
+
+static const uint32_t *toast_src_row(int y) {
+  return g_toast_px + y * TOAST_W;
+}
+
+/* Stores rendered band rows (32-bit, image rows y0 ..) in the menu image:
+ * corner rows as they are, the others as RGB565 (nearest shade) and
+ * shown opaque. */
+static void panel_store_rows(const uint32_t *band, int y0, int rows,
+                             RowSpan *blend) {
+  static int warned;
+  for (int r = 0; r < rows; r++) {
+    int y = y0 + r;
+    const uint32_t *src = band + r * MENU_W;
+    if (panel_is_edge(y)) {
+      /* 32-bit for the corners' alpha, colours as in the 16-bit rows (a
+       * seam showed in the header at row 12 otherwise) */
+      uint32_t *dst = panel_edge_row(y);
+      for (int x = 0; x < MENU_W; x++)
+        dst[x] = rgba_as_565(src[x]);
+      continue;
+    }
+    uint16_t *dst = panel_mid_row(y);
+    for (int x = 0; x < MENU_W; x++)
+      dst[x] = rgba_to_565_round(src[x]);
+    if ((blend[r].l || blend[r].r) && !warned) {
+      warned = 1;
+      static char line[96];
+      snprintf(line, sizeof(line), "menu image: row %d is see-through "
+               "but stored 16-bit (shown opaque)\r\n", y);
+      log_queue(line);
+    }
+    blend[r].l = blend[r].r = 0;
+  }
 }
 
 /* Puts image c, laid out at (dx,dy) on a 960x544 screen, onto the
@@ -926,6 +1001,7 @@ static void compose(const SceDisplayFrameBuf *p, const Image *c,
 
   if (fw <= 0 || fh <= 0 || fx0 + fw > w || fy0 + fh > h)
     return;
+  g_row32_y = -1; /* the menu image may have changed since the last call */
 
   for (int i = 0; i < fw; i++)
     xmap[i] = i * c->w / fw;
@@ -1090,7 +1166,7 @@ static void render_panel(void) {
       Canvas b = { g_band_px, MENU_W, rows, y0 };
       menu_view_render(&b, &local);
       scan_blend_rows(&b, blend);
-      memcpy(panel_row(y0), g_band_px, rows * MENU_W * 4);
+      panel_store_rows(g_band_px, y0, rows, blend);
       memcpy(&g_panel_blend[y0], blend, rows * sizeof(RowSpan));
       __sync_synchronize();
     }
@@ -1136,7 +1212,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       ksceKernelSignalSema(g_render_sema, 1);
     if (g_panel_gen == g_overlay_gen && !(g_panel_seq & 1)) {
       uint32_t t0 = prof_now();
-      Image c = { g_panel_strip, PANEL_STRIP_ROWS, MENU_W, MENU_H };
+      Image c = { panel_src_row, MENU_W, MENU_H };
       compose(p, &c, g_panel_blend, MENU_X, MENU_Y, 1);
       prof_add(PROF_COMPOSE, t0);
     }
@@ -1152,13 +1228,12 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       __sync_synchronize();
       if (g_model_seq == s1) {
         uint32_t t0 = prof_now();
-        for (int k = 0; k < PANEL_STRIPS; k++) {
-          int y0 = k * PANEL_STRIP_ROWS;
-          int rows = MENU_H - y0 < PANEL_STRIP_ROWS ? MENU_H - y0
-                                                    : PANEL_STRIP_ROWS;
-          Canvas c = { g_panel_strip[k], MENU_W, rows, y0 };
-          menu_view_render(&c, &local);
-          scan_blend_rows(&c, &g_panel_blend[y0]);
+        for (int y0 = 0; y0 < MENU_H; y0 += BAND_ROWS) {
+          int rows = MENU_H - y0 < BAND_ROWS ? MENU_H - y0 : BAND_ROWS;
+          Canvas b = { g_band_px, MENU_W, rows, y0 };
+          menu_view_render(&b, &local);
+          scan_blend_rows(&b, &g_panel_blend[y0]);
+          panel_store_rows(g_band_px, y0, rows, &g_panel_blend[y0]);
         }
         prof_add(PROF_RENDER, t0);
         /* the render is complete (of the model at s1): show it now; if the
@@ -1170,7 +1245,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     }
     if (!(rendered_seq & 1)) {
       uint32_t t0 = prof_now();
-      Image c = { g_panel_strip, PANEL_STRIP_ROWS, MENU_W, MENU_H };
+      Image c = { panel_src_row, MENU_W, MENU_H };
       compose(p, &c, g_panel_blend, MENU_X, MENU_Y, 1);
       prof_add(PROF_COMPOSE, t0);
     }
@@ -1183,8 +1258,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       menu_view_render_toast(&c, g_toast_msg, g_toast_err);
       scan_blend_rows(&c, g_toast_blend);
     }
-    uint32_t *const toast_strip[1] = { g_toast_px };
-    Image im = { toast_strip, TOAST_H, TOAST_W, TOAST_H };
+    Image im = { toast_src_row, TOAST_W, TOAST_H };
     compose(p, &im, g_toast_blend, TOAST_X, TOAST_Y, 0);
   }
 }

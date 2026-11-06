@@ -68,6 +68,34 @@ static int check(const char *name, const MenuModel *m) {
   }
   if (!bad)
     printf("  %s: identical\n", name);
+
+  /* the menu image is stored 16-bit except its corner rows: every other
+   * row must be opaque; and how far RGB565 (nearest) is from the image */
+  uint64_t err = 0;
+  int max_err = 0, n_px = 0;
+  for (int y = MENU_EDGE_ROWS; y < MENU_H - MENU_EDGE_ROWS; y++)
+    for (int x = 0; x < MENU_W; x++) {
+      uint32_t v = whole[y * MENU_W + x];
+      if ((v >> 24) != 255) {
+        printf("  %s: row %d x %d is see-through (alpha %u) - must be "
+               "opaque\n", name, y, x, (unsigned)(v >> 24));
+        return 1;
+      }
+      uint32_t q = rgb565_to_rgba(rgba_to_565_round(v));
+      for (int sh = 0; sh < 24; sh += 8) {
+        int d = (int)((v >> sh) & 0xff) - (int)((q >> sh) & 0xff);
+        d = d < 0 ? -d : d;
+        err += d;
+        if (d > max_err)
+          max_err = d;
+      }
+      n_px++;
+    }
+  printf("  %s: rows %d-%d opaque; 16-bit: mean error %.2f, max %d (of 255)"
+         "\n", name, MENU_EDGE_ROWS, MENU_H - MENU_EDGE_ROWS - 1,
+         (double)err / (3.0 * n_px), max_err);
+  if (max_err > 4)
+    return 1;
   return bad;
 }
 

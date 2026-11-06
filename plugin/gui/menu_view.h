@@ -23,6 +23,9 @@
 
 #define MENU_W 880
 #define MENU_H 300
+/* rows at the top and at the bottom with the see-through rounded corners;
+ * every other row of the menu image is opaque (stored 16-bit) */
+#define MENU_EDGE_ROWS 12
 #define MENU_X ((JV_SCREEN_W - MENU_W) / 2)
 #define MENU_Y ((JV_SCREEN_H - MENU_H) / 2)
 

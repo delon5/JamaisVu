@@ -58,12 +58,28 @@ static inline uint16_t rgba_to_565(uint32_t c) {
   return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
 }
 
+/* the same, rounded to the nearest shade (the menu image) */
+static inline uint16_t rgba_to_565_round(uint32_t c) {
+  uint32_t r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
+  r = (r * 31 + 127) / 255;
+  g = (g * 63 + 127) / 255;
+  b = (b * 31 + 127) / 255;
+  return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
 static inline uint32_t rgb565_to_rgba(uint16_t v) {
   uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
   r = (r << 3) | (r >> 2);
   g = (g << 2) | (g >> 4);
   b = (b << 3) | (b >> 2);
   return r | (g << 8) | (b << 16) | 0xff000000u;
+}
+
+/* the colour of c as the 16-bit menu image holds it, alpha kept (the
+ * 32-bit corner rows use it too, so they match the rows next to them) */
+static inline uint32_t rgba_as_565(uint32_t c) {
+  return (rgb565_to_rgba(rgba_to_565_round(c)) & 0x00ffffffu) |
+         (c & 0xff000000u);
 }
 int cv_text(Canvas *c, const Font *f, int x, int y, const char *s,
             uint32_t color);

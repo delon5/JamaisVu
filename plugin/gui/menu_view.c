@@ -354,6 +354,17 @@ static void draw_details(Canvas *c, const MenuModel *m) {
   }
 }
 
+/* cv_round_rect, drawn only in image rows [from, to) */
+static void round_rect_rows(Canvas *c, int x, int y, int w, int h, int r,
+                            uint32_t color, int from, int to) {
+  int lo = from > c->y0 ? from : c->y0;
+  int hi = to < c->y0 + c->h ? to : c->y0 + c->h;
+  if (lo >= hi)
+    return;
+  Canvas v = { c->px + (lo - c->y0) * c->w, c->w, hi - lo, lo };
+  cv_round_rect(&v, x, y, w, h, r, color);
+}
+
 void menu_view_render(Canvas *c, const MenuModel *m) {
   cv_clear(c, 0);
 
@@ -361,9 +372,11 @@ void menu_view_render(Canvas *c, const MenuModel *m) {
   cv_round_rect(c, 0, 0, MENU_W, MENU_H, 12, C_PANEL_EDGE);
   cv_round_rect(c, 1, 1, MENU_W - 2, MENU_H - 2, 11, C_PANEL);
 
-  /* header band */
+  /* header band: the rounded corner rows (1-11), then the rest - each
+   * row drawn once, as the colour is see-through (drawn twice, rows 12-24
+   * were a shade darker: a visible stripe once stored 16-bit) */
+  round_rect_rows(c, 1, 1, MENU_W - 2, 24, 11, C_HEADER, 1, 12);
   cv_fill(c, 1, 12, MENU_W - 2, HEADER_H - 12, C_HEADER);
-  cv_round_rect(c, 1, 1, MENU_W - 2, 24, 11, C_HEADER);
   cv_fill(c, 1, HEADER_H, MENU_W - 2, 1, C_RULE);
   logo_draw(c, 24, 13, 1); /* letters + rising particles centred in the header */
   draw_counter(c, m);
@@ -377,7 +390,9 @@ void menu_view_render(Canvas *c, const MenuModel *m) {
   /* footer band */
   cv_fill(c, 1, FOOTER_Y, MENU_W - 2, 1, C_RULE);
   cv_fill(c, 1, FOOTER_Y + 1, MENU_W - 2, MENU_H - FOOTER_Y - 13, C_FOOTER);
-  cv_round_rect(c, 1, MENU_H - 25, MENU_W - 2, 24, 11, C_FOOTER);
+  /* the rounded corner rows only (see header) */
+  round_rect_rows(c, 1, MENU_H - 25, MENU_W - 2, 24, 11, C_FOOTER,
+                  MENU_H - 12, MENU_H - 1);
   draw_footer(c, m);
 }
 

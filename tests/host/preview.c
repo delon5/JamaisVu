@@ -49,10 +49,22 @@ static void emit(const char *dir, const char *name) {
   fclose(f);
 }
 
+/* JV_PREVIEW_16BIT=1: as the plugin stores the menu image - colours as
+ * RGB565 (nearest shade), alpha kept in the corner rows */
+static void as_stored(Canvas *c) {
+  const char *e = getenv("JV_PREVIEW_16BIT");
+  if (!e || e[0] != '1')
+    return;
+  for (int y = 0; y < MENU_H; y++)
+    for (int x = 0; x < MENU_W; x++)
+      c->px[y * c->w + x] = rgba_as_565(c->px[y * c->w + x]);
+}
+
 static void frame(const char *dir, const char *name, const MenuModel *m) {
   Canvas c = { panel_px, MENU_W, MENU_H, 0 };
   memcpy(fb, bg, sizeof(fb));
   menu_view_render(&c, m);
+  as_stored(&c);
   compose(&c, MENU_X, MENU_Y);
   emit(dir, name);
 }
