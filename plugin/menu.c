@@ -635,12 +635,34 @@ static uint32_t ovl_total_size(void) {
   return t;
 }
 
+/* The root pool is what the kernel itself allocates from: on the PS TV
+ * the LiveArea had only ~1 MB free there but over 4 MB in root contiguous
+ * (3401860 took 636 KB of root first and left the kernel under 128 KB).
+ * So root contiguous first, then root - only while a block of
+ * OVL_ROOT_MARGIN stays free there - then user main. */
+static const int k_ovl_order[3] = { 1, 0, 2 };
+
+static int root_margin_free(void) {
+  SceUID t = ksceKernelAllocMemBlock("JamaisVuMargin", k_ovl_types[0],
+                                     OVL_ROOT_MARGIN, NULL);
+  if (t < 0)
+    return 0;
+  ksceKernelFreeMemBlock(t);
+  return 1;
+}
+
 static void *ovl_piece_alloc(int k) {
   uint32_t size = ovl_piece_size(k);
-  for (int i = 0; i < 3; i++) {
+  for (int o = 0; o < 3; o++) {
+    int i = k_ovl_order[o];
     SceUID uid = ksceKernelAllocMemBlock("JamaisVuMenu", k_ovl_types[i], size,
                                          NULL);
     g_ovl_fail_ret[i] = uid;
+    if (uid >= 0 && i == 0 && !root_margin_free()) {
+      ksceKernelFreeMemBlock(uid); /* would leave the kernel too little */
+      g_ovl_fail_ret[i] = uid = -1;
+      g_ovl_root_short = 1;
+    }
     void *base = NULL;
     if (uid >= 0 && ksceKernelGetMemBlockBase(uid, &base) >= 0 && base) {
       g_mem_blks[k] = uid;
@@ -666,7 +688,7 @@ static void ovl_pieces_free(void) {
 /* diagnostics, only after a refusal: the largest block each pool would
  * still give (found by trying, in 64 KB steps, and freeing at once) */
 static uint32_t ovl_largest_free(SceKernelMemBlockType t) {
-  uint32_t lo = 0, hi = 4u << 20;
+  uint32_t lo = 0, hi = 2u << 20; /* "2048" means 2 MB or more */
   while (hi - lo > 0x10000) {
     uint32_t mid = ((lo + hi) / 2) & ~0xffffu;
     if (mid <= lo)
@@ -700,11 +722,7 @@ static int overlay_acquire(void) {
     if (ok) {
       /* leave the system some room: refuse if the root pool would be left
        * without a block of OVL_ROOT_MARGIN */
-      SceUID t = ksceKernelAllocMemBlock("JamaisVuMargin", k_ovl_types[0],
-                                         OVL_ROOT_MARGIN, NULL);
-      if (t >= 0) {
-        ksceKernelFreeMemBlock(t);
-      } else {
+      if (!root_margin_free()) {
         g_ovl_root_short = 1;
         ok = 0;
       }
@@ -1449,51 +1467,65 @@ static int open_menu(void) {
   int had = g_overlay_ready;
   char tid[16];
   fg_title(tid, sizeof(tid));
+  /* after a refusal, presses within 2 s are ignored: each try takes and
+   * gives back all of the menu's memory (3401860: ~30 tries in 20 s on
+   * the LiveArea, then a crash) */
+  static int64_t refused_until;
+  if (!had && now_us() < refused_until)
+    return -1;
   if (overlay_acquire() < 0) {
     /* like reVita's "Buy more RAM": refuse rather than take memory the
-     * system needs; every refusal is noted, with what is free */
-    static char line[400];
-    if (g_ovl_root_short) {
-      snprintf(line, sizeof(line), "menu not opened in %s: the menu's "
-               "memory (%u KB: root %u KB, root contiguous %u KB, user main "
-               "%u KB) was found, but would leave the kernel no free block "
-               "of %u KB in the root pool - refused; largest free blocks "
-               "now: root %u KB, root contiguous %u KB, user main %u KB\r\n",
-               tid, (unsigned)(ovl_total_size() >> 10),
-               (unsigned)g_ovl_pool_kb[0], (unsigned)g_ovl_pool_kb[1],
-               (unsigned)g_ovl_pool_kb[2], (unsigned)(OVL_ROOT_MARGIN >> 10),
+     * system needs. Logged with the largest free blocks once per app
+     * run (measuring takes memory too), briefly after that. */
+    static SceUID logged_pid = -1;
+    static char line[420];
+    SceUID pid = g_fg_pid;
+    refused_until = now_us() + 2000000;
+    int k = g_ovl_fail_piece < 0 ? 0 : g_ovl_fail_piece;
+    int n;
+    if (g_ovl_fail_piece < 0)
+      n = snprintf(line, sizeof(line), "menu not opened in %s: the menu's "
+                   "memory (%u KB: root %u KB, root contiguous %u KB, user "
+                   "main %u KB) was found, but would leave the kernel no "
+                   "free block of %u KB in the root pool", tid,
+                   (unsigned)(ovl_total_size() >> 10),
+                   (unsigned)g_ovl_pool_kb[0], (unsigned)g_ovl_pool_kb[1],
+                   (unsigned)g_ovl_pool_kb[2],
+                   (unsigned)(OVL_ROOT_MARGIN >> 10));
+    else
+      n = snprintf(line, sizeof(line), "menu not opened in %s: not enough "
+                   "free kernel memory for the %s (block %d of %d, %u KB; "
+                   "root contiguous 0x%08X, root 0x%08X%s, user main "
+                   "0x%08X; menu needs %u KB in all)", tid,
+                   ovl_piece_name(k), k + 1, OVL_PIECES,
+                   (unsigned)(g_ovl_fail_size >> 10),
+                   (unsigned)g_ovl_fail_ret[1], (unsigned)g_ovl_fail_ret[0],
+                   g_ovl_root_short ? " (held back: would leave the kernel "
+                   "too little)" : "", (unsigned)g_ovl_fail_ret[2],
+                   (unsigned)(ovl_total_size() >> 10));
+    if (n < 0 || n > (int)sizeof(line) - 160)
+      n = (int)sizeof(line) - 160;
+    if (pid != logged_pid) {
+      logged_pid = pid;
+      snprintf(line + n, sizeof(line) - n, "; largest free blocks now: "
+               "root %u KB, root contiguous %u KB, user main %u KB (2048 = "
+               "2 MB or more)\r\n",
                (unsigned)(ovl_largest_free(k_ovl_types[0]) >> 10),
                (unsigned)(ovl_largest_free(k_ovl_types[1]) >> 10),
                (unsigned)(ovl_largest_free(k_ovl_types[2]) >> 10));
     } else {
-      int k = g_ovl_fail_piece < 0 ? 0 : g_ovl_fail_piece;
-      snprintf(line, sizeof(line), "menu not opened in %s: not enough free "
-               "kernel memory for the %s (block %d of %d, %u KB; root "
-               "0x%08X, root contiguous 0x%08X, user main 0x%08X); largest "
-               "free blocks now: root %u KB, root contiguous %u KB, user "
-               "main %u KB (menu needs %u KB in all, no block over %u KB)"
-               "\r\n", tid, ovl_piece_name(k), k + 1, OVL_PIECES,
-               (unsigned)(g_ovl_fail_size >> 10),
-               (unsigned)g_ovl_fail_ret[0], (unsigned)g_ovl_fail_ret[1],
-               (unsigned)g_ovl_fail_ret[2],
-               (unsigned)(ovl_largest_free(k_ovl_types[0]) >> 10),
-               (unsigned)(ovl_largest_free(k_ovl_types[1]) >> 10),
-               (unsigned)(ovl_largest_free(k_ovl_types[2]) >> 10),
-               (unsigned)(ovl_total_size() >> 10),
-               (unsigned)(ovl_piece_size(0) >> 10));
+      snprintf(line + n, sizeof(line) - n, "\r\n");
     }
     log_queue(line);
     return -1;
   }
   if (!had) {
-    static char line[260];
+    static char line[220];
     snprintf(line, sizeof(line), "menu opened in %s, memory %u KB in %d "
-             "blocks: root %u KB, root contiguous %u KB, user main %u KB; "
-             "largest root block still free: %u KB\r\n", tid,
-             (unsigned)(ovl_total_size() >> 10), OVL_PIECES,
-             (unsigned)g_ovl_pool_kb[0], (unsigned)g_ovl_pool_kb[1],
-             (unsigned)g_ovl_pool_kb[2],
-             (unsigned)(ovl_largest_free(k_ovl_types[0]) >> 10));
+             "blocks: root contiguous %u KB, root %u KB, user main %u KB\r\n",
+             tid, (unsigned)(ovl_total_size() >> 10), OVL_PIECES,
+             (unsigned)g_ovl_pool_kb[1], (unsigned)g_ovl_pool_kb[0],
+             (unsigned)g_ovl_pool_kb[2]);
     log_queue(line);
   }
   g_capture_ok = 0;
