@@ -221,6 +221,9 @@ static volatile int64_t g_lockskip_until; /* 0 = no patch to remove */
 /* a finished load's record, kept open until then (heartbeat thread) */
 static volatile int64_t g_alive_until;
 static void alive_stop(void);
+/* diagnostics: kernel object counts (see counts_text) */
+#define COUNTS_MAX 16
+static int counts_text(char *out, int len, int *vals);
 
 static char g_toast_msg[128];
 static volatile int g_toast_err;
@@ -2015,6 +2018,33 @@ static int input_thread(SceSize args, void *argp) {
       }
     }
 
+    /* object counts: every 10 s in the 2 minutes after a save/load (the PS
+     * TV crashed as apps started 40-80 s after loads), else once a
+     * minute; logged when they changed */
+    {
+      static int64_t next_counts;
+      static int last[COUNTS_MAX];
+      int64_t tn = now_us();
+      if (tn >= next_counts) {
+        int64_t since = g_t_resume ? ksceKernelGetSystemTimeWide() -
+                                     g_t_resume : -1;
+        int recent = since >= 0 && since < 120000000;
+        next_counts = tn + (recent ? 10000000 : 60000000);
+        static char cl[480];
+        int vals[COUNTS_MAX];
+        memset(vals, 0, sizeof(vals));
+        int n = snprintf(cl, sizeof(cl), "    counts %d s after the last "
+                         "wake-up: ", since >= 0 ? (int)(since / 1000000)
+                                                 : -1);
+        n += counts_text(cl + n, sizeof(cl) - n - 3, vals);
+        snprintf(cl + n, sizeof(cl) - n, "\r\n");
+        if (memcmp(vals, last, sizeof(last)) != 0) {
+          memcpy(last, vals, sizeof(last));
+          log_queue(cl);
+        }
+      }
+    }
+
     uint32_t pressed = pad.buttons & ~prev;
     prev = pad.buttons;
     prof_add(PROF_INPUT, t0); /* the poll itself, not the menu actions */
@@ -2649,6 +2679,87 @@ static void after_resume(void) {
   }
 }
 
+/* Diagnostics (PS TV: crashes as apps start after a load): how many
+ * kernel objects of each kind exist, and how full the open-file table is.
+ * Only counted - nothing is changed. A class this firmware does not know
+ * shows as "?". */
+static const char *const k_obj_classes[][2] = {
+  { "SceUIDProcessClass", "processes" },
+  { "SceUIDThreadClass", "threads" },
+  { "SceUIDModuleClass", "modules" },
+  { "SceUIDMemBlockClass", "memory blocks" },
+  { "SceUIDFileClass", "open files" },
+  { "SceUIDDirClass", "open folders" },
+  { "SceUIDSemaphoreClass", "semaphores" },
+  { "SceUIDEventFlagClass", "event flags" },
+  { "SceUIDMutexClass", "mutexes" },
+};
+#define N_OBJ_CLASSES (sizeof(k_obj_classes) / sizeof(k_obj_classes[0]))
+_Static_assert(N_OBJ_CLASSES + 2 <= COUNTS_MAX, "COUNTS_MAX too small");
+
+static int counts_text(char *out, int len, int *vals) {
+  int n = 0;
+  for (unsigned i = 0; i < N_OBJ_CLASSES && n < len - 40; i++) {
+    int c = jv_count_class(k_obj_classes[i][0]);
+    if (vals)
+      vals[i] = c;
+    if (c >= 0)
+      n += snprintf(out + n, len - n, "%s%s %d", i ? ", " : "",
+                    k_obj_classes[i][1], c);
+    else
+      n += snprintf(out + n, len - n, "%s%s ?", i ? ", " : "",
+                    k_obj_classes[i][1]);
+  }
+  uint32_t tot, with_file, held;
+  fs_vnode_usage(&tot, &with_file, &held);
+  if (vals) {
+    vals[N_OBJ_CLASSES] = (int)with_file;
+    vals[N_OBJ_CLASSES + 1] = (int)held;
+  }
+  if (n < len - 1)
+    n += snprintf(out + n, len - n, "; file table: %u of %u entries with a "
+                  "file, %u held open", (unsigned)with_file, (unsigned)tot,
+                  (unsigned)held);
+  return n;
+}
+
+/* log_append (worker, save/load) or log_queue (other threads) */
+static void counts_log(const char *when, int queue) {
+  static char line[480];
+  int n = snprintf(line, sizeof(line), "    counts %s: ", when);
+  n += counts_text(line + n, sizeof(line) - n - 3, NULL);
+  snprintf(line + n, sizeof(line) - n, "\r\n");
+  if (queue)
+    log_queue(line);
+  else
+    log_append(line);
+}
+
+/* after a load: the open files that were gone or had changed size */
+static void fs_notes_log(void) {
+  static char line[300];
+  const FsLoadNotes *f = &g_fs_notes;
+  snprintf(line, sizeof(line), "    open files after the load: %u gone (%u "
+           "entries freed, %u held open), %u changed size\r\n",
+           (unsigned)f->gone, (unsigned)f->freed, (unsigned)f->held,
+           (unsigned)f->resized);
+  log_append(line);
+  for (uint32_t i = 0; i < f->n && i < FS_NOTE_MAX; i++) {
+    const FsNote *e = &f->note[i];
+    if (e->res < 0)
+      snprintf(line, sizeof(line), "      gone: %s%s (refs %u, lookup "
+               "0x%08X, entry %s)\r\n", e->drive, e->path,
+               (unsigned)e->refs, (unsigned)e->res,
+               e->freed ? "freed" : "kept, drive read-only");
+    else
+      snprintf(line, sizeof(line), "      size: %s%s %llu -> %llu bytes "
+               "(refs %u)\r\n", e->drive, e->path,
+               (unsigned long long)e->size_was,
+               (unsigned long long)e->size_now, (unsigned)e->refs);
+    log_append(line);
+  }
+}
+
 static void run_and_wait(int mode, int slot, const uint8_t *nonce,
                          int debug_mode, int variant) {
   ksceKernelClearEventFlag(g_evf, ~EVF_RESUMED);
@@ -2668,6 +2779,8 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
            jv_build_id(), variant == JV_PAYLOAD_DEFAULT ? "default" : "?",
            why);
   log_append(start);
+  counts_log(mode == JAMAISVU_MODE_LOAD ? "before the load" :
+             "before the save", 0);
   if (mode == JAMAISVU_MODE_LOAD && debug_mode == JV_TEST_NONE) {
     /* ux0 works now: the device name to check after the load whether a
      * USB drive behind it is back */
@@ -2799,7 +2912,10 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
                (unsigned)f->ms[3], (unsigned)f->vnodes, (unsigned)f->ms[4],
                (unsigned)f->fnodes, (unsigned)f->fnodes_skipped);
       log_append(tl);
+      fs_notes_log();
     }
+    counts_log(g_res_mode == JAMAISVU_MODE_LOAD ? "after the load" :
+               "after the save", 0);
   }
   trace_wake(JV_WAKE_TIMING);
   if (g_trace_keep) {

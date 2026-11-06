@@ -73,4 +73,28 @@ typedef struct {
 } FsUpdateTiming;
 extern FsUpdateTiming g_fs_update_timing;
 
+/* Diagnostics of the last update_filesystem(): open files that were not
+ * found again (gone between the save and the load) - their entry freed if
+ * nothing held it, else the drive made read-only - and open files whose
+ * size changed. The first FS_NOTE_MAX are kept with their path. */
+#define FS_NOTE_MAX 10
+typedef struct {
+  char drive[8];
+  char path[100];          /* ASCII (other characters as '?') */
+  uint32_t refs;           /* references to the entry */
+  int res;                 /* lookup result (< 0: not found) */
+  uint8_t freed;           /* entry freed by JamaisVu */
+  uint64_t size_was, size_now;
+} FsNote;
+typedef struct {
+  uint32_t gone, freed, held, resized;
+  uint32_t n;
+  FsNote note[FS_NOTE_MAX];
+} FsLoadNotes;
+extern FsLoadNotes g_fs_notes;
+
+/* the open-file (vnode) table now: entries, entries with a file, entries
+ * held open */
+void fs_vnode_usage(uint32_t *total, uint32_t *with_file, uint32_t *held);
+
 #endif

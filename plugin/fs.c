@@ -312,6 +312,42 @@ static uint32_t update_fnodes(uint32_t *skipped, uint32_t only) {
   return used;
 }
 
+FsLoadNotes g_fs_notes;
+
+static void note_file(void *fnode, uint32_t refs, int res, int freed,
+                      uint64_t was, uint64_t now) {
+  if (g_fs_notes.n >= FS_NOTE_MAX)
+    return;
+  FsNote *n = &g_fs_notes.note[g_fs_notes.n++];
+  const char *nm = fs_name(fnode_fs(fnode));
+  snprintf(n->drive, sizeof(n->drive), "%s", nm ? nm : "?");
+  const uint16_t *w = (const uint16_t *)fnode; /* UTF-16 path */
+  uint32_t k = 0;
+  for (; k < sizeof(n->path) - 1 && k < 0x208 / 2 && w[k]; k++)
+    n->path[k] = w[k] < 0x80 && w[k] >= 0x20 ? (char)w[k] : '?';
+  n->path[k] = '\0';
+  n->refs = refs;
+  n->res = res;
+  n->freed = (uint8_t)freed;
+  n->size_was = was;
+  n->size_now = now;
+}
+
+void fs_vnode_usage(uint32_t *total, uint32_t *with_file, uint32_t *held) {
+  *total = *with_file = *held = 0;
+  if (!g_num_vnodes || !g_vnodes || !g_vnode_size)
+    return;
+  int num = *g_num_vnodes;
+  for (int i = 0; i < num; i++) {
+    void *vp = (void *)(*g_vnodes + *g_vnode_size * i);
+    (*total)++;
+    if (*(uintptr_t **)(vp + 0x48))
+      (*with_file)++;
+    if (*(uint32_t *)(vp + 0x58))
+      (*held)++;
+  }
+}
+
 /* Returns the number of files that are still open but no longer exist on
  * the card. Their cached cluster chains are stale; writing through them
  * could overwrite other files. */
@@ -331,18 +367,28 @@ static int update_vnodes(uint32_t only) {
       if (looked_up && idx >= 0)
         g_fnode_done[idx / 32] |= 1u << (idx % 32);
       if (res < 0) {
+        g_fs_notes.gone++;
+        note_file(fnode, refCount, res, refCount == 0, 0, 0);
         if (refCount == 0) {
+          g_fs_notes.freed++;
           void *nc = *(uintptr_t **)(vp + 0x70);
           if (nc)
             clear_ncache(nc, 0);
           ksceVopInactive(vp);
           vfs_free_vnode(vp);
         } else {
+          g_fs_notes.held++;
           stale_open++;
           const char *nm = fs_name(fnode_fs(fnode));
           ro_add(nm ? nm : "?");
         }
       } else if (res != FNODE_UNUSED) {
+        uint64_t was = *(uint64_t *)(vp + 0x80);
+        uint64_t now = *(uint64_t *)(fnode + 0x218);
+        if (was != now) {
+          g_fs_notes.resized++;
+          note_file(fnode, refCount, res, 0, was, now);
+        }
         *(uint64_t *)(vp + 0x80) = *(uint64_t *)(fnode + 0x218);
       }
     }
@@ -529,6 +575,7 @@ int update_filesystem(void) {
   memset(tm, 0, sizeof(*tm));
   tm->vnodes = (uint32_t)*g_num_vnodes;
   memset(g_fnode_done, 0, sizeof(g_fnode_done));
+  memset(&g_fs_notes, 0, sizeof(g_fs_notes));
   g_ro_n = 0;
   g_skip_mask = 0;
   g_late_mask = 0;

@@ -167,6 +167,20 @@ const char *jv_disabled_reason(void) {
 }
 
 /* Virtual -> physical address of a kernel object (ATS1CPR). 0 on fault. */
+int jv_count_class(const char *name) {
+  static SceUID vec[4096]; /* only the count is used */
+  SceClass *cls = NULL;
+  int n = 0;
+  if (!_ksceKernelFindClassByName || !_ksceGUIDGetUIDVectorByClass)
+    return -1;
+  int r = _ksceKernelFindClassByName(name, &cls);
+  if (r < 0 || !cls)
+    return r < 0 ? r : -1;
+  r = _ksceGUIDGetUIDVectorByClass(cls, 8, vec,
+                                   (int)(sizeof(vec) / sizeof(vec[0])), &n);
+  return r < 0 ? r : n;
+}
+
 static uint32_t va2pa(const volatile void *va) {
   uint32_t par;
   __asm__ volatile ("mcr p15, 0, %1, c7, c8, 0\n\t"

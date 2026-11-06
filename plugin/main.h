@@ -23,6 +23,9 @@ int jv_armed(void);
 int jv_armed_untested(void);
 const char *jv_disabled_reason(void);
 const char *jv_build_id(void);
+/* number of kernel objects of a class (e.g. "SceUIDProcessClass"), < 0 if
+ * the class is unknown (diagnostics: counted, nothing changed) */
+int jv_count_class(const char *name);
 /* clock speeds: record before a save/load, put back after it (see main.c) */
 void jv_clocks_remember(char *out, int len);
 void jv_clocks_restore(char *out, int len);
