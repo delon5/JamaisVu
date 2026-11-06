@@ -920,6 +920,63 @@ static void scan_blend_rows(const Canvas *c, RowSpan *rows) {
   }
 }
 
+/* row y of a 16-bit image as 32-bit pixels in buf (corners as stored) */
+static const uint32_t *img_row32(const Img16 *im, int y, uint32_t *buf) {
+  const uint16_t *s = img_row16(im, y);
+  for (int x = 0; x < im->w; x++)
+    buf[x] = rgb565_to_rgba(s[x]);
+  int e = img_edge(im, y);
+  if (e >= 0) {
+    const uint32_t *c = im->corner + e * 2 * MENU_EDGE_COLS;
+    memcpy(buf, c, MENU_EDGE_COLS * 4);
+    memcpy(buf + im->w - MENU_EDGE_COLS, c + MENU_EDGE_COLS,
+           MENU_EDGE_COLS * 4);
+  }
+  return buf;
+}
+
+/* a see-through row of either image, as 32-bit pixels */
+static uint32_t g_row32[MENU_W];
+
+/* Stores rendered band rows (32-bit, image rows y0 ..) in a 16-bit image:
+ * every pixel as RGB565 (nearest shade), the corners also 32-bit (alpha
+ * kept, colours rounded the same way). Only the corners may be
+ * see-through: anything else is shown opaque (noted once in log.txt). */
+static void img_store_rows(Img16 *im, const uint32_t *band, int y0,
+                           int rows, RowSpan *blend) {
+  static int warned;
+  for (int r = 0; r < rows; r++) {
+    int y = y0 + r;
+    const uint32_t *src = band + r * im->w;
+    uint16_t *dst = img_row16(im, y);
+    for (int x = 0; x < im->w; x++)
+      dst[x] = rgba_to_565_round(src[x]);
+    int e = img_edge(im, y);
+    int lim = e >= 0 ? MENU_EDGE_COLS : 0;
+    if (e >= 0) {
+      uint32_t *c = im->corner + e * 2 * MENU_EDGE_COLS;
+      for (int x = 0; x < MENU_EDGE_COLS; x++) {
+        c[x] = rgba_as_565(src[x]);
+        c[MENU_EDGE_COLS + x] = rgba_as_565(src[im->w - MENU_EDGE_COLS + x]);
+      }
+    }
+    if (blend[r].l > lim || blend[r].r > lim) {
+      if (!warned) {
+        static char line[112];
+        warned = 1;
+        snprintf(line, sizeof(line), "menu image %dx%d: row %d see-through "
+                 "beyond its corners (%u/%u) - shown opaque\r\n", im->w,
+                 im->h, y, blend[r].l, blend[r].r);
+        log_queue(line);
+      }
+      if (blend[r].l > lim)
+        blend[r].l = (uint16_t)lim;
+      if (blend[r].r > lim)
+        blend[r].r = (uint16_t)lim;
+    }
+  }
+}
+
 /* One stored (RGB565) row at the framebuffer's width, every pixel opaque:
  * converted and scaled in one pass (3401860..86d4b1c converted it into a
  * separate row first: ~11 ms per frame at 1080p in GTA: San Andreas). */
