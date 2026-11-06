@@ -115,12 +115,51 @@ static inline int img_edge(const Img16 *im, int y) {
 static inline uint16_t *img_row16(const Img16 *im, int y) {
   return im->strip[y / im->strip_rows] + (y % im->strip_rows) * im->w;
 }
-/* 0: test build without the process-event hook (random reboots since it
- * was added, one as VitaShell was started from the LiveArea) */
-#ifndef JV_PROCEV_HOOK
-#define JV_PROCEV_HOOK 0
-#endif
-static volatile SceUID g_fg_pid; /* app in the foreground, 0: none known */
+/* The apps that read the controller lately (JamaisVu's controller hooks
+ * run inside the reading app): two places, the oldest is replaced. Used at
+ * START + UP to tell which app is in front - no process-event hook (4cf1f86
+ * hooked SceProcessmgr's event handler, as PSV-Shell-Plus does too: the PS
+ * TV crashed while apps started; a load after closing the game, then
+ * Settings and VitaShell, reproduced it). */
+static volatile SceUID g_rd_pid[2];
+static volatile int64_t g_rd_t[2];
+
+static inline void note_reader(void) {
+  SceUID pid = ksceKernelGetProcessId();
+  int64_t t = ksceKernelGetSystemTimeWide();
+  if (pid == g_rd_pid[0])
+    g_rd_t[0] = t;
+  else if (pid == g_rd_pid[1])
+    g_rd_t[1] = t;
+  else {
+    int k = g_rd_t[0] <= g_rd_t[1] ? 0 : 1;
+    g_rd_pid[k] = pid;
+    g_rd_t[k] = t;
+  }
+}
+
+#define READER_RECENT_US 500000
+/* the app (not the LiveArea) that read the controller in the last 0.5 s,
+ * or 0 */
+static SceUID fg_reader(void) {
+  int64_t now = ksceKernelGetSystemTimeWide();
+  SceUID best = 0;
+  int64_t best_t = 0;
+  for (int k = 0; k < 2; k++) {
+    SceUID pid = g_rd_pid[k];
+    int64_t t = g_rd_t[k];
+    if (!pid || now - t > READER_RECENT_US || t < best_t)
+      continue;
+    char tid[16];
+    memset(tid, 0, sizeof(tid));
+    if (ksceKernelGetProcessTitleId(pid, tid, sizeof(tid)) < 0 ||
+        strncmp(tid, "main", 4) == 0)
+      continue; /* gone, or the LiveArea (SceShell) */
+    best = pid;
+    best_t = t;
+  }
+  return best;
+}
 static SceUID g_ovl_mtx = -1;
 static volatile int g_overlay_ready;
 static volatile int g_overlay_users;
@@ -1478,6 +1517,7 @@ static SceUID g_ctrl_hooks[N_CTRL_HOOKS];
 #define DEFINE_CTRL_HOOK(idx, nid, neg)                                   \
   static int ctrl_hook_##idx(int port, SceCtrlData *pad, int count) {     \
     uint32_t t0 = prof_now();                                             \
+    note_reader();                                                        \
     int ret = TAI_CONTINUE(int, g_ctrl_refs[idx], port, pad, count);      \
     uint32_t t1 = prof_now();                                             \
     ret = mask_input(pad, ret, neg);                                      \
@@ -1590,10 +1630,10 @@ static void perf_report(void) {
  * is opened from JamaisVu's own input thread, whose process is the
  * kernel's, so its title ID is not the game's */
 static void fg_title(char *tid, int len) {
-  SceUID pid = g_fg_pid;
+  SceUID pid = fg_reader();
   memset(tid, 0, len);
   if (!pid || ksceKernelGetProcessTitleId(pid, tid, len) < 0 || !tid[0])
-    snprintf(tid, len, pid || !JV_PROCEV_HOOK ? "?" : "LiveArea");
+    snprintf(tid, len, pid ? "?" : "LiveArea");
   tid[len - 1] = '\0';
 }
 
@@ -1614,7 +1654,7 @@ static int open_menu(void) {
      * run (measuring takes memory too), briefly after that. */
     static SceUID logged_pid = -1;
     static char line[420];
-    SceUID pid = g_fg_pid;
+    SceUID pid = fg_reader();
     refused_until = now_us() + 2000000;
     int k = g_ovl_fail_piece < 0 ? 0 : g_ovl_fail_piece;
     int n;
@@ -1704,26 +1744,21 @@ static void confirm_prepare(int all) {
  * JamaisVu stays out of them altogether - no menu, no input taken, nothing
  * drawn, no save: their frames are not a Vita game's (the menu stayed
  * invisible in Adrenaline), and snapshotting the emulator is untested.
- * As PSV-Shell-Plus does: every app start/resume is checked with
- * ksceSblACMgrIsPspEmu; the note is cleared when that app is suspended or
- * exits. */
+ * Checked only when START + UP is pressed: the app that read the
+ * controller in the last 0.5 s, asked with ksceSblACMgrIsPspEmu (a PSP game
+ * suspended behind the LiveArea reads nothing, so the LiveArea is not
+ * blocked). */
 int ksceSblACMgrIsPspEmu(SceUID pid);
-static tai_hook_ref_t g_procev_ref;
-static SceUID g_procev_hook = -1;
-static volatile SceUID g_pspemu_pid; /* 0: no PSP emulator in front */
 
-static int procev_hook(int pid, int ev, int a3, int a4, int *a5, int a6) {
-  if (ev == 1 || ev == 5) { /* startup, resume */
-    g_fg_pid = pid;
-    if (ksceSblACMgrIsPspEmu(pid))
-      g_pspemu_pid = pid;
-  } else if (ev == 3 || ev == 4) { /* exit, suspend */
-    if (pid == g_fg_pid)
-      g_fg_pid = 0;
-    if (pid == g_pspemu_pid)
-      g_pspemu_pid = 0;
+static SceUID pspemu_in_front(void) {
+  int64_t now = ksceKernelGetSystemTimeWide();
+  for (int k = 0; k < 2; k++) {
+    SceUID pid = g_rd_pid[k];
+    if (pid && now - g_rd_t[k] <= READER_RECENT_US &&
+        ksceSblACMgrIsPspEmu(pid) > 0)
+      return pid;
   }
-  return TAI_CONTINUE(int, g_procev_ref, pid, ev, a3, a4, a5, a6);
+  return 0;
 }
 
 static void handle_buttons(uint32_t held, uint32_t pressed) {
@@ -1736,10 +1771,11 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   if (!g_menu_open) {
     if (!combo)
       return;
-    if (g_pspemu_pid) {
-      /* noted once per emulator start in log.txt, otherwise silent */
+    SceUID psp = pspemu_in_front();
+    if (psp) {
+      /* noted once per emulator run in log.txt, otherwise silent */
       static SceUID noted;
-      SceUID pid = g_pspemu_pid;
+      SceUID pid = psp;
       if (noted != pid) {
         static char tid[16], line[128];
         noted = pid;
@@ -3742,24 +3778,6 @@ int menu_init(const char *status_text) {
   CTRL_HOOKS(INSTALL_CTRL_HOOK)
 
   /* app starts/resumes: is the PSP emulator in front? (as PSV-Shell-Plus) */
-#if JV_PROCEV_HOOK
-  g_procev_hook = taiHookFunctionImportForKernel(
-      KERNEL_PID, &g_procev_ref, "SceProcessmgr", 0x887F19D0, 0x414CC813,
-      procev_hook);
-#else
-  /* test build: the process-event hook stays out (reboots when apps start,
-   * e.g. VitaShell from the LiveArea, since d132bb4) */
-  (void)procev_hook;
-  log_queue("test build: PSP emulator check (process-event hook) off - "
-            "the menu also opens in PSP/PS1 games\r\n");
-#endif
-  if (JV_PROCEV_HOOK && g_procev_hook < 0) {
-    static char line[96];
-    snprintf(line, sizeof(line), "PSP emulator check not available (hook "
-             "0x%08X): the menu also opens in PSP/PS1 games\r\n",
-             (unsigned)g_procev_hook);
-    log_queue(line);
-  }
 
   thid = ksceKernelCreateThread("JamaisVuInput", input_thread, 0x3C, 0x2000,
                                 0, 0x10000, NULL);
