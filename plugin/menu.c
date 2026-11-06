@@ -59,54 +59,61 @@ static volatile int g_cancel_req; /* ○ while preparing a slot */
  * then three blocks too (its largest free blocks: 1024 KB and 640 KB, the
  * menu image alone needed 1032 KB).
  *
- * The menu image is stored 16-bit (RGB565, rounded to the nearest shade):
- * it is drawn 32-bit in bands as before and converted when a band is
- * stored, and converted back row by row when put on the frame. Only the
- * rows with the see-through rounded corners (PANEL_EDGE_ROWS at the top
- * and at the bottom) keep 32 bits, for their alpha, with the same rounded
- * colours; every other row is opaque (checked by the host tests).
- * 564 KB instead of 1032 KB.
+ * The menu image and the message box are stored 16-bit (RGB565, rounded
+ * to the nearest shade): drawn 32-bit in bands, converted when a band is
+ * stored, converted back row by row when put on the frame. Only their
+ * see-through rounded corners - MENU_EDGE_COLS pixels at each end of the
+ * MENU_EDGE_ROWS rows at the top and at the bottom - keep 32 bits, for
+ * their alpha (colours rounded the same way); everything else is opaque
+ * (checked by the host tests). Menu image 516 KB (was 1032 KB 32-bit),
+ * message box 61 KB (was 122 KB).
  * The thumbnails (RGB565, as in the slot files) are three to a block. */
-#define PANEL_EDGE_ROWS MENU_EDGE_ROWS
-#define PANEL_MID_ROWS (MENU_H - 2 * PANEL_EDGE_ROWS)
-#define PANEL_MID_STRIP_ROWS 92
-#define PANEL_MID_STRIPS \
-  ((PANEL_MID_ROWS + PANEL_MID_STRIP_ROWS - 1) / PANEL_MID_STRIP_ROWS)
+#define PANEL_STRIP_ROWS 100
+#define PANEL_STRIPS ((MENU_H + PANEL_STRIP_ROWS - 1) / PANEL_STRIP_ROWS)
+#define TOAST_BAND_ROWS 8 /* the message box is drawn in bands this high */
+#define CORNER_PX (2 * MENU_EDGE_ROWS * 2 * MENU_EDGE_COLS)
 #define THUMB_PER_BLOCK 3
 #define THUMB_BLOCKS ((JV_NUM_SLOTS + THUMB_PER_BLOCK) / THUMB_PER_BLOCK)
 /* in allocation order, largest first */
 enum {
-  OVL_P_PANEL = 0,                       /* PANEL_MID_STRIPS, 16-bit, 160 KB */
-  OVL_P_TOAST = PANEL_MID_STRIPS,        /* 124 KB */
-  OVL_P_THUMBS,                          /* THUMB_BLOCKS, 3 x 16-bit, 88 KB */
-  OVL_P_EDGE = OVL_P_THUMBS + THUMB_BLOCKS, /* corner rows, 32-bit, 84 KB */
-  OVL_P_BAND,                            /* band + row buffer, 80 KB */
-  OVL_P_EXT0,                            /* Japanese glyph sets */
-  OVL_P_EXT1,
-  OVL_PIECES
+  OVL_P_PANEL = 0,                       /* PANEL_STRIPS, 16-bit, 172 KB */
+  OVL_P_THUMBS = PANEL_STRIPS,           /* THUMB_BLOCKS, 3 x 16-bit, 88 KB */
+  OVL_P_BAND = OVL_P_THUMBS + THUMB_BLOCKS, /* band, row buffer, corners */
+  OVL_P_TOAST,                           /* message box + its band, 80 KB */
+  OVL_P_EXT0,                            /* Japanese letter sets: not */
+  OVL_P_EXT1,                            /* taken when the menu opens */
+  OVL_PIECES,
+  OVL_FIXED = OVL_P_EXT0                 /* blocks taken when it opens */
 };
 static SceUID g_mem_blks[OVL_PIECES];
-static uint16_t *g_panel_mid[PANEL_MID_STRIPS];
-static uint32_t *g_panel_edge;
 
-static inline int panel_is_edge(int y) {
-  return y < PANEL_EDGE_ROWS || y >= MENU_H - PANEL_EDGE_ROWS;
+/* a 16-bit image with 32-bit corners */
+typedef struct {
+  uint16_t *strip[PANEL_STRIPS];
+  int strip_rows;
+  int w, h;
+  uint32_t *corner; /* CORNER_PX: per edge row, the left then the right
+                       MENU_EDGE_COLS pixels */
+} Img16;
+static Img16 g_panel_img = { { 0 }, PANEL_STRIP_ROWS, MENU_W, MENU_H, 0 };
+static Img16 g_toast_img = { { 0 }, TOAST_H, TOAST_W, TOAST_H, 0 };
+
+static inline int img_edge(const Img16 *im, int y) {
+  if (y < MENU_EDGE_ROWS)
+    return y;
+  if (y >= im->h - MENU_EDGE_ROWS)
+    return y - (im->h - 2 * MENU_EDGE_ROWS);
+  return -1;
 }
-static inline uint32_t *panel_edge_row(int y) {
-  int e = y < PANEL_EDGE_ROWS ? y : y - PANEL_MID_ROWS;
-  return g_panel_edge + e * MENU_W;
-}
-static inline uint16_t *panel_mid_row(int y) {
-  int m = y - PANEL_EDGE_ROWS;
-  return g_panel_mid[m / PANEL_MID_STRIP_ROWS] +
-         (m % PANEL_MID_STRIP_ROWS) * MENU_W;
+static inline uint16_t *img_row16(const Img16 *im, int y) {
+  return im->strip[y / im->strip_rows] + (y % im->strip_rows) * im->w;
 }
 static volatile SceUID g_fg_pid; /* app in the foreground, 0: none known */
 static SceUID g_ovl_mtx = -1;
 static volatile int g_overlay_ready;
 static volatile int g_overlay_users;
 static volatile uint32_t g_overlay_gen; /* +1 per acquire: buffers are new */
-static uint32_t *g_toast_px, *g_rowbuf, *g_band_px;
+static uint32_t *g_toast_band, *g_rowbuf, *g_band_px;
 
 /* Widest frame the menu is drawn on: 960 on the handhelds; the PS TV's
  * home screen may use a larger frame for the TV (up to 1920x1088), so
@@ -133,9 +140,11 @@ static uint16_t *g_thumbs[JV_NUM_SLOTS + 1]; /* RGB565 */
 static void model_clear_thumbs(void);
 
 /* Glyphs for Japanese (non-ASCII) game names, read from jpfont.bin on
- * the Memory Card when the slot list is read; part of the overlay memory.
- * Two sets: the worker fills the one the model does not point to, then
- * switches the model to it. Drawing counts itself in g_ext_users[set]
+ * the Memory Card when the slot list is read, into a set sized to the
+ * letters the names use (each letter once; usually 5-25 KB, was a fixed
+ * 52 KB, twice). The set is kept while the names need no new letter.
+ * Otherwise a new set is filled in the other place (0/1), the model is
+ * switched to it, and the old one is freed once nothing draws with it. Drawing counts itself in g_ext_users[set]
  * (after taking its copy of the model, then re-checking the model), so a
  * set is only refilled once nothing draws with it. (One set, with the
  * worker waiting for drawing to finish, failed in games: the menu is drawn
@@ -610,43 +619,38 @@ static int g_ovl_fail_ret[3];
 static uint32_t g_ovl_pool_kb[3]; /* KB taken from each pool */
 static int g_ovl_root_short; /* refused: no margin left in root */
 
-#define EXT_SET_BYTES ((sizeof(ExtGlyphs) + 3) & ~3u)
 /* left free in the root pool after the menu took its memory (the kernel
  * and the slot preparation, 256 KB, need some); refused otherwise */
 #define OVL_ROOT_MARGIN 0x20000
 
 static const char *ovl_piece_name(int k) {
-  if (k < OVL_P_TOAST)
+  if (k < OVL_P_THUMBS)
     return "menu image";
-  if (k == OVL_P_TOAST)
-    return "message box";
-  if (k < OVL_P_EDGE)
+  if (k < OVL_P_BAND)
     return "thumbnails";
-  if (k == OVL_P_EDGE)
-    return "menu image corners";
   if (k == OVL_P_BAND)
     return "drawing buffers";
+  if (k == OVL_P_TOAST)
+    return "message box";
   return "Japanese glyphs";
 }
 
 static uint32_t ovl_piece_bytes(int k) {
-  if (k < OVL_P_TOAST) {
-    int rows = PANEL_MID_ROWS - k * PANEL_MID_STRIP_ROWS;
-    if (rows > PANEL_MID_STRIP_ROWS)
-      rows = PANEL_MID_STRIP_ROWS;
+  if (k < OVL_P_THUMBS) {
+    int rows = MENU_H - k * PANEL_STRIP_ROWS;
+    if (rows > PANEL_STRIP_ROWS)
+      rows = PANEL_STRIP_ROWS;
     return rows * MENU_W * 2;
   }
-  if (k == OVL_P_TOAST)
-    return TOAST_W * TOAST_H * 4;
-  if (k == OVL_P_EDGE)
-    return 2 * PANEL_EDGE_ROWS * MENU_W * 4;
-  if (k < OVL_P_EDGE) {
+  if (k < OVL_P_BAND) {
     int n = JV_NUM_SLOTS + 1 - (k - OVL_P_THUMBS) * THUMB_PER_BLOCK;
     return (n > THUMB_PER_BLOCK ? THUMB_PER_BLOCK : n) * THUMB_PX * 2;
   }
-  if (k == OVL_P_BAND)
-    return MENU_W * BAND_ROWS * 4 + JV_MAX_FB_W * 4;
-  return EXT_SET_BYTES;
+  if (k == OVL_P_BAND) /* band, row buffer, both images' corners */
+    return MENU_W * BAND_ROWS * 4 + JV_MAX_FB_W * 4 + 2 * CORNER_PX * 4;
+  if (k == OVL_P_TOAST) /* the box, 16-bit, and its drawing band */
+    return TOAST_W * TOAST_H * 2 + TOAST_W * TOAST_BAND_ROWS * 4;
+  return 0; /* letter sets: sized to the names, taken when they are read */
 }
 
 static uint32_t ovl_piece_size(int k) {
@@ -655,7 +659,7 @@ static uint32_t ovl_piece_size(int k) {
 
 static uint32_t ovl_total_size(void) {
   uint32_t t = 0;
-  for (int k = 0; k < OVL_PIECES; k++)
+  for (int k = 0; k < OVL_FIXED; k++)
     t += ovl_piece_size(k);
   return t;
 }
@@ -676,8 +680,8 @@ static int root_margin_free(void) {
   return 1;
 }
 
-static void *ovl_piece_alloc(int k) {
-  uint32_t size = ovl_piece_size(k);
+static void *ovl_alloc(int k, uint32_t size) {
+  size = (size + 0xfff) & ~0xfffu;
   for (int o = 0; o < 3; o++) {
     int i = k_ovl_order[o];
     SceUID uid = ksceKernelAllocMemBlock("JamaisVuMenu", k_ovl_types[i], size,
@@ -700,6 +704,10 @@ static void *ovl_piece_alloc(int k) {
   g_ovl_fail_piece = k;
   g_ovl_fail_size = size;
   return NULL;
+}
+
+static void *ovl_piece_alloc(int k) {
+  return ovl_alloc(k, ovl_piece_size(k));
 }
 
 static void ovl_pieces_free(void) {
@@ -737,12 +745,12 @@ static int overlay_acquire(void) {
   if (!g_overlay_ready) {
     g_ovl_fail_piece = -1;
     g_ovl_root_short = 0;
-    void *base[OVL_PIECES];
+    void *base[OVL_FIXED];
     int ok = 1;
     for (int i = 0; i < 3; i++)
       g_ovl_pool_kb[i] = 0;
     /* largest first: they need the largest free blocks */
-    for (int k = 0; k < OVL_PIECES && ok; k++)
+    for (int k = 0; k < OVL_FIXED && ok; k++)
       ok = (base[k] = ovl_piece_alloc(k)) != NULL;
     if (ok) {
       /* leave the system some room: refuse if the root pool would be left
@@ -753,20 +761,18 @@ static int overlay_acquire(void) {
       }
     }
     if (ok) {
-      for (int k = 0; k < PANEL_MID_STRIPS; k++)
-        g_panel_mid[k] = base[OVL_P_PANEL + k];
-      g_panel_edge = base[OVL_P_EDGE];
+      for (int k = 0; k < PANEL_STRIPS; k++)
+        g_panel_img.strip[k] = base[OVL_P_PANEL + k];
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = (uint16_t *)base[OVL_P_THUMBS + i / THUMB_PER_BLOCK] +
                       (i % THUMB_PER_BLOCK) * THUMB_PX;
-      g_toast_px = base[OVL_P_TOAST];
       g_band_px = base[OVL_P_BAND];
       g_rowbuf = g_band_px + MENU_W * BAND_ROWS;
-      for (int k = 0; k < 2; k++) {
-        g_ext_set[k] = base[OVL_P_EXT0 + k];
-        g_ext_set[k]->n = 0;
-        g_ext_set[k]->used = 0;
-      }
+      g_panel_img.corner = g_rowbuf + JV_MAX_FB_W;
+      g_toast_img.corner = g_panel_img.corner + CORNER_PX;
+      g_toast_img.strip[0] = base[OVL_P_TOAST];
+      g_toast_band = (uint32_t *)(g_toast_img.strip[0] + TOAST_W * TOAST_H);
+      g_ext_set[0] = g_ext_set[1] = NULL; /* taken when the names are read */
       g_overlay_gen++;
       __sync_synchronize();
       g_overlay_ready = 1;
@@ -792,10 +798,11 @@ static void overlay_release(void) {
     if (g_overlay_users == 0) {
       model_clear_thumbs(); /* the model must not point into freed memory */
       ovl_pieces_free();
-      g_toast_px = g_rowbuf = g_band_px = NULL;
-      for (int k = 0; k < PANEL_MID_STRIPS; k++)
-        g_panel_mid[k] = NULL;
-      g_panel_edge = NULL;
+      g_toast_band = g_rowbuf = g_band_px = NULL;
+      for (int k = 0; k < PANEL_STRIPS; k++)
+        g_panel_img.strip[k] = NULL;
+      g_panel_img.corner = g_toast_img.corner = NULL;
+      g_toast_img.strip[0] = NULL;
       g_ext_set[0] = g_ext_set[1] = NULL;
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = NULL;
@@ -938,55 +945,77 @@ static inline const uint32_t *image_row(const Image *c, int y) {
   return c->row(y);
 }
 
-/* the menu image's row y, 32-bit: the corner rows as stored, the others
- * converted from RGB565 (once per row and compose call) */
-static uint32_t g_row32[MENU_W];
-static int g_row32_y = -1;
+/* row y of a 16-bit image as 32-bit pixels in buf (corners as stored) */
+static const uint32_t *img_row32(const Img16 *im, int y, uint32_t *buf) {
+  const uint16_t *s = img_row16(im, y);
+  for (int x = 0; x < im->w; x++)
+    buf[x] = rgb565_to_rgba(s[x]);
+  int e = img_edge(im, y);
+  if (e >= 0) {
+    const uint32_t *c = im->corner + e * 2 * MENU_EDGE_COLS;
+    memcpy(buf, c, MENU_EDGE_COLS * 4);
+    memcpy(buf + im->w - MENU_EDGE_COLS, c + MENU_EDGE_COLS,
+           MENU_EDGE_COLS * 4);
+  }
+  return buf;
+}
+
+/* compose reads one row at a time: converted once per row and call */
+static uint32_t g_row32[MENU_W], g_trow32[TOAST_W];
+static int g_row32_y = -1, g_trow32_y = -1;
 
 static const uint32_t *panel_src_row(int y) {
-  if (panel_is_edge(y))
-    return panel_edge_row(y);
   if (y != g_row32_y) {
-    const uint16_t *s = panel_mid_row(y);
-    for (int x = 0; x < MENU_W; x++)
-      g_row32[x] = rgb565_to_rgba(s[x]);
+    img_row32(&g_panel_img, y, g_row32);
     g_row32_y = y;
   }
   return g_row32;
 }
 
 static const uint32_t *toast_src_row(int y) {
-  return g_toast_px + y * TOAST_W;
+  if (y != g_trow32_y) {
+    img_row32(&g_toast_img, y, g_trow32);
+    g_trow32_y = y;
+  }
+  return g_trow32;
 }
 
-/* Stores rendered band rows (32-bit, image rows y0 ..) in the menu image:
- * corner rows as they are, the others as RGB565 (nearest shade) and
- * shown opaque. */
-static void panel_store_rows(const uint32_t *band, int y0, int rows,
-                             RowSpan *blend) {
+/* Stores rendered band rows (32-bit, image rows y0 ..) in a 16-bit image:
+ * every pixel as RGB565 (nearest shade), the corners also 32-bit (alpha
+ * kept, colours rounded the same way). Only the corners may be
+ * see-through: anything else is shown opaque (noted once in log.txt). */
+static void img_store_rows(Img16 *im, const uint32_t *band, int y0,
+                           int rows, RowSpan *blend) {
   static int warned;
   for (int r = 0; r < rows; r++) {
     int y = y0 + r;
-    const uint32_t *src = band + r * MENU_W;
-    if (panel_is_edge(y)) {
-      /* 32-bit for the corners' alpha, colours as in the 16-bit rows (a
-       * seam showed in the header at row 12 otherwise) */
-      uint32_t *dst = panel_edge_row(y);
-      for (int x = 0; x < MENU_W; x++)
-        dst[x] = rgba_as_565(src[x]);
-      continue;
-    }
-    uint16_t *dst = panel_mid_row(y);
-    for (int x = 0; x < MENU_W; x++)
+    const uint32_t *src = band + r * im->w;
+    uint16_t *dst = img_row16(im, y);
+    for (int x = 0; x < im->w; x++)
       dst[x] = rgba_to_565_round(src[x]);
-    if ((blend[r].l || blend[r].r) && !warned) {
-      warned = 1;
-      static char line[96];
-      snprintf(line, sizeof(line), "menu image: row %d is see-through "
-               "but stored 16-bit (shown opaque)\r\n", y);
-      log_queue(line);
+    int e = img_edge(im, y);
+    int lim = e >= 0 ? MENU_EDGE_COLS : 0;
+    if (e >= 0) {
+      uint32_t *c = im->corner + e * 2 * MENU_EDGE_COLS;
+      for (int x = 0; x < MENU_EDGE_COLS; x++) {
+        c[x] = rgba_as_565(src[x]);
+        c[MENU_EDGE_COLS + x] = rgba_as_565(src[im->w - MENU_EDGE_COLS + x]);
+      }
     }
-    blend[r].l = blend[r].r = 0;
+    if (blend[r].l > lim || blend[r].r > lim) {
+      if (!warned) {
+        static char line[112];
+        warned = 1;
+        snprintf(line, sizeof(line), "menu image %dx%d: row %d see-through "
+                 "beyond its corners (%u/%u) - shown opaque\r\n", im->w,
+                 im->h, y, blend[r].l, blend[r].r);
+        log_queue(line);
+      }
+      if (blend[r].l > lim)
+        blend[r].l = (uint16_t)lim;
+      if (blend[r].r > lim)
+        blend[r].r = (uint16_t)lim;
+    }
   }
 }
 
@@ -1001,7 +1030,7 @@ static void compose(const SceDisplayFrameBuf *p, const Image *c,
 
   if (fw <= 0 || fh <= 0 || fx0 + fw > w || fy0 + fh > h)
     return;
-  g_row32_y = -1; /* the menu image may have changed since the last call */
+  g_row32_y = g_trow32_y = -1; /* the images may have changed meanwhile */
 
   for (int i = 0; i < fw; i++)
     xmap[i] = i * c->w / fw;
@@ -1166,7 +1195,7 @@ static void render_panel(void) {
       Canvas b = { g_band_px, MENU_W, rows, y0 };
       menu_view_render(&b, &local);
       scan_blend_rows(&b, blend);
-      panel_store_rows(g_band_px, y0, rows, blend);
+      img_store_rows(&g_panel_img, g_band_px, y0, rows, blend);
       memcpy(&g_panel_blend[y0], blend, rows * sizeof(RowSpan));
       __sync_synchronize();
     }
@@ -1233,7 +1262,8 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
           Canvas b = { g_band_px, MENU_W, rows, y0 };
           menu_view_render(&b, &local);
           scan_blend_rows(&b, &g_panel_blend[y0]);
-          panel_store_rows(g_band_px, y0, rows, &g_panel_blend[y0]);
+          img_store_rows(&g_panel_img, g_band_px, y0, rows,
+                         &g_panel_blend[y0]);
         }
         prof_add(PROF_RENDER, t0);
         /* the render is complete (of the model at s1): show it now; if the
@@ -1252,11 +1282,17 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
   }
 
   if (now_us() < g_toast_until) {
-    Canvas c = { g_toast_px, TOAST_W, TOAST_H, 0 };
     if (rendered_toast != g_toast_seq) {
       rendered_toast = g_toast_seq;
-      menu_view_render_toast(&c, g_toast_msg, g_toast_err);
-      scan_blend_rows(&c, g_toast_blend);
+      for (int y0 = 0; y0 < TOAST_H; y0 += TOAST_BAND_ROWS) {
+        int rows = TOAST_H - y0 < TOAST_BAND_ROWS ? TOAST_H - y0
+                                                  : TOAST_BAND_ROWS;
+        Canvas b = { g_toast_band, TOAST_W, rows, y0 };
+        menu_view_render_toast(&b, g_toast_msg, g_toast_err);
+        scan_blend_rows(&b, &g_toast_blend[y0]);
+        img_store_rows(&g_toast_img, g_toast_band, y0, rows,
+                       &g_toast_blend[y0]);
+      }
     }
     Image im = { toast_src_row, TOAST_W, TOAST_H };
     compose(p, &im, g_toast_blend, TOAST_X, TOAST_Y, 0);
@@ -1573,7 +1609,7 @@ static int open_menu(void) {
                    "free kernel memory for the %s (block %d of %d, %u KB; "
                    "root contiguous 0x%08X, root 0x%08X%s, user main "
                    "0x%08X; menu needs %u KB in all)", tid,
-                   ovl_piece_name(k), k + 1, OVL_PIECES,
+                   ovl_piece_name(k), k + 1, OVL_FIXED,
                    (unsigned)(g_ovl_fail_size >> 10),
                    (unsigned)g_ovl_fail_ret[1], (unsigned)g_ovl_fail_ret[0],
                    g_ovl_root_short ? " (held back: would leave the kernel "
@@ -1599,7 +1635,7 @@ static int open_menu(void) {
     static char line[220];
     snprintf(line, sizeof(line), "menu opened in %s, memory %u KB in %d "
              "blocks: root contiguous %u KB, root %u KB, user main %u KB\r\n",
-             tid, (unsigned)(ovl_total_size() >> 10), OVL_PIECES,
+             tid, (unsigned)(ovl_total_size() >> 10), OVL_FIXED,
              (unsigned)g_ovl_pool_kb[1], (unsigned)g_ovl_pool_kb[0],
              (unsigned)g_ovl_pool_kb[2]);
     log_queue(line);
@@ -1959,6 +1995,49 @@ static int drawable_chars(const char *s, const ExtGlyphs *ext) {
   return n;
 }
 
+/* letter set k freed (worker; nothing draws with it) */
+static void ext_free(int k) {
+  if (g_ovl_mtx >= 0)
+    ksceKernelLockMutex(g_ovl_mtx, 1, NULL);
+  g_ext_set[k] = NULL;
+  __sync_synchronize();
+  if (g_mem_blks[OVL_P_EXT0 + k] > 0)
+    ksceKernelFreeMemBlock(g_mem_blks[OVL_P_EXT0 + k]);
+  g_mem_blks[OVL_P_EXT0 + k] = 0;
+  if (g_ovl_mtx >= 0)
+    ksceKernelUnlockMutex(g_ovl_mtx, 1);
+}
+
+/* a new, empty letter set with cap bytes of bitmap in place k (from the
+ * same pools as the menu, the root margin kept), or NULL */
+static ExtGlyphs *ext_new(int k, uint32_t cap) {
+  ExtGlyphs *e = NULL;
+  if (g_ovl_mtx >= 0)
+    ksceKernelLockMutex(g_ovl_mtx, 1, NULL);
+  if (g_overlay_ready && g_mem_blks[OVL_P_EXT0 + k] <= 0) {
+    void *mem = ovl_alloc(OVL_P_EXT0 + k, EXT_SET_SIZE(cap));
+    if (mem)
+      g_ext_set[k] = e = ext_init(mem, cap);
+  }
+  if (g_ovl_mtx >= 0)
+    ksceKernelUnlockMutex(g_ovl_mtx, 1);
+  return e;
+}
+
+/* after the model switched sets: the old one is freed once nothing draws
+ * with it (drawing runs at the lowest priority: if it still does, it is
+ * freed at the next change, or with the rest of the menu's memory) */
+static void ext_free_unused(void) {
+  for (int k = 0; k < 2; k++) {
+    if (!g_ext_set[k] || g_ext_set[k] == g_model.ext)
+      continue;
+    for (int i = 0; i < 100 && g_ext_users[k]; i++)
+      ksceKernelDelayThread(1000);
+    if (!g_ext_users[k])
+      ext_free(k);
+  }
+}
+
 /* The names the LiveArea shows (ur0:shell/db/app.db, opened read-only):
  * a game renamed by the user has its new name there. */
 static int livearea_names(const char *const *ids, int n,
@@ -1984,7 +2063,7 @@ static const ExtGlyphs *resolve_names(MenuSlot *fresh) {
   static char names[JV_NUM_SLOTS][APPDB_NAME_LEN];
   static char ascii[sizeof(fresh[0].title)];
   static char path[96];
-  static int warned;
+  static int warned, no_mem_warned;
   const char *ids[JV_NUM_SLOTS], *strs[JV_NUM_SLOTS];
   int has[JV_NUM_SLOTS], n = 0;
 
@@ -2011,35 +2090,53 @@ static const ExtGlyphs *resolve_names(MenuSlot *fresh) {
     }
     strs[n++] = names[i];
   }
-  if (n == 0 || !g_ext_set[0])
+  if (n == 0)
     return NULL;
 
-  /* fill the set the model does not use; drawing that started with it
-   * before the last switch has to finish first (normally long done) */
-  int t = ext_index(g_model.ext) == 0 ? 1 : 0;
-  ExtGlyphs *ext = g_ext_set[t];
-  for (int i = 0; i < 3000 && g_ext_users[t]; i++)
-    ksceKernelDelayThread(1000);
-  if (g_ext_users[t])
-    return (ExtGlyphs *)g_model.ext; /* keep what is shown */
-  ext->n = 0;
-  ext->used = 0;
-
-  jv_file_path(path, sizeof(path), "jpfont.bin");
-  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
-  int r = -1;
-  if (fd >= 0) {
-    r = jpfont_load(jf_read, &fd, strs, n, ext);
-    ksceIoClose(fd);
-  }
-  if (r < 0) {
-    if (!warned) {
-      warned = 1;
-      log_queue("Japanese game names: data/JamaisVu/jpfont.bin missing or "
-                "unreadable - names shown without those characters\r\n");
+  /* the set shown already has every letter: keep it */
+  ExtGlyphs *ext = (ExtGlyphs *)g_model.ext;
+  if (!ext || !ext_has_all(ext, strs, n)) {
+    jv_file_path(path, sizeof(path), "jpfont.bin");
+    SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+    uint32_t need = 0;
+    int r = fd >= 0 ? jpfont_measure(jf_read, &fd, strs, n, &need) : -1;
+    ExtGlyphs *fresh_set = NULL;
+    if (r >= 0) {
+      /* the other place; a set left there (drawing was still using it
+       * when the model switched) is freed first - normally long done */
+      int t = ext_index(ext) == 0 ? 1 : 0;
+      for (int i = 0; i < 3000 && g_ext_set[t] && g_ext_users[t]; i++)
+        ksceKernelDelayThread(1000);
+      if (g_ext_set[t] && !g_ext_users[t])
+        ext_free(t);
+      if (!g_ext_set[t])
+        fresh_set = ext_new(t, need);
+      if (fresh_set)
+        r = jpfont_load(jf_read, &fd, strs, n, fresh_set);
+      else if (!g_ext_set[t] && !no_mem_warned) {
+        static char line[128];
+        no_mem_warned = 1;
+        snprintf(line, sizeof(line), "Japanese game names: no memory for "
+                 "their letters (%u KB) - names shown as stored\r\n",
+                 (unsigned)(EXT_SET_SIZE(need) >> 10));
+        log_queue(line);
+      }
     }
-    return NULL;
+    if (fd >= 0)
+      ksceIoClose(fd);
+    if (r < 0) {
+      if (!warned) {
+        warned = 1;
+        log_queue("Japanese game names: data/JamaisVu/jpfont.bin missing or "
+                  "unreadable - names shown without those characters\r\n");
+      }
+      return ext; /* keep what is shown */
+    }
+    if (fresh_set)
+      ext = fresh_set;
   }
+  if (!ext)
+    return NULL;
   for (int i = 0; i < JV_NUM_SLOTS; i++)
     if (has[i] && drawable_chars(names[i], ext) >= 2) {
       memcpy(fresh[i].title, names[i], sizeof(fresh[i].title) - 1);
@@ -2051,8 +2148,19 @@ static const ExtGlyphs *resolve_names(MenuSlot *fresh) {
 static void refresh_slots(void) {
   static SlotInfo info;
   int exists[JV_NUM_SLOTS], locked[JV_NUM_SLOTS];
+  /* how long each step took (log.txt when the whole read is slow: the
+   * thumbnails showed LOADING for ~30 s in GTA: San Andreas on the PS TV) */
+  uint64_t t0 = ksceKernelGetSystemTimeWide(), t;
+  uint32_t ms_detect, ms_space, ms_cfg, ms_tai, ms_info = 0, ms_ver = 0,
+           ms_env = 0, ms_names;
+#define JV_LAP(var) do { uint64_t _n = ksceKernelGetSystemTimeWide(); \
+    var = (uint32_t)((_n - t) / 1000); t = _n; } while (0)
+#define JV_ADD(var) do { uint64_t _n = ksceKernelGetSystemTimeWide(); \
+    var += (uint32_t)((_n - t) / 1000); t = _n; } while (0)
+  t = t0;
 
   const char *mc = storage_detect(); /* read-only */
+  JV_LAP(ms_detect);
 
   model_begin();
   g_model.savedata_rolls_back = mc && strcmp(mc, "ux0:") == 0;
@@ -2068,6 +2176,7 @@ static void refresh_slots(void) {
   } else {
     slot_policy(slot_free_space(), exists, locked, JV_NUM_SLOTS);
   }
+  JV_LAP(ms_space);
 
   /* current plugin configuration, read once for all slots */
   static uint8_t cfg_state[JV_CFG_FILES];
@@ -2075,7 +2184,9 @@ static void refresh_slots(void) {
   static TaiPrint tai_now[JV_TAI_DIRS];
   static SlotEnv env;
   config_fingerprint(cfg_state, cfg_md5);
+  JV_LAP(ms_cfg);
   tai_fingerprint(tai_now);
+  JV_LAP(ms_tai);
 
   int prepare_count = 0;
   for (int i = 0; i < JV_NUM_SLOTS; i++)
@@ -2092,6 +2203,7 @@ static void refresh_slots(void) {
   for (int i = 0; i < JV_NUM_SLOTS; i++) {
     MenuSlot *s = &fresh[i];
     int ok = exists[i] && slot_info_read(i, &info, g_thumbs[i]) == 0;
+    JV_ADD(ms_info);
 
     memset(s, 0, sizeof(*s));
     s->locked = locked[i];
@@ -2108,14 +2220,17 @@ static void refresh_slots(void) {
       if (lookup_app_ver(info.titleid, s->installed_ver,
                          sizeof(s->installed_ver)) < 0)
         s->installed_ver[0] = '\0';
+      JV_ADD(ms_ver);
       s->outdated = !app_versions_match(s->app_ver, s->installed_ver);
       s->config_changed = !config_matches_fp(&info, cfg_state, cfg_md5, NULL) ||
                           (slot_env_read(i, info.crc, &env) == 0 &&
                            !tai_matches(env.tai, tai_now, NULL));
+      JV_ADD(ms_env);
     }
   }
 
   const ExtGlyphs *ext = resolve_names(fresh);
+  JV_LAP(ms_names);
 
   /* then one short update under the lock */
   model_begin();
@@ -2123,6 +2238,24 @@ static void refresh_slots(void) {
   g_model.ext = ext;
   g_model.refreshing = 0;
   model_end();
+  ext_free_unused();
+
+  uint32_t total = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
+  if (total >= 2000) {
+    static char line[300];
+    char tid[16];
+    fg_title(tid, sizeof(tid));
+    snprintf(line, sizeof(line), "slot list read slowly in %s: %u ms - "
+             "card check %u, free space %u, config files %u, tai folders "
+             "%u, slot info + thumbnails %u, game versions (param.sfo) %u, "
+             "slot environment %u, names (app.db, jpfont.bin) %u\r\n", tid,
+             (unsigned)total, (unsigned)ms_detect, (unsigned)ms_space,
+             (unsigned)ms_cfg, (unsigned)ms_tai, (unsigned)ms_info,
+             (unsigned)ms_ver, (unsigned)ms_env, (unsigned)ms_names);
+    log_queue(line);
+  }
+#undef JV_LAP
+#undef JV_ADD
 }
 
 /* Why save/load cannot run right now, or NULL */

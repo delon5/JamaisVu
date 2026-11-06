@@ -12,7 +12,8 @@
 #include "menu_view.h"
 #include "jpfont.h"
 
-static ExtGlyphs ext;
+static uint32_t ext_mem[EXT_SET_SIZE(EXT_BITMAP_SIZE) / 4];
+static ExtGlyphs *ext;
 
 static int file_read(void *ctx, uint32_t off, void *buf, uint32_t len) {
   FILE *f = ctx;
@@ -45,6 +46,47 @@ static uint32_t whole[MENU_W * MENU_H], banded[MENU_W * MENU_H];
 static uint32_t band[MENU_W * MENU_H];
 static uint16_t thumbs[JV_NUM_SLOTS][JV_THUMB_W * JV_THUMB_H]; /* RGB565 */
 
+/* only the corners (MENU_EDGE_COLS x MENU_EDGE_ROWS at each corner) may
+ * be see-through: the rest is stored 16-bit */
+static int opaque_but_corners(const char *name, const uint32_t *px, int w,
+                              int h) {
+  for (int y = 0; y < h; y++) {
+    int edge = y < MENU_EDGE_ROWS || y >= h - MENU_EDGE_ROWS;
+    int x0 = edge ? MENU_EDGE_COLS : 0, x1 = edge ? w - MENU_EDGE_COLS : w;
+    for (int x = x0; x < x1; x++)
+      if ((px[y * w + x] >> 24) != 255) {
+        printf("  %s: x %d y %d is see-through (alpha %u) - must be "
+               "opaque\n", name, x, y, (unsigned)(px[y * w + x] >> 24));
+        return 0;
+      }
+  }
+  return 1;
+}
+
+/* the message box: drawn in bands of 8 rows (as the plugin does) it must
+ * equal the box drawn whole, and be opaque but its corners */
+static int check_toast(const char *name, const char *msg, int err) {
+  static uint32_t tw[TOAST_W * TOAST_H], tb[TOAST_W * TOAST_H],
+      tband[TOAST_W * 8];
+  Canvas c = { tw, TOAST_W, TOAST_H, 0 };
+  menu_view_render_toast(&c, msg, err);
+  for (int y0 = 0; y0 < TOAST_H; y0 += 8) {
+    int n = TOAST_H - y0 < 8 ? TOAST_H - y0 : 8;
+    Canvas b = { tband, TOAST_W, n, y0 };
+    memset(tband, 0x5a, sizeof(tband));
+    menu_view_render_toast(&b, msg, err);
+    memcpy(&tb[y0 * TOAST_W], tband, n * TOAST_W * 4);
+  }
+  if (memcmp(tw, tb, sizeof(tw)) != 0) {
+    printf("  %s: bands DIFFERENT\n", name);
+    return 1;
+  }
+  if (!opaque_but_corners(name, tw, TOAST_W, TOAST_H))
+    return 1;
+  printf("  %s: identical in bands, opaque but the corners\n", name);
+  return 0;
+}
+
 static int check(const char *name, const MenuModel *m) {
   static const int sizes[] = { 1, 7, 20, 64, MENU_H };
   Canvas c = { whole, MENU_W, MENU_H, 0 };
@@ -69,18 +111,15 @@ static int check(const char *name, const MenuModel *m) {
   if (!bad)
     printf("  %s: identical\n", name);
 
-  /* the menu image is stored 16-bit except its corner rows: every other
-   * row must be opaque; and how far RGB565 (nearest) is from the image */
+  /* the menu image is stored 16-bit except its corners: everything else
+   * must be opaque; and how far RGB565 (nearest) is from the image */
+  if (!opaque_but_corners(name, whole, MENU_W, MENU_H))
+    return 1;
   uint64_t err = 0;
   int max_err = 0, n_px = 0;
   for (int y = MENU_EDGE_ROWS; y < MENU_H - MENU_EDGE_ROWS; y++)
     for (int x = 0; x < MENU_W; x++) {
       uint32_t v = whole[y * MENU_W + x];
-      if ((v >> 24) != 255) {
-        printf("  %s: row %d x %d is see-through (alpha %u) - must be "
-               "opaque\n", name, y, x, (unsigned)(v >> 24));
-        return 1;
-      }
       uint32_t q = rgb565_to_rgba(rgba_to_565_round(v));
       for (int sh = 0; sh < 24; sh += 8) {
         int d = (int)((v >> sh) & 0xff) - (int)((q >> sh) & 0xff);
@@ -91,9 +130,8 @@ static int check(const char *name, const MenuModel *m) {
       }
       n_px++;
     }
-  printf("  %s: rows %d-%d opaque; 16-bit: mean error %.2f, max %d (of 255)"
-         "\n", name, MENU_EDGE_ROWS, MENU_H - MENU_EDGE_ROWS - 1,
-         (double)err / (3.0 * n_px), max_err);
+  printf("  %s: opaque but the corners; 16-bit: mean error %.2f, max %d "
+         "(of 255)\n", name, (double)err / (3.0 * n_px), max_err);
   if (max_err > 4)
     return 1;
   return bad;
@@ -117,26 +155,57 @@ static int japanese(const char *font_path, MenuModel *m) {
   CHECK(utf8_next(&s) == 0xFFFD && *s == '\0', "UTF-8: cut-off character at the end");
 
   static uint8_t junk[64] = "JVJF";
-  memset(&ext, 0, sizeof(ext));
-  CHECK(jpfont_load(mem_read, junk, names, 1, &ext) < 0 && ext.n == 0,
+  ext = ext_init(ext_mem, EXT_BITMAP_SIZE);
+  CHECK(jpfont_load(mem_read, junk, names, 1, ext) < 0 && ext->n == 0,
         "not a font file: refused, nothing loaded");
 
   FILE *f = fopen(font_path, "rb");
   CHECK(f != NULL, "jpfont.bin present");
   if (!f)
     return 1;
-  int n = jpfont_load(file_read, f, names, 3, &ext);
+  int n = jpfont_load(file_read, f, names, 3, ext);
   CHECK(n == 12, "glyphs loaded for the names (8 kana/letters + 4 kanji)");
-  CHECK(ext_glyph(&ext, 0x30AD) && ext_glyph(&ext, 0xFF26) &&
-        ext_glyph(&ext, 0x82F1), "kana, full-width and kanji found");
-  CHECK(ext_glyph(&ext, 0x4E00) == NULL, "glyph not asked for: not loaded");
+  CHECK(ext_glyph(ext, 0x30AD) && ext_glyph(ext, 0xFF26) &&
+        ext_glyph(ext, 0x82F1), "kana, full-width and kanji found");
+  CHECK(ext_glyph(ext, 0x4E00) == NULL, "glyph not asked for: not loaded");
   int sorted = 1;
-  for (int i = 1; i < ext.n; i++)
-    sorted &= ext.cp[i - 1] < ext.cp[i];
+  for (int i = 1; i < ext->n; i++)
+    sorted &= ext->cp[i - 1] < ext->cp[i];
   CHECK(sorted, "set sorted by code point");
-  uint32_t used = ext.used;
-  CHECK(jpfont_load(file_read, f, names, 3, &ext) == n && ext.used == used,
+  uint32_t used = ext->used;
+  CHECK(jpfont_load(file_read, f, names, 3, ext) == n && ext->used == used,
         "loading again adds nothing");
+  CHECK(ext_has_all(ext, names, 3), "set has every letter of the names");
+  {
+    const char *other[] = { "\xe4\xb8\x80" }; /* U+4E00, not loaded */
+    CHECK(!ext_has_all(ext, other, 1), "a new letter is noticed");
+  }
+
+  /* a set sized to the names: measured first, exactly enough room */
+  uint32_t need = 0;
+  CHECK(jpfont_measure(file_read, f, names, 3, &need) == 0 && need == used,
+        "measured bytes == bytes loaded for the names");
+  printf("  names need %u bytes of letters (a full set holds %u)\n",
+         (unsigned)need, (unsigned)EXT_BITMAP_SIZE);
+  {
+    static uint32_t small_mem[EXT_SET_SIZE(EXT_BITMAP_SIZE) / 4];
+    ExtGlyphs *sized = ext_init(small_mem, need);
+    CHECK(jpfont_load(file_read, f, names, 3, sized) == 12 &&
+          sized->used == need, "sized set: all 12 letters fit exactly");
+    /* letters used twice count once: "\xe8\x8b\xb1" three times */
+    const char *twice[] = { "\xe8\x8b\xb1\xe8\x8b\xb1",
+                            "\xe8\x8b\xb1" };
+    uint32_t one = 0, rep = 0;
+    const char *single[] = { "\xe8\x8b\xb1" };
+    jpfont_measure(file_read, f, single, 1, &one);
+    jpfont_measure(file_read, f, twice, 2, &rep);
+    CHECK(one > 0 && rep == one, "a letter used 3 times is stored once");
+    /* too small: stops before overflowing */
+    ExtGlyphs *tiny = ext_init(small_mem, need / 2);
+    int got = jpfont_load(file_read, f, names, 3, tiny);
+    CHECK(got > 0 && got < 12 && tiny->used <= need / 2,
+          "set too small: some letters, no overflow");
+  }
 
   /* fill the set: many different kanji */
   static char many[EXT_MAX_GLYPHS * 2 * 3 + 1];
@@ -147,16 +216,16 @@ static int japanese(const char *font_path, MenuModel *m) {
     many[k++] = (char)(0x80 | (cp & 0x3f));
   }
   const char *m1[] = { many };
-  n = jpfont_load(file_read, f, m1, 1, &ext);
-  CHECK(n > 12 && n <= EXT_MAX_GLYPHS && ext.used <= EXT_BITMAP_SIZE,
+  n = jpfont_load(file_read, f, m1, 1, ext);
+  CHECK(n > 12 && n <= EXT_MAX_GLYPHS && ext->used <= ext->cap,
         "full set: stops at its limits");
   fclose(f);
 
-  memset(&ext, 0, sizeof(ext));
+  ext = ext_init(ext_mem, EXT_BITMAP_SIZE);
   f = fopen(font_path, "rb");
-  jpfont_load(file_read, f, names, 3, &ext);
+  jpfont_load(file_read, f, names, 3, ext);
   fclose(f);
-  m->ext = &ext;
+  m->ext = ext;
   strcpy(m->slots[0].title, names[0]);
   strcpy(m->slots[1].title, names[1]);
   /* longer than the panel: must be cut at a character, with "..." */
@@ -223,6 +292,8 @@ int main(int argc, char **argv) {
   rc |= check("error message", &m);
   m.mode = MV_DIAG;
   rc |= check("diagnostics", &m);
+  rc |= check_toast("message box", "Saved to slot 1", 0);
+  rc |= check_toast("error message box", "Load failed: slot 2 is damaged", 1);
 
   if (argc > 1) {
     printf("=== Japanese game names ===\n");

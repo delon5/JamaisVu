@@ -23,7 +23,7 @@ static uint32_t toast_px[TOAST_W * TOAST_H];
 static uint32_t thumbs32[JV_NUM_SLOTS][JV_THUMB_W * JV_THUMB_H];
 static uint16_t thumbs[JV_NUM_SLOTS][JV_THUMB_W * JV_THUMB_H]; /* RGB565 */
 
-static ExtGlyphs ext;
+static uint32_t ext_mem[EXT_SET_SIZE(EXT_BITMAP_SIZE) / 4];
 
 static int file_read(void *ctx, uint32_t off, void *buf, uint32_t len) {
   FILE *f = ctx;
@@ -196,12 +196,12 @@ int main(int argc, char **argv) {
       "\xe7\xa9\xba\xe3\x81\xae\xe8\xbb\x8c\xe8\xb7\xa1 the 3rd Evolution",
       "\xe9\x9b\xb6\xe3\x81\xae\xe8\xbb\x8c\xe8\xb7\xa1 Evolution",
     };
-    if (!jf || jpfont_load(file_read, jf, jp, 3, &ext) < 0) {
+    if (!jf || jpfont_load(file_read, jf, jp, 3, ext_init(ext_mem, EXT_BITMAP_SIZE)) < 0) {
       fprintf(stderr, "jpfont.bin not usable\n");
       return 1;
     }
     fclose(jf);
-    m.ext = &ext;
+    m.ext = (const ExtGlyphs *)ext_mem;
     strcpy(m.slots[0].title, jp[0]);
     strcpy(m.slots[0].titleid, "PCSG01179");
     strcpy(m.slots[1].title, jp[1]);

@@ -63,8 +63,8 @@ const FontGlyph *ext_glyph(const ExtGlyphs *ext, uint32_t cp) {
     if (ext->cp[mid] == cp) {
       const FontGlyph *g = &ext->g[mid];
       /* never point outside the bitmap, whatever is in the set */
-      if (g->offset > EXT_BITMAP_SIZE ||
-          (uint32_t)g->w * g->h > EXT_BITMAP_SIZE - g->offset)
+      if (g->offset > ext->cap ||
+          (uint32_t)g->w * g->h > ext->cap - g->offset)
         return NULL;
       return g;
     }
@@ -95,8 +95,21 @@ static int wanted_has(const uint32_t *w, int n, uint32_t cp) {
   return 0;
 }
 
-int jpfont_load(JfRead rd, void *ctx, const char *const *strs, int nstrs,
-                ExtGlyphs *ext) {
+int ext_has_all(const ExtGlyphs *ext, const char *const *strs, int nstrs) {
+  for (int k = 0; k < nstrs; k++) {
+    const char *s = strs[k];
+    uint32_t cp;
+    while (s && (cp = utf8_next(&s)) != 0)
+      if (cp >= 0x80 && cp != 0xfffd && !ext_glyph(ext, cp))
+        return 0; /* (a letter jpfont.bin lacks counts as new: the set is
+                   * then simply loaded again, the names stay right) */
+  }
+  return 1;
+}
+
+/* loads into ext, or with ext NULL only adds up the bitmap bytes */
+static int jf_run(JfRead rd, void *ctx, const char *const *strs, int nstrs,
+                  ExtGlyphs *ext, uint32_t *bytes) {
   static uint8_t hdr[32];
   static uint32_t index[JF_MAX_BLOCKS];
   static uint8_t block[JF_BLOCK * JF_ENTRY];
@@ -111,7 +124,7 @@ int jpfont_load(JfRead rd, void *ctx, const char *const *strs, int nstrs,
     while (s && (cp = utf8_next(&s)) != 0) {
       if (cp < 0x80 || ext_glyph(ext, cp) || wanted_has(want, nwant, cp))
         continue;
-      if (ext->n + nwant >= EXT_MAX_GLYPHS)
+      if ((ext ? ext->n : 0) + nwant >= EXT_MAX_GLYPHS)
         break;
       want[nwant++] = cp;
     }
@@ -126,8 +139,10 @@ int jpfont_load(JfRead rd, void *ctx, const char *const *strs, int nstrs,
   if (nblocks == 0 || nblocks > JF_MAX_BLOCKS ||
       count > nblocks * JF_BLOCK || count <= (nblocks - 1) * JF_BLOCK)
     return -1;
+  if (bytes)
+    *bytes = 0;
   if (nwant == 0)
-    return ext->n;
+    return ext ? ext->n : 0;
   if (rd(ctx, index_off, index, nblocks * 4) != (int)(nblocks * 4))
     return -1;
   for (uint32_t b = 0; b < nblocks; b++) {
@@ -171,9 +186,15 @@ int jpfont_load(JfRead rd, void *ctx, const char *const *strs, int nstrs,
       g.y_off = (int8_t)p[11];
       g.advance = p[12];
       uint32_t npx = (uint32_t)g.w * g.h, nbytes = (npx + 1) / 2;
-      if (npx > EXT_BITMAP_SIZE - ext->used || off > data_size ||
-          nbytes > data_size - off)
-        break; /* full, or a damaged entry: skip this glyph */
+      if (off > data_size || nbytes > data_size - off)
+        break; /* a damaged entry: skip this glyph */
+      if (!ext) { /* measuring */
+        if (npx <= EXT_BITMAP_SIZE - *bytes)
+          *bytes += npx;
+        break;
+      }
+      if (npx > ext->cap - ext->used)
+        break; /* full: skip this glyph */
       if (npx && rd(ctx, data_off + off, packed, nbytes) != (int)nbytes)
         return -1;
       g.offset = ext->used;
@@ -186,5 +207,18 @@ int jpfont_load(JfRead rd, void *ctx, const char *const *strs, int nstrs,
       break;
     }
   }
-  return ext->n;
+  return ext ? ext->n : 0;
+}
+
+int jpfont_load(JfRead rd, void *ctx, const char *const *strs, int nstrs,
+                ExtGlyphs *ext) {
+  return jf_run(rd, ctx, strs, nstrs, ext, NULL);
+}
+
+int jpfont_measure(JfRead rd, void *ctx, const char *const *strs, int nstrs,
+                   uint32_t *bytes) {
+  uint32_t b = 0;
+  int r = jf_run(rd, ctx, strs, nstrs, NULL, &b);
+  *bytes = b;
+  return r < 0 ? r : 0;
 }
