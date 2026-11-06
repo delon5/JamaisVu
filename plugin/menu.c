@@ -1349,6 +1349,29 @@ static void confirm_prepare(int all) {
 #define JV_COMBO_BUTTON SCE_CTRL_START
 #define JV_DIAG_BUTTON  SCE_CTRL_SELECT
 
+/* PSP / PS1 games (LiveArea or Adrenaline) run in the Vita's PSP emulator.
+ * JamaisVu stays out of them altogether - no menu, no input taken, nothing
+ * drawn, no save: their frames are not a Vita game's (the menu stayed
+ * invisible in Adrenaline), and snapshotting the emulator is untested.
+ * As PSV-Shell-Plus does: every app start/resume is checked with
+ * ksceSblACMgrIsPspEmu; the note is cleared when that app is suspended or
+ * exits. */
+int ksceSblACMgrIsPspEmu(SceUID pid);
+static tai_hook_ref_t g_procev_ref;
+static SceUID g_procev_hook = -1;
+static volatile SceUID g_pspemu_pid; /* 0: no PSP emulator in front */
+
+static int procev_hook(int pid, int ev, int a3, int a4, int *a5, int a6) {
+  if (ev == 1 || ev == 5) { /* startup, resume */
+    if (ksceSblACMgrIsPspEmu(pid))
+      g_pspemu_pid = pid;
+  } else if (ev == 3 || ev == 4) { /* exit, suspend */
+    if (pid == g_pspemu_pid)
+      g_pspemu_pid = 0;
+  }
+  return TAI_CONTINUE(int, g_procev_ref, pid, ev, a3, a4, a5, a6);
+}
+
 static void handle_buttons(uint32_t held, uint32_t pressed) {
   int combo = (held & JV_COMBO_BUTTON) && (held & SCE_CTRL_UP) &&
               (pressed & (JV_COMBO_BUTTON | SCE_CTRL_UP));
@@ -1359,6 +1382,23 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   if (!g_menu_open) {
     if (!combo)
       return;
+    if (g_pspemu_pid) {
+      /* noted once per emulator start in log.txt, otherwise silent */
+      static SceUID noted;
+      SceUID pid = g_pspemu_pid;
+      if (noted != pid) {
+        static char tid[16], line[128];
+        noted = pid;
+        memset(tid, 0, sizeof(tid));
+        ksceKernelGetProcessTitleId(pid, tid, sizeof(tid));
+        tid[sizeof(tid) - 1] = '\0';
+        snprintf(line, sizeof(line), "menu not opened: PSP emulator in the "
+                 "foreground (%s) - JamaisVu stays out of PSP/PS1 games\r\n",
+                 tid[0] ? tid : "?");
+        log_queue(line);
+      }
+      return;
+    }
     /* On firmware without verified offsets the menu still opens (preview
      * mode: browse, thumbnails, input), but save/load are refused. */
     if (g_busy || open_menu() < 0)
@@ -3234,6 +3274,18 @@ int menu_init(const char *status_text) {
                                                   0x16466675, display_hook);
 
   CTRL_HOOKS(INSTALL_CTRL_HOOK)
+
+  /* app starts/resumes: is the PSP emulator in front? (as PSV-Shell-Plus) */
+  g_procev_hook = taiHookFunctionImportForKernel(
+      KERNEL_PID, &g_procev_ref, "SceProcessmgr", 0x887F19D0, 0x414CC813,
+      procev_hook);
+  if (g_procev_hook < 0) {
+    static char line[96];
+    snprintf(line, sizeof(line), "PSP emulator check not available (hook "
+             "0x%08X): the menu also opens in PSP/PS1 games\r\n",
+             (unsigned)g_procev_hook);
+    log_queue(line);
+  }
 
   thid = ksceKernelCreateThread("JamaisVuInput", input_thread, 0x3C, 0x2000,
                                 0, 0x10000, NULL);
