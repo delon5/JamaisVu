@@ -54,16 +54,38 @@ static volatile int g_cancel_req; /* ○ while preparing a slot */
  * during gameplay JamaisVu holds none of this memory. The display hook
  * counts itself in g_overlay_users, so the memory is only freed once no
  * frame is being drawn with it. */
-/* the menu's memory, in three blocks (one 1.6 MB block was refused in
- * Chinatown Wars on the PS TV, by every pool): image, thumbnails, rest */
-#define OVL_PIECES 3
-static SceUID g_mem_blks[OVL_PIECES] = { -1, -1, -1 };
+/* The menu's memory, in small blocks, none over ~344 KB: one 1.6 MB
+ * block was refused in Chinatown Wars on the PS TV by every pool, and
+ * then three blocks too (its largest free blocks: 1024 KB and 640 KB, the
+ * menu image alone needed 1032 KB). The menu image is kept in strips of
+ * PANEL_STRIP_ROWS rows, the thumbnails in pairs. */
+#define PANEL_STRIP_ROWS 100
+#define PANEL_STRIPS ((MENU_H + PANEL_STRIP_ROWS - 1) / PANEL_STRIP_ROWS)
+#define THUMB_PAIRS ((JV_NUM_SLOTS + 2) / 2)
+/* in allocation order, largest first */
+enum {
+  OVL_P_PANEL = 0,                       /* PANEL_STRIPS strips, 344 KB */
+  OVL_P_TOAST = PANEL_STRIPS,            /* 124 KB */
+  OVL_P_THUMBS,                          /* THUMB_PAIRS pairs, 116 KB */
+  OVL_P_BAND = OVL_P_THUMBS + THUMB_PAIRS, /* band + row buffer, 76 KB */
+  OVL_P_EXT0,                            /* Japanese glyph sets */
+  OVL_P_EXT1,
+  OVL_PIECES
+};
+_Static_assert(PANEL_STRIP_ROWS % 20 == 0,
+               "render bands (BAND_ROWS) must not cross a strip");
+static SceUID g_mem_blks[OVL_PIECES];
+static uint32_t *g_panel_strip[PANEL_STRIPS];
+static inline uint32_t *panel_row(int y) {
+  return g_panel_strip[y / PANEL_STRIP_ROWS] +
+         (y % PANEL_STRIP_ROWS) * MENU_W;
+}
 static volatile SceUID g_fg_pid; /* app in the foreground, 0: none known */
 static SceUID g_ovl_mtx = -1;
 static volatile int g_overlay_ready;
 static volatile int g_overlay_users;
 static volatile uint32_t g_overlay_gen; /* +1 per acquire: buffers are new */
-static uint32_t *g_panel_px, *g_toast_px, *g_rowbuf, *g_band_px;
+static uint32_t *g_toast_px, *g_rowbuf, *g_band_px;
 
 /* Widest frame the menu is drawn on: 960 on the handhelds; the PS TV's
  * home screen may use a larger frame for the TV (up to 1920x1088), so
@@ -561,22 +583,56 @@ static const SceKernelMemBlockType k_ovl_types[3] = {
   0x1080D006, /* KERNEL_ROOT_PHYCONT_RW (2 MB worked in Dead Nation) */
   0x10C0D006, /* KERNEL_ROOT_UMAIN_RW */
 };
-static const char *const k_ovl_pool_names[3] = { "root", "root contiguous",
-                                                 "user main" };
-static const char *const k_ovl_piece_names[OVL_PIECES] = {
-  "menu image", "thumbnails", "buffers" };
-static uint8_t g_ovl_piece_pool[OVL_PIECES];
 static int g_ovl_fail_piece = -1;
 static uint32_t g_ovl_fail_size;
 static int g_ovl_fail_ret[3];
+static uint32_t g_ovl_pool_kb[3]; /* KB taken from each pool */
+static int g_ovl_root_short; /* refused: no margin left in root */
+
+#define EXT_SET_BYTES ((sizeof(ExtGlyphs) + 3) & ~3u)
+/* left free in the root pool after the menu took its memory (the kernel
+ * and the slot preparation, 256 KB, need some); refused otherwise */
+#define OVL_ROOT_MARGIN 0x20000
+
+static const char *ovl_piece_name(int k) {
+  if (k < OVL_P_TOAST)
+    return "menu image";
+  if (k == OVL_P_TOAST)
+    return "message box";
+  if (k < OVL_P_BAND)
+    return "thumbnails";
+  if (k == OVL_P_BAND)
+    return "drawing buffers";
+  return "Japanese glyphs";
+}
+
+static uint32_t ovl_piece_bytes(int k) {
+  if (k < OVL_P_TOAST) {
+    int rows = MENU_H - k * PANEL_STRIP_ROWS;
+    if (rows > PANEL_STRIP_ROWS)
+      rows = PANEL_STRIP_ROWS;
+    return rows * MENU_W * 4;
+  }
+  if (k == OVL_P_TOAST)
+    return TOAST_W * TOAST_H * 4;
+  if (k < OVL_P_BAND) {
+    int n = JV_NUM_SLOTS + 1 - (k - OVL_P_THUMBS) * 2;
+    return (n > 2 ? 2 : n) * THUMB_PX * 4;
+  }
+  if (k == OVL_P_BAND)
+    return MENU_W * BAND_ROWS * 4 + JV_MAX_FB_W * 4;
+  return EXT_SET_BYTES;
+}
 
 static uint32_t ovl_piece_size(int k) {
-  uint32_t ext = 2 * ((sizeof(ExtGlyphs) + 3) & ~3u);
-  uint32_t n = k == 0 ? MENU_W * MENU_H * 4
-             : k == 1 ? (JV_NUM_SLOTS + 1) * THUMB_PX * 4
-             : TOAST_W * TOAST_H * 4 + JV_MAX_FB_W * 4 +
-               MENU_W * BAND_ROWS * 4 + ext;
-  return (n + 0xfff) & ~0xfff;
+  return (ovl_piece_bytes(k) + 0xfff) & ~0xfff;
+}
+
+static uint32_t ovl_total_size(void) {
+  uint32_t t = 0;
+  for (int k = 0; k < OVL_PIECES; k++)
+    t += ovl_piece_size(k);
+  return t;
 }
 
 static void *ovl_piece_alloc(int k) {
@@ -588,7 +644,7 @@ static void *ovl_piece_alloc(int k) {
     void *base = NULL;
     if (uid >= 0 && ksceKernelGetMemBlockBase(uid, &base) >= 0 && base) {
       g_mem_blks[k] = uid;
-      g_ovl_piece_pool[k] = (uint8_t)i;
+      g_ovl_pool_kb[i] += size >> 10;
       return base;
     }
     if (uid >= 0)
@@ -601,9 +657,9 @@ static void *ovl_piece_alloc(int k) {
 
 static void ovl_pieces_free(void) {
   for (int k = 0; k < OVL_PIECES; k++) {
-    if (g_mem_blks[k] >= 0)
+    if (g_mem_blks[k] > 0)
       ksceKernelFreeMemBlock(g_mem_blks[k]);
-    g_mem_blks[k] = -1;
+    g_mem_blks[k] = 0;
   }
 }
 
@@ -633,25 +689,39 @@ static int overlay_acquire(void) {
     ksceKernelLockMutex(g_ovl_mtx, 1, NULL);
   if (!g_overlay_ready) {
     g_ovl_fail_piece = -1;
-    uint32_t *panel = ovl_piece_alloc(0);
-    uint32_t *thumbs = panel ? ovl_piece_alloc(1) : NULL;
-    uint32_t *rest = thumbs ? ovl_piece_alloc(2) : NULL;
-    if (rest) {
-      g_panel_px = panel;
-      uint32_t *p = thumbs;
-      for (int i = 0; i <= JV_NUM_SLOTS; i++) {
-        g_thumbs[i] = p;
-        p += THUMB_PX;
+    g_ovl_root_short = 0;
+    void *base[OVL_PIECES];
+    int ok = 1;
+    for (int i = 0; i < 3; i++)
+      g_ovl_pool_kb[i] = 0;
+    /* largest first: they need the largest free blocks */
+    for (int k = 0; k < OVL_PIECES && ok; k++)
+      ok = (base[k] = ovl_piece_alloc(k)) != NULL;
+    if (ok) {
+      /* leave the system some room: refuse if the root pool would be left
+       * without a block of OVL_ROOT_MARGIN */
+      SceUID t = ksceKernelAllocMemBlock("JamaisVuMargin", k_ovl_types[0],
+                                         OVL_ROOT_MARGIN, NULL);
+      if (t >= 0) {
+        ksceKernelFreeMemBlock(t);
+      } else {
+        g_ovl_root_short = 1;
+        ok = 0;
       }
-      p = rest;
-      g_toast_px = p;  p += TOAST_W * TOAST_H;
-      g_rowbuf = p;    p += JV_MAX_FB_W;
-      g_band_px = p;   p += MENU_W * BAND_ROWS;
+    }
+    if (ok) {
+      for (int k = 0; k < PANEL_STRIPS; k++)
+        g_panel_strip[k] = base[OVL_P_PANEL + k];
+      for (int i = 0; i <= JV_NUM_SLOTS; i++)
+        g_thumbs[i] = (uint32_t *)base[OVL_P_THUMBS + i / 2] +
+                      (i % 2) * THUMB_PX;
+      g_toast_px = base[OVL_P_TOAST];
+      g_band_px = base[OVL_P_BAND];
+      g_rowbuf = g_band_px + MENU_W * BAND_ROWS;
       for (int k = 0; k < 2; k++) {
-        g_ext_set[k] = (ExtGlyphs *)p;
+        g_ext_set[k] = base[OVL_P_EXT0 + k];
         g_ext_set[k]->n = 0;
         g_ext_set[k]->used = 0;
-        p += ((sizeof(ExtGlyphs) + 3) & ~3u) / 4;
       }
       g_overlay_gen++;
       __sync_synchronize();
@@ -678,7 +748,9 @@ static void overlay_release(void) {
     if (g_overlay_users == 0) {
       model_clear_thumbs(); /* the model must not point into freed memory */
       ovl_pieces_free();
-      g_panel_px = g_toast_px = g_rowbuf = g_band_px = NULL;
+      g_toast_px = g_rowbuf = g_band_px = NULL;
+      for (int k = 0; k < PANEL_STRIPS; k++)
+        g_panel_strip[k] = NULL;
       g_ext_set[0] = g_ext_set[1] = NULL;
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = NULL;
@@ -811,9 +883,21 @@ static void build_row(uint32_t *out, const uint32_t *src, const int *xmap,
     out[i] = 0xff000000u | (src[xmap[i]] & 0x00ffffffu);
 }
 
-/* Puts canvas c, laid out at (dx,dy) on a 960x544 screen, onto the
+/* an image kept in strips of equal height (the menu image) or in one
+ * piece (strip_rows == h) */
+typedef struct {
+  uint32_t *const *strip;
+  int strip_rows;
+  int w, h;
+} Image;
+
+static inline const uint32_t *image_row(const Image *c, int y) {
+  return c->strip[y / c->strip_rows] + (y % c->strip_rows) * c->w;
+}
+
+/* Puts image c, laid out at (dx,dy) on a 960x544 screen, onto the
  * framebuffer, scaling to the framebuffer's resolution. */
-static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
+static void compose(const SceDisplayFrameBuf *p, const Image *c,
                     const RowSpan *spans, int dx, int dy, int record) {
   static int xmap[JV_MAX_FB_W];
   int w = p->width, h = p->height;
@@ -832,7 +916,7 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
   int built_sy = -1; /* the canvas row g_rowbuf holds, built opaque */
   for (int j = 0; j < fh; j++) {
     int sy = j * c->h / fh;
-    const uint32_t *src = &c->px[sy * c->w];
+    const uint32_t *src = image_row(c, sy);
     uint32_t *dst = (uint32_t *)p->base + (fy0 + j) * p->pitch + fx0;
     RowSpan sp = spans[sy];
     t = prof_now();
@@ -930,7 +1014,7 @@ static void compose(const SceDisplayFrameBuf *p, const Canvas *c,
       for (int q = 1; q <= 4 && n < CHK_N; q++) {
         int x = q * fw / 5;
         g_chk.off[n] = (uint32_t)((fy0 + j) * p->pitch + fx0 + x);
-        g_chk.val[n] = c->px[sy * c->w + x];
+        g_chk.val[n] = image_row(c, sy)[x];
         n++;
       }
     }
@@ -986,7 +1070,7 @@ static void render_panel(void) {
       Canvas b = { g_band_px, MENU_W, rows, y0 };
       menu_view_render(&b, &local);
       scan_blend_rows(&b, blend);
-      memcpy(&g_panel_px[y0 * MENU_W], g_band_px, rows * MENU_W * 4);
+      memcpy(panel_row(y0), g_band_px, rows * MENU_W * 4);
       memcpy(&g_panel_blend[y0], blend, rows * sizeof(RowSpan));
       __sync_synchronize();
     }
@@ -1032,7 +1116,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       ksceKernelSignalSema(g_render_sema, 1);
     if (g_panel_gen == g_overlay_gen && !(g_panel_seq & 1)) {
       uint32_t t0 = prof_now();
-      Canvas c = { g_panel_px, MENU_W, MENU_H, 0 };
+      Image c = { g_panel_strip, PANEL_STRIP_ROWS, MENU_W, MENU_H };
       compose(p, &c, g_panel_blend, MENU_X, MENU_Y, 1);
       prof_add(PROF_COMPOSE, t0);
     }
@@ -1048,9 +1132,14 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       __sync_synchronize();
       if (g_model_seq == s1) {
         uint32_t t0 = prof_now();
-        Canvas c = { g_panel_px, MENU_W, MENU_H, 0 };
-        menu_view_render(&c, &local);
-        scan_blend_rows(&c, g_panel_blend);
+        for (int k = 0; k < PANEL_STRIPS; k++) {
+          int y0 = k * PANEL_STRIP_ROWS;
+          int rows = MENU_H - y0 < PANEL_STRIP_ROWS ? MENU_H - y0
+                                                    : PANEL_STRIP_ROWS;
+          Canvas c = { g_panel_strip[k], MENU_W, rows, y0 };
+          menu_view_render(&c, &local);
+          scan_blend_rows(&c, &g_panel_blend[y0]);
+        }
         prof_add(PROF_RENDER, t0);
         /* the render is complete (of the model at s1): show it now; if the
          * model changed meanwhile, the next frame renders again */
@@ -1061,7 +1150,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     }
     if (!(rendered_seq & 1)) {
       uint32_t t0 = prof_now();
-      Canvas c = { g_panel_px, MENU_W, MENU_H, 0 };
+      Image c = { g_panel_strip, PANEL_STRIP_ROWS, MENU_W, MENU_H };
       compose(p, &c, g_panel_blend, MENU_X, MENU_Y, 1);
       prof_add(PROF_COMPOSE, t0);
     }
@@ -1074,7 +1163,9 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       menu_view_render_toast(&c, g_toast_msg, g_toast_err);
       scan_blend_rows(&c, g_toast_blend);
     }
-    compose(p, &c, g_toast_blend, TOAST_X, TOAST_Y, 0);
+    uint32_t *const toast_strip[1] = { g_toast_px };
+    Image im = { toast_strip, TOAST_H, TOAST_W, TOAST_H };
+    compose(p, &im, g_toast_blend, TOAST_X, TOAST_Y, 0);
   }
 }
 
@@ -1361,35 +1452,48 @@ static int open_menu(void) {
   if (overlay_acquire() < 0) {
     /* like reVita's "Buy more RAM": refuse rather than take memory the
      * system needs; every refusal is noted, with what is free */
-    {
-      static char line[360];
+    static char line[400];
+    if (g_ovl_root_short) {
+      snprintf(line, sizeof(line), "menu not opened in %s: the menu's "
+               "memory (%u KB: root %u KB, root contiguous %u KB, user main "
+               "%u KB) was found, but would leave the kernel no free block "
+               "of %u KB in the root pool - refused; largest free blocks "
+               "now: root %u KB, root contiguous %u KB, user main %u KB\r\n",
+               tid, (unsigned)(ovl_total_size() >> 10),
+               (unsigned)g_ovl_pool_kb[0], (unsigned)g_ovl_pool_kb[1],
+               (unsigned)g_ovl_pool_kb[2], (unsigned)(OVL_ROOT_MARGIN >> 10),
+               (unsigned)(ovl_largest_free(k_ovl_types[0]) >> 10),
+               (unsigned)(ovl_largest_free(k_ovl_types[1]) >> 10),
+               (unsigned)(ovl_largest_free(k_ovl_types[2]) >> 10));
+    } else {
       int k = g_ovl_fail_piece < 0 ? 0 : g_ovl_fail_piece;
       snprintf(line, sizeof(line), "menu not opened in %s: not enough free "
-               "kernel memory for the %s (%u KB; root 0x%08X, root contiguous "
-               "0x%08X, user main 0x%08X); largest free blocks now: root %u "
-               "KB, root contiguous %u KB, user main %u KB (menu needs %u + "
-               "%u + %u KB)\r\n", tid, k_ovl_piece_names[k],
+               "kernel memory for the %s (block %d of %d, %u KB; root "
+               "0x%08X, root contiguous 0x%08X, user main 0x%08X); largest "
+               "free blocks now: root %u KB, root contiguous %u KB, user "
+               "main %u KB (menu needs %u KB in all, no block over %u KB)"
+               "\r\n", tid, ovl_piece_name(k), k + 1, OVL_PIECES,
                (unsigned)(g_ovl_fail_size >> 10),
                (unsigned)g_ovl_fail_ret[0], (unsigned)g_ovl_fail_ret[1],
                (unsigned)g_ovl_fail_ret[2],
                (unsigned)(ovl_largest_free(k_ovl_types[0]) >> 10),
                (unsigned)(ovl_largest_free(k_ovl_types[1]) >> 10),
                (unsigned)(ovl_largest_free(k_ovl_types[2]) >> 10),
-               (unsigned)(ovl_piece_size(0) >> 10),
-               (unsigned)(ovl_piece_size(1) >> 10),
-               (unsigned)(ovl_piece_size(2) >> 10));
-      log_queue(line);
+               (unsigned)(ovl_total_size() >> 10),
+               (unsigned)(ovl_piece_size(0) >> 10));
     }
+    log_queue(line);
     return -1;
   }
   if (!had) {
-    static char line[220];
-    snprintf(line, sizeof(line), "menu opened in %s, memory: %s from the %s "
-             "pool, %s from the %s pool, %s from the %s pool\r\n", tid,
-             k_ovl_piece_names[0],
-             k_ovl_pool_names[g_ovl_piece_pool[0]], k_ovl_piece_names[1],
-             k_ovl_pool_names[g_ovl_piece_pool[1]], k_ovl_piece_names[2],
-             k_ovl_pool_names[g_ovl_piece_pool[2]]);
+    static char line[260];
+    snprintf(line, sizeof(line), "menu opened in %s, memory %u KB in %d "
+             "blocks: root %u KB, root contiguous %u KB, user main %u KB; "
+             "largest root block still free: %u KB\r\n", tid,
+             (unsigned)(ovl_total_size() >> 10), OVL_PIECES,
+             (unsigned)g_ovl_pool_kb[0], (unsigned)g_ovl_pool_kb[1],
+             (unsigned)g_ovl_pool_kb[2],
+             (unsigned)(ovl_largest_free(k_ovl_types[0]) >> 10));
     log_queue(line);
   }
   g_capture_ok = 0;
