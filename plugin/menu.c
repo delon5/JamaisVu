@@ -3807,11 +3807,8 @@ static void do_overlay_test(void) {
    * on for its own transitions. SceDisplayForDriver: SetMergeConf (0x80
    * = off, else on; alpha 0x100 = the pixels' own) and SetOwner. */
   int (*set_merge)(int head, int control, uint32_t alpha) = NULL;
-  int (*set_owner)(int head, int index, SceUID pid) = NULL;
   module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0x6B198052,
                          (uintptr_t *)&set_merge);
-  module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0xB54962A1,
-                         (uintptr_t *)&set_owner);
 
   SceDisplayFrameBuf fb;
   memset(&fb, 0, sizeof(fb));
@@ -3821,14 +3818,13 @@ static void do_overlay_test(void) {
   fb.pixelformat = 0; /* SCE_DISPLAY_PIXELFORMAT_A8B8G8R8 */
   fb.width = W;
   fb.height = H;
-  /* phase A: blending on, the buffer on layer 1, 5 s */
+  /* blending on, the buffer on layer 1, 5 s. (c1f7862 / ed04ef3 also
+   * claimed the plane for the kernel with SetOwner after 5 s: the screen
+   * went black at that moment and stayed black - never again.) */
   int rm = set_merge ? set_merge(head, 0, 0x100) : -1;
   int r1 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
   ksceKernelDelayThread(5 * 1000 * 1000);
-  /* phase B: the plane claimed for the kernel as well, 5 s more */
-  int ro = set_owner ? set_owner(head, 1, KERNEL_PID) : -1;
-  int r1b = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
-  ksceKernelDelayThread(5 * 1000 * 1000);
+  int ro = 0, r1b = 0;
   /* Back - carefully. c1f7862 ended with blending "off" (0x80) and the
    * layer set to NULL, and the screen went black for good: the SDK's
    * "NULL blacks out the output" holds for this plane too, and 0x80 may
@@ -3845,7 +3841,7 @@ static void do_overlay_test(void) {
   int rm2 = set_merge ? set_merge(head, 0, 0) : -1;
   snprintf(line, sizeof(line), "overlay test: head %d layer 1, %ux%u ARGB "
            "buffer (%u KB) in %s: blending on -> 0x%08X, shown -> 0x%08X "
-           "(5 s); owner -> 0x%08X, shown again -> 0x%08X (5 s); made "
+           "(5 s); (no owner change: 0x%08X/0x%08X); made "
            "transparent -> 0x%08X, overlay alpha 0 -> 0x%08X; the buffer "
            "stays on the plane (not freed)\r\n", head, (unsigned)W,
            (unsigned)H, (unsigned)(size >> 10), names[ti], (unsigned)rm,
