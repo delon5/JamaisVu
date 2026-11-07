@@ -121,19 +121,22 @@ int main(int argc, char **argv) {
     w.selected = 9;
     frame(argv[3], "20_slots_08_to_12_of_20", &w);
     w = m;
-    w.total = 2;
-    w.first = 0;
-    w.selected = 1;
-    frame(argv[3], "21_two_slots", &w);
-    w = m;
     w.total = 0;
     w.first = 0;
     w.selected = 0;
     for (int i = 0; i < JV_NUM_SLOTS; i++) {
       memset(&w.slots[i], 0, sizeof(w.slots[i]));
+      w.slots[i].locked = 1;
     }
-    w.slots[0].locked = 1;
     frame(argv[3], "22_no_slot_can_exist", &w);
+    w = m;
+    w.total = 2;
+    w.selected = 1;
+    for (int i = 2; i < JV_NUM_SLOTS; i++) {
+      memset(&w.slots[i], 0, sizeof(w.slots[i]));
+      w.slots[i].locked = 1;
+    }
+    frame(argv[3], "21_two_slots", &w);
   }
 
   m.selected = 2;

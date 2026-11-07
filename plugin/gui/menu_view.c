@@ -78,14 +78,6 @@ static int sel_pos(const MenuModel *m) {
   return p < 0 ? 0 : p >= JV_NUM_SLOTS ? JV_NUM_SLOTS - 1 : p;
 }
 
-/* slots in the row: five, fewer at the end of the list, the placeholder
- * alone when no slot can exist */
-static int row_count(const MenuModel *m) {
-  int n = m->total - m->first;
-  if (m->total <= 0)
-    return 1;
-  return n < 1 ? 1 : n > JV_NUM_SLOTS ? JV_NUM_SLOTS : n;
-}
 
 static void draw_slot(Canvas *c, const MenuModel *m, int i) {
   const MenuSlot *s = &m->slots[i];
@@ -93,7 +85,7 @@ static void draw_slot(Canvas *c, const MenuModel *m, int i) {
   int y = THUMB_Y;
   int sel = (i == sel_pos(m));
   char num[8];
-  u_to_dec(num, m->total ? (unsigned)(slot_at(m, i) + 1) : 0, 2);
+  u_to_dec(num, (unsigned)(slot_at(m, i) + 1), 2);
 
   if (sel) {
     cv_round_rect(c, x - 9, y - 9, JV_THUMB_W + 18, JV_THUMB_H + 18, 10,
@@ -400,7 +392,9 @@ void menu_view_render(Canvas *c, const MenuModel *m) {
   logo_draw(c, 24, 13, 1); /* letters + rising particles centred in the header */
   draw_counter(c, m);
 
-  for (int i = 0; i < row_count(m); i++)
+  /* always a row of five: the slots past the ones that can exist are
+   * drawn locked (the model marks them so) */
+  for (int i = 0; i < JV_NUM_SLOTS; i++)
     draw_slot(c, m, i);
 
   cv_fill(c, 24, RULE_Y, MENU_W - 48, 1, C_RULE);

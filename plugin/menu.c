@@ -3070,8 +3070,9 @@ static void window_fill_locked(void) {
   g_model.total = g_total;
   for (int pos = 0; pos < JV_NUM_SLOTS; pos++) {
     int at = g_model.first + pos;
-    if (at >= n) {
+    if (at >= n) { /* past the slots that can exist: drawn locked */
       memset(&g_model.slots[pos], 0, sizeof(g_model.slots[pos]));
+      g_model.slots[pos].locked = 1;
       continue;
     }
     g_model.slots[pos] = g_slot_list[at];

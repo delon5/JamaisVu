@@ -371,8 +371,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < JV_NUM_SLOTS; i++) {
       w.slots[i].used = 0;
       w.slots[i].thumb = NULL;
+      w.slots[i].locked = 1;
     }
-    w.slots[0].locked = 1;
     rc |= check("browse, no slot can exist", &w);
   }
   m.selected = 1;
