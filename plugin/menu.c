@@ -429,6 +429,7 @@ static struct {
   int fl_other_val;
   /* the system overlay layer (index 1) of the primary display while the
    * menu is open in a game: could the menu live there instead? */
+  uint32_t chk_was, chk_now; /* the last changed pixel: ours -> the game's */
   uint32_t l0_calls, l1_calls, l1_set;
   uintptr_t l1_base;
   uint32_t l1_fmt, l1_w, l1_h, l1_pitch;
@@ -1274,8 +1275,10 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
     }
   }
   g_fbd.cleans++;
-  /* drawn-over check: 8 opaque rows x 4 columns, values as written */
-  if (record && fw == c->w) {
+  /* drawn-over check: 8 opaque rows x 4 columns, values as written (at
+   * any scale: the frame column maps back to the image column, as the
+   * opaque rows were built from xmap) */
+  if (record) {
     int n = 0;
     for (int k = 1; k <= 8; k++) {
       int j = k * fh / 9, sy = j * c->h / fh;
@@ -1284,7 +1287,7 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
       for (int q = 1; q <= 4 && n < CHK_N; q++) {
         int x = q * fw / 5;
         g_chk.off[n] = (uint32_t)((fy0 + j) * p->pitch + fx0 + x);
-        g_chk.val[n] = rgb565_to_rgba(img_row16(c, sy)[x]);
+        g_chk.val[n] = rgb565_to_rgba(img_row16(c, sy)[xmap[x]]);
         n++;
       }
     }
@@ -1548,8 +1551,11 @@ static void drawn_over_check(uintptr_t next_base) {
       g_chk.n = 0;
       return;
     }
-    if (v != g_chk.val[i])
+    if (v != g_chk.val[i]) {
       changed++;
+      g_fbd.chk_was = g_chk.val[i]; /* the last one: dimmed, or overwritten? */
+      g_fbd.chk_now = v;
+    }
   }
   uint32_t us = (uint32_t)(now_us() - g_chk.t);
   g_fbd.chk_frames++;
@@ -1754,13 +1760,15 @@ static void perf_report(void) {
     snprintf(line, sizeof(line),
              "    menu drawn over by the game before the next frame: %u of %u "
              "frames (%u of %u pixels changed, checked up to %u ms after "
-             "drawing); system layer 1 while in the game: %u calls (%u with "
+             "drawing; last changed pixel %08X -> %08X); system layer 1 "
+             "while in the game: %u calls (%u with "
              "a frame, last %08X fmt %X %ux%u pitch %u), game layer 0: %u "
              "calls; cache flush pieces %u: returned 0 x%u, 1 x%u, other x%u "
              "(last other 0x%08X)\r\n",
              (unsigned)g_fbd.chk_hit, (unsigned)g_fbd.chk_frames,
              (unsigned)g_fbd.chk_changed, (unsigned)g_fbd.chk_px,
-             (unsigned)(g_fbd.chk_us_max / 1000), (unsigned)g_fbd.l1_calls,
+             (unsigned)(g_fbd.chk_us_max / 1000), (unsigned)g_fbd.chk_was,
+             (unsigned)g_fbd.chk_now, (unsigned)g_fbd.l1_calls,
              (unsigned)g_fbd.l1_set, (unsigned)g_fbd.l1_base,
              (unsigned)g_fbd.l1_fmt, (unsigned)g_fbd.l1_w,
              (unsigned)g_fbd.l1_h, (unsigned)g_fbd.l1_pitch,
