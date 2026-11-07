@@ -83,6 +83,10 @@ Slots from the original dejavu plugin (`ux0:savestate/…`, format v1) cannot be
 
 **Known issue: Dead Nation.** The menu (and reVita's popup) breaks up into blocks in Dead Nation, because the game itself tears: it draws into frames that are already on screen, which damages anything drawn over them. Saving and loading work normally there; only the menu's picture is affected.
 
+## How the menu is drawn
+
+In a game the menu lives on the display's second plane - the one the system uses for its own overlays - as a single 960x544 picture in VRAM that the display hardware blends over the game's frames (scaled to the output, 1080p on the PS TV included). Nothing is composed into the game's frames, the game cannot draw over it, and the menu needs only ~120 KB of kernel memory (thumbnails and a drawing band) instead of ~850 KB, so it opens in games that leave the kernel almost nothing. The 2 MB VRAM buffer is taken on first use and kept; the plane is claimed while the menu or a message is shown and handed back to the system afterwards. In the LiveArea that plane is the LiveArea's own picture, so there the menu is composed into the frames as before.
+
 ## How it keeps the Memory Card safe
 
 The original README warned that *"your SD Card and/or Memory Card may be corrupted"*. This version addresses each known cause.

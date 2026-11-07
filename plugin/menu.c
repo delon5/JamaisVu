@@ -38,9 +38,7 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 #define EVF_RESUMED 2
 
 enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY,
-       OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY, OP_TEST_WRITE,
-       OP_TEST_OVERLAY };
-static void do_overlay_test(void);
+       OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY, OP_TEST_WRITE };
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
 #define PENDING  JV_NUM_SLOTS /* thumbnail index of the live capture */
@@ -193,6 +191,36 @@ static int g_dolce; /* PS TV: also controller port 1 */
  * (odd seq = nothing drawn yet). */
 #define BAND_ROWS 20
 static SceUID g_render_sema = -1;
+
+/* The menu on the display's overlay plane (index 1, the plane the system
+ * uses for its own overlays) while a game runs: drawn straight into one
+ * 960x544 ARGB buffer in VRAM that the display hardware blends over the
+ * game's frames (scaled to the output, 1080p on the PS TV included). No
+ * compose into the game's frames at all, nothing the game can draw over,
+ * and no menu image in the kernel pools: the thumbnails and the drawing
+ * band are all it takes (Dead Space on a PCH-1000 left 384 KB). What the
+ * 96eb617..2cba1c8 tests showed: the buffer is only shown once the plane
+ * is claimed for the kernel (SetOwner), blending must be on with the
+ * pixels' own alpha (SetMergeConf alpha 0x100; alpha 0, or a NULL layer,
+ * blacks the output for good), and in the LiveArea the plane is the
+ * LiveArea's own picture - the compose path stays for the LiveArea. The
+ * buffer is kept once taken: the plane keeps reading it. */
+static SceUID g_plane_uid = -1;
+static uint32_t *g_plane_px; /* JV_SCREEN_W x JV_SCREEN_H ARGB */
+static const char *g_plane_pool;
+static int g_plane_fail; /* no buffer or no driver functions: compose */
+static volatile int g_plane_mode;   /* this overlay generation uses it */
+static volatile int g_plane_shown;  /* the plane is set up with the buffer */
+static volatile int g_plane_lost;   /* something else set the plane */
+static volatile int g_plane_reshow; /* the input thread claims it again */
+static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
+static volatile int g_plane_toast;  /* the message box is drawn in it */
+static volatile int g_render_active;
+static uint32_t g_plane_toast_band[TOAST_W * TOAST_BAND_ROWS];
+static int (*g_set_merge)(int head, int control, uint32_t alpha);
+static int (*g_set_owner)(int head, int index, SceUID pid);
+#define PLANE_W JV_SCREEN_W
+#define PLANE_H JV_SCREEN_H
 static int g_render_thread_ok;
 static volatile uint32_t g_panel_seq = 1, g_panel_gen;
 static uint16_t *g_thumbs[JV_NUM_SLOTS + 1]; /* RGB565 */
@@ -454,6 +482,110 @@ static int fb_cache_sync(void *addr, unsigned int size) {
   uintptr_t a = (uintptr_t)addr & ~(uintptr_t)63;
   uintptr_t e = ((uintptr_t)addr + size + 63) & ~(uintptr_t)63;
   return g_dcache_clean_inv((void *)a, e - a);
+}
+
+/* the plane's buffer: rows [y0, y0 + rows) written back to memory (its
+ * mapping is cached; the display reads memory) */
+static void plane_flush(uint32_t y0, uint32_t rows) {
+  uint8_t *a = (uint8_t *)(g_plane_px + y0 * PLANE_W);
+  uint32_t bytes = rows * PLANE_W * 4;
+  for (uint32_t off = 0; off < bytes; off += 0x8000)
+    fb_cache_sync(a + off, bytes - off > 0x8000 ? 0x8000 : bytes - off);
+}
+
+static void plane_clear(uint32_t y0, uint32_t rows) {
+  memset(g_plane_px + y0 * PLANE_W, 0, rows * PLANE_W * 4);
+  plane_flush(y0, rows);
+}
+
+/* 0 once the buffer and the driver's two functions are there (kept) */
+static int plane_alloc(void) {
+  static const SceKernelMemBlockType types[3] = {
+    0x40404006, /* KERNEL_CDRAM_L1WBWA_RW: VRAM, cached */
+    0x1080D006, /* KERNEL_ROOT_PHYCONT_RW */
+    0x40408006, /* KERNEL_CDRAM_RW: VRAM, uncached */
+  };
+  static const char *const names[3] = { "VRAM (cached)", "root contiguous",
+                                        "VRAM (uncached)" };
+  const uint32_t size = (PLANE_W * PLANE_H * 4 + 0xfffff) & ~0xfffffu;
+  static char line[200];
+  if (g_plane_px)
+    return 0;
+  if (g_plane_fail)
+    return -1;
+  if (!g_set_merge)
+    module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0x6B198052,
+                           (uintptr_t *)&g_set_merge);
+  if (!g_set_owner)
+    module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0xB54962A1,
+                           (uintptr_t *)&g_set_owner);
+  if (!g_set_merge || !g_set_owner) {
+    g_plane_fail = 1;
+    log_queue("overlay plane: the display driver's merge/owner functions "
+              "were not found - the menu is drawn into the game's frames"
+              "\r\n");
+    return -1;
+  }
+  for (int i = 0; i < 3; i++) {
+    void *base = NULL;
+    SceUID uid = ksceKernelAllocMemBlock("JamaisVuPlane", types[i], size,
+                                         NULL);
+    if (uid >= 0 && (ksceKernelGetMemBlockBase(uid, &base) < 0 || !base)) {
+      ksceKernelFreeMemBlock(uid);
+      uid = -1;
+    }
+    if (uid >= 0) {
+      g_plane_uid = uid;
+      g_plane_px = base;
+      g_plane_pool = names[i];
+      plane_clear(0, PLANE_H);
+      snprintf(line, sizeof(line), "overlay plane: %u KB in %s, kept from "
+               "now on - in games the menu is shown on the display's second "
+               "layer\r\n", (unsigned)(size >> 10), names[i]);
+      log_queue(line);
+      return 0;
+    }
+  }
+  g_plane_fail = 1;
+  log_queue("overlay plane: no 2 MB block in VRAM or root contiguous - the "
+            "menu is drawn into the game's frames\r\n");
+  return -1;
+}
+
+/* The plane shows the buffer: blending on with the pixels' own alpha,
+ * the plane claimed for the kernel, the buffer set. Called again after
+ * the shell used the plane (g_plane_lost) - never from inside the
+ * display hook (the driver's own function is what the hook is on). */
+static void plane_show(void) {
+  if (!g_plane_px)
+    return;
+  int head = ksceDisplayGetPrimaryHead();
+  SceDisplayFrameBuf fb;
+  memset(&fb, 0, sizeof(fb));
+  fb.size = sizeof(fb);
+  fb.base = g_plane_px;
+  fb.pitch = PLANE_W;
+  fb.pixelformat = 0; /* A8B8G8R8 */
+  fb.width = PLANE_W;
+  fb.height = PLANE_H;
+  g_set_merge(head, 0, 0x100);
+  g_set_owner(head, 1, KERNEL_PID);
+  ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
+  g_plane_lost = 0;
+  g_plane_shown = 1;
+}
+
+/* nothing of ours on the plane: the buffer transparent, the plane given
+ * back to the shell's process (it sets its own picture when it needs it) */
+static void plane_hide(void) {
+  if (!g_plane_shown)
+    return;
+  plane_clear(0, PLANE_H);
+  g_plane_panel = g_plane_toast = 0;
+  SceUID shell = ksceKernelSysrootGetShellPid();
+  if (shell > 0)
+    g_set_owner(ksceDisplayGetPrimaryHead(), 1, shell);
+  g_plane_shown = 0;
 }
 
 /* Display test: where the frame on screen is in physical memory. The
@@ -869,9 +1001,18 @@ static int overlay_acquire(void) {
     int ok = 1;
     for (int i = 0; i < OVL_POOLS; i++)
       g_ovl_pool_kb[i] = 0;
+    /* over a game: the overlay plane, and no menu image or message box
+     * in the kernel pools (they are drawn straight into its buffer) */
+    int plane = ksceAppMgrIsExclusiveProcessRunning() && g_render_sema >= 0 &&
+                plane_alloc() == 0;
     /* largest first: they need the largest free blocks */
-    for (int k = 0; k < OVL_FIXED && ok; k++)
+    for (int k = 0; k < OVL_FIXED && ok; k++) {
+      if (plane && (k < OVL_P_THUMBS || k == OVL_P_TOAST)) {
+        base[k] = NULL;
+        continue;
+      }
       ok = (base[k] = ovl_piece_alloc(k)) != NULL;
+    }
     if (ok && g_ovl_pool_kb[0]) {
       /* leave the system some room: refuse if the root pool would be left
        * without a block of OVL_ROOT_MARGIN. Only when the menu took root
@@ -893,11 +1034,17 @@ static int overlay_acquire(void) {
       g_panel_img.corner = g_band_px + MENU_W * BAND_ROWS;
       g_toast_img.corner = g_panel_img.corner + CORNER_PX;
       g_toast_img.strip[0] = base[OVL_P_TOAST];
-      g_toast_band = (uint32_t *)(g_toast_img.strip[0] + TOAST_W * TOAST_H);
+      g_toast_band = plane ? g_plane_toast_band
+                           : (uint32_t *)(g_toast_img.strip[0] +
+                                          TOAST_W * TOAST_H);
       g_ext_set[0] = g_ext_set[1] = NULL; /* taken when the names are read */
+      g_plane_mode = plane;
+      g_plane_panel = g_plane_toast = 0;
       g_overlay_gen++;
       __sync_synchronize();
       g_overlay_ready = 1;
+      if (plane)
+        plane_show();
     } else {
       ovl_pieces_free();
       res = -1;
@@ -919,6 +1066,9 @@ static void overlay_release(void) {
       ksceKernelDelayThread(1000);
     if (g_overlay_users == 0) {
       model_clear_thumbs(); /* the model must not point into freed memory */
+      if (g_plane_mode)
+        plane_hide();
+      g_plane_mode = 0;
       int errs = g_free_errs;
       ovl_pieces_free();
       {
@@ -1416,6 +1566,7 @@ static void render_panel(void) {
 
     uint32_t t0 = prof_now();
     int stopped = 0;
+    g_render_active = 1;
     for (int y0 = 0; y0 < MENU_H; y0 += BAND_ROWS) {
       if (!g_overlay_ready || !g_menu_open) { /* closing: stop early */
         stopped = 1;
@@ -1424,11 +1575,22 @@ static void render_panel(void) {
       int rows = MENU_H - y0 < BAND_ROWS ? MENU_H - y0 : BAND_ROWS;
       Canvas b = { g_band_px, MENU_W, rows, y0 };
       menu_view_render(&b, &local);
-      scan_blend_rows(&b, blend);
-      img_store_rows(&g_panel_img, g_band_px, y0, rows, blend);
-      memcpy(&g_panel_blend[y0], blend, rows * sizeof(RowSpan));
+      if (g_plane_mode) {
+        /* straight into the plane's buffer, at the panel's place on the
+         * screen; the rows' own alpha does the corners */
+        for (int r = 0; r < rows; r++)
+          memcpy(g_plane_px + (MENU_Y + y0 + r) * PLANE_W + MENU_X,
+                 g_band_px + r * MENU_W, MENU_W * 4);
+        plane_flush(MENU_Y + y0, rows);
+        g_plane_panel = 1;
+      } else {
+        scan_blend_rows(&b, blend);
+        img_store_rows(&g_panel_img, g_band_px, y0, rows, blend);
+        memcpy(&g_panel_blend[y0], blend, rows * sizeof(RowSpan));
+      }
       __sync_synchronize();
     }
+    g_render_active = 0;
     if (xi >= 0)
       __sync_fetch_and_sub(&g_ext_users[xi], 1);
     if (stopped)
@@ -1463,6 +1625,40 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     gen = g_overlay_gen;
     rendered_seq = 1;
     rendered_toast = 0xffffffff;
+  }
+
+  if (g_plane_mode) {
+    /* the plane: the render thread keeps the panel in the buffer; here
+     * only the message box, and clearing what is no longer shown */
+    if (g_plane_lost)
+      g_plane_reshow = 1; /* the input thread claims the plane again */
+    if (g_menu_open) {
+      if (g_panel_seq != g_model_seq || g_panel_gen != g_overlay_gen)
+        ksceKernelSignalSema(g_render_sema, 1);
+    } else if (g_plane_panel && !g_render_active) {
+      plane_clear(MENU_Y, MENU_H);
+      g_plane_panel = 0;
+    }
+    if (now_us() < g_toast_until) {
+      if (rendered_toast != g_toast_seq) {
+        rendered_toast = g_toast_seq;
+        for (int y0 = 0; y0 < TOAST_H; y0 += TOAST_BAND_ROWS) {
+          int rows = TOAST_H - y0 < TOAST_BAND_ROWS ? TOAST_H - y0
+                                                    : TOAST_BAND_ROWS;
+          Canvas b = { g_plane_toast_band, TOAST_W, rows, y0 };
+          menu_view_render_toast(&b, g_toast_msg, g_toast_err);
+          for (int r = 0; r < rows; r++)
+            memcpy(g_plane_px + (TOAST_Y + y0 + r) * PLANE_W + TOAST_X,
+                   g_plane_toast_band + r * TOAST_W, TOAST_W * 4);
+        }
+        plane_flush(TOAST_Y, TOAST_H);
+        g_plane_toast = 1;
+      }
+    } else if (g_plane_toast) {
+      plane_clear(TOAST_Y, TOAST_H);
+      g_plane_toast = 0;
+    }
+    return;
   }
 
   if (g_menu_open && g_render_sema >= 0) {
@@ -1599,6 +1795,11 @@ static void drawn_over_check(uintptr_t next_base) {
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
+  /* the overlay plane set by someone else (the shell's own overlays): ours
+   * is claimed again by the input thread when it is needed */
+  if (index == 1 && g_plane_shown && p && p->base &&
+      p->base != (void *)g_plane_px)
+    g_plane_lost = 1;
   if (g_menu_open && head == ksceDisplayGetPrimaryHead() &&
       ksceAppMgrIsExclusiveProcessRunning()) {
     if (index == 0)
@@ -1884,9 +2085,12 @@ static int open_menu(void) {
     static char line[220];
     static char pools[160];
     ovl_pools_text(pools, sizeof(pools), g_ovl_pool_kb);
-    snprintf(line, sizeof(line), "menu opened in %s, memory %u KB in %d "
-             "blocks: %s\r\n", tid, (unsigned)(ovl_total_size() >> 10),
-             OVL_FIXED, pools);
+    uint32_t took = 0;
+    for (int i = 0; i < OVL_POOLS; i++)
+      took += g_ovl_pool_kb[i];
+    snprintf(line, sizeof(line), "menu opened in %s, memory %u KB: %s%s\r\n",
+             tid, (unsigned)took, pools,
+             g_plane_mode ? "; shown on the display's overlay plane" : "");
     log_queue(line);
   }
   g_capture_ok = 0;
@@ -2086,8 +2290,6 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_DISPLAY, sel);
       } else if (pressed & SCE_CTRL_RIGHT) {
         start_op(OP_TEST_WRITE, sel);
-      } else if (pressed & SCE_CTRL_LEFT) {
-        start_op(OP_TEST_OVERLAY, sel);
       }
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
@@ -2178,6 +2380,11 @@ static int input_thread(SceSize args, void *argp) {
     if (g_rearm_input) {
       g_rearm_input = 0;
       prev = 0xffffffff;
+    }
+    if (g_plane_reshow) {
+      g_plane_reshow = 0;
+      if (g_plane_mode && g_overlay_ready)
+        plane_show();
     }
 
     /* enable "Save" once the display hook has captured a game frame */
@@ -3723,146 +3930,6 @@ static void do_test(int kind, int slot, int variant) {
                dry ? JV_TEST_DRYRUN : JV_TEST_RESET, variant);
 }
 
-/* Diagnostics: the menu through the display's second layer. The display
- * hardware blends a second plane (index 1, the system's own overlays)
- * over the game's frame; the menu there would need no compose into the
- * game's frames at all (no per-frame CPU, nothing the game can draw
- * over) and only one 960x544 ARGB buffer, in VRAM. This test draws the
- * menu as it is into such a buffer, closes the ordinary menu, shows the
- * buffer on layer 1 for 5 s, makes it transparent, switches the layer
- * off and gives the buffer back; every answer goes to log.txt. */
-static void do_overlay_test(void) {
-  static char line[320];
-  static MenuModel local;
-  const uint32_t W = JV_SCREEN_W, H = JV_SCREEN_H;
-  const uint32_t bytes = W * H * 4, size = (bytes + 0xfffff) & ~0xfffffu;
-  static const SceKernelMemBlockType types[3] = {
-    0x40404006, /* KERNEL_CDRAM_L1WBWA_RW: VRAM, cached */
-    0x1080D006, /* KERNEL_ROOT_PHYCONT_RW */
-    0x40408006, /* KERNEL_CDRAM_RW: VRAM, uncached */
-  };
-  static const char *const names[3] = { "VRAM (cached)", "root contiguous",
-                                        "VRAM (uncached)" };
-  SceUID uid = -1;
-  void *buf = NULL;
-  int ti = -1, head = ksceDisplayGetPrimaryHead();
-
-  /* only over a game: in the LiveArea the shell's own picture lives on
-   * that plane (c1f7862 / ed04ef3 runs: claiming it replaced the LiveArea
-   * with the menu, and a transparent buffer at the end left nothing) */
-  if (!ksceAppMgrIsExclusiveProcessRunning()) {
-    set_message(MV_MESSAGE, "Overlay test: run it in a game - in the "
-                "LiveArea that plane is the LiveArea itself", -1, 1);
-    log_append("overlay test: not run - the LiveArea's picture lives on "
-               "the overlay plane\r\n");
-    return;
-  }
-  set_message(MV_BUSY, "Overlay test: the menu on the display's second "
-              "layer for 5 s", -1, 0);
-  for (int i = 0; i < 3 && uid < 0; i++) {
-    uid = ksceKernelAllocMemBlock("JamaisVuLayer", types[i], size, NULL);
-    if (uid >= 0 && (ksceKernelGetMemBlockBase(uid, &buf) < 0 || !buf)) {
-      ksceKernelFreeMemBlock(uid);
-      uid = -1;
-    }
-    if (uid >= 0)
-      ti = i;
-  }
-  if (uid < 0) {
-    snprintf(line, sizeof(line), "overlay test: no %u KB block for the "
-             "layer buffer (VRAM cached 0x%08X)\r\n", (unsigned)(size >> 10),
-             (unsigned)uid);
-    log_append(line);
-    set_message(MV_MESSAGE, "Overlay test: no 2 MB block for the layer",
-                -1, 1);
-    return;
-  }
-  uint32_t *px = buf;
-  memset(px, 0, bytes); /* transparent everywhere but the menu */
-
-  /* the menu as it is now, band by band (the scratch band lives in the
-   * buffer's own bottom rows, cleared afterwards: the render thread owns
-   * the usual band buffer) */
-  for (int tries = 0; tries < 200; tries++) {
-    uint32_t s1 = g_model_seq;
-    if (s1 & 1) {
-      ksceKernelDelayThread(1000);
-      continue;
-    }
-    __sync_synchronize();
-    memcpy(&local, &g_model, sizeof(local));
-    __sync_synchronize();
-    if (g_model_seq == s1)
-      break;
-  }
-  uint32_t *band = px + (H - BAND_ROWS) * W;
-  for (int y0 = 0; y0 < MENU_H; y0 += BAND_ROWS) {
-    int rows = MENU_H - y0 < BAND_ROWS ? MENU_H - y0 : BAND_ROWS;
-    Canvas b = { band, MENU_W, rows, y0 };
-    menu_view_render(&b, &local);
-    for (int r = 0; r < rows; r++)
-      memcpy(px + (MENU_Y + y0 + r) * W + MENU_X, band + r * MENU_W,
-             MENU_W * 4);
-  }
-  memset(band, 0, BAND_ROWS * W * 4);
-  for (uint32_t off = 0; off < bytes; off += 0x8000)
-    fb_cache_sync((uint8_t *)px + off, bytes - off > 0x8000 ? 0x8000
-                                                              : bytes - off);
-
-  close_menu(); /* from here on layer 0 is the game alone */
-  ksceKernelDelayThread(200 * 1000);
-
-  /* 96eb617 (PCH-1000): the buffer was accepted on layer 1 (every call
-   * returned 0) but nothing showed - the plane is only composited while
-   * the head's "merge" (overlay blending) is on, which the shell switches
-   * on for its own transitions. SceDisplayForDriver: SetMergeConf (0x80
-   * = off, else on; alpha 0x100 = the pixels' own) and SetOwner. */
-  int (*set_merge)(int head, int control, uint32_t alpha) = NULL;
-  int (*set_owner)(int head, int index, SceUID pid) = NULL;
-  module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0x6B198052,
-                         (uintptr_t *)&set_merge);
-  module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0xB54962A1,
-                         (uintptr_t *)&set_owner);
-
-  SceDisplayFrameBuf fb;
-  memset(&fb, 0, sizeof(fb));
-  fb.size = sizeof(fb);
-  fb.base = px;
-  fb.pitch = W;
-  fb.pixelformat = 0; /* SCE_DISPLAY_PIXELFORMAT_A8B8G8R8 */
-  fb.width = W;
-  fb.height = H;
-  /* c1f7862 / ed04ef3 in the LiveArea: with blending on and the buffer
-   * on layer 1 nothing changed (the shell owns the plane); once the plane
-   * was claimed for the kernel (SetOwner) the buffer showed; the endings
-   * (overlay alpha 0, or 0x80 + NULL) left the screen black for good. So,
-   * over a game: blending on with the pixels' own alpha, the plane
-   * claimed, shown 5 s, the buffer made transparent, the plane handed
-   * back to the shell; blending and the buffer left as they are. */
-  SceUID shell = ksceKernelSysrootGetShellPid();
-  int rm = set_merge ? set_merge(head, 0, 0x100) : -1;
-  int ro = set_owner ? set_owner(head, 1, KERNEL_PID) : -1;
-  int r1 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
-  ksceKernelDelayThread(5 * 1000 * 1000);
-  memset(px, 0, bytes);
-  for (uint32_t off = 0; off < bytes; off += 0x8000)
-    fb_cache_sync((uint8_t *)px + off, bytes - off > 0x8000 ? 0x8000
-                                                              : bytes - off);
-  int r2 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
-  ksceKernelDelayThread(500 * 1000);
-  int r1b = set_owner && shell > 0 ? set_owner(head, 1, shell) : -1;
-  int rm2 = (int)shell; /* logged: the shell's process */
-  snprintf(line, sizeof(line), "overlay test: head %d layer 1, %ux%u ARGB "
-           "buffer (%u KB) in %s: blending on -> 0x%08X, plane claimed -> "
-           "0x%08X, shown -> 0x%08X (5 s); made transparent -> 0x%08X, "
-           "plane back to the shell (%08X) -> 0x%08X; the buffer stays on "
-           "the plane (not freed)\r\n", head, (unsigned)W,
-           (unsigned)H, (unsigned)(size >> 10), names[ti], (unsigned)rm,
-           (unsigned)ro, (unsigned)r1, (unsigned)r2, (unsigned)rm2,
-           (unsigned)r1b);
-  log_append(line);
-}
-
 /* Creates slot files ahead of time (from the LiveArea), so that a save
  * later in a game does not have to. Only the OS writes here, exactly as
  * when a save prepares its slot, and the free-space safeguard is checked
@@ -4007,9 +4074,6 @@ static int worker_thread(SceSize args, void *argp) {
         break;
       case OP_TEST_WRITE:
         do_test(3, g_op_slot, JV_PAYLOAD_DEFAULT);
-        break;
-      case OP_TEST_OVERLAY:
-        do_overlay_test();
         break;
       case OP_PREPARE:
         do_prepare(0, g_op_slot);
