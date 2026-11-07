@@ -841,9 +841,12 @@ static int overlay_acquire(void) {
     /* largest first: they need the largest free blocks */
     for (int k = 0; k < OVL_FIXED && ok; k++)
       ok = (base[k] = ovl_piece_alloc(k)) != NULL;
-    if (ok) {
+    if (ok && g_ovl_pool_kb[0]) {
       /* leave the system some room: refuse if the root pool would be left
-       * without a block of OVL_ROOT_MARGIN */
+       * without a block of OVL_ROOT_MARGIN. Only when the menu took root
+       * memory itself: a game that leaves root at 64 KB on its own (Trails
+       * in the Sky the 3rd Evolution, PCSG00490, 208 modules) is no reason
+       * to refuse a menu that lives in root contiguous and user main. */
       if (!root_margin_free()) {
         g_ovl_root_short = 1;
         ok = 0;
@@ -1781,7 +1784,6 @@ static void fg_title(char *tid, int len) {
 }
 
 static int open_menu(void) {
-  perf_report();
   int had = g_overlay_ready;
   char tid[16];
   fg_title(tid, sizeof(tid));
@@ -1791,6 +1793,7 @@ static int open_menu(void) {
   static int64_t refused_until;
   if (!had && now_us() < refused_until)
     return -1;
+  perf_report(); /* after the cooldown: not a line per ignored press */
   if (overlay_acquire() < 0) {
     /* like reVita's "Buy more RAM": refuse rather than take memory the
      * system needs. Logged with the largest free blocks once per app
