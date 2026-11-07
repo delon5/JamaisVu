@@ -215,6 +215,13 @@ static volatile int g_plane_mode;   /* this overlay generation uses it */
 static volatile int g_plane_shown;  /* the plane is set up with the buffer */
 static volatile int g_plane_lost;   /* something else set the plane */
 static volatile int g_plane_yield;  /* the input thread closes the menu */
+/* what is on the display, kept by the display hook at all times: whose
+ * frame went on layer 0 last and when, and when something other than
+ * JamaisVu last put a picture on layer 1 (the system's LiveArea, a game's
+ * loading screen, the PS button menu, notifications) */
+static volatile SceUID g_l0_pid;
+static volatile int64_t g_l0_us, g_l1_other_us;
+static const char *g_plane_why; /* why the plane was not used (log) */
 static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
 static volatile int g_plane_toast;  /* the message box is drawn in it */
 static volatile int g_render_active;
@@ -1013,8 +1020,25 @@ static int overlay_acquire(void) {
       g_ovl_pool_kb[i] = 0;
     /* over a game: the overlay plane, and no menu image or message box
      * in the kernel pools (they are drawn straight into its buffer) */
-    int plane = ksceAppMgrIsExclusiveProcessRunning() && g_render_sema >= 0 &&
-                plane_alloc() == 0;
+    /* The plane only when the game itself is on the screen: its own
+     * frames on layer 0 within the last 0.2 s, and nothing else on layer 1
+     * for 2 s. With a game process merely existing - its LiveArea page,
+     * its loading screen, the PS button menu - layer 1 holds the system's
+     * picture, and replacing it blanked the screen (Splinter Cell). */
+    int plane = 0;
+    g_plane_why = NULL;
+    if (ksceAppMgrIsExclusiveProcessRunning() && g_render_sema >= 0) {
+      SceUID fg = fg_reader();
+      int64_t tn = now_us();
+      if (!fg || g_l0_pid != fg || tn - g_l0_us > 200000)
+        g_plane_why = "the game's own frames are not on the screen";
+      else if (tn - g_l1_other_us < 2000000)
+        g_plane_why = "the system has a picture on the plane";
+      else if (plane_alloc() != 0)
+        g_plane_why = "no plane buffer";
+      else
+        plane = 1;
+    }
     /* largest first: they need the largest free blocks */
     for (int k = 0; k < OVL_FIXED && ok; k++) {
       if (plane && (k < OVL_P_THUMBS || k == OVL_P_TOAST)) {
@@ -1806,11 +1830,18 @@ static void drawn_over_check(uintptr_t next_base) {
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
-  /* the overlay plane set by someone else (the system's own overlays: PS
-   * button menu, notifications): the menu yields, see the input thread */
-  if (index == 1 && g_plane_shown && p && p->base &&
-      p->base != (void *)g_plane_px)
-    g_plane_lost = 1;
+  if (p && p->base && head == ksceDisplayGetPrimaryHead()) {
+    if (index == 0) {
+      g_l0_pid = ksceKernelGetProcessId();
+      g_l0_us = now_us();
+    } else if (index == 1 && p->base != (void *)g_plane_px) {
+      g_l1_other_us = now_us();
+      /* the plane set by someone else (the system's own overlays: PS
+       * button menu, notifications): the menu yields, see the input thread */
+      if (g_plane_shown)
+        g_plane_lost = 1;
+    }
+  }
   if (g_menu_open && head == ksceDisplayGetPrimaryHead() &&
       ksceAppMgrIsExclusiveProcessRunning()) {
     if (index == 0)
@@ -2093,15 +2124,17 @@ static int open_menu(void) {
     return -1;
   }
   if (!had) {
-    static char line[220];
+    static char line[400];
     static char pools[160];
     ovl_pools_text(pools, sizeof(pools), g_ovl_pool_kb);
     uint32_t took = 0;
     for (int i = 0; i < OVL_POOLS; i++)
       took += g_ovl_pool_kb[i];
-    snprintf(line, sizeof(line), "menu opened in %s, memory %u KB: %s%s\r\n",
+    snprintf(line, sizeof(line), "menu opened in %s, memory %u KB: %s%s%s%s\r\n",
              tid, (unsigned)took, pools,
-             g_plane_mode ? "; shown on the display's overlay plane" : "");
+             g_plane_mode ? "; shown on the display's overlay plane" : "",
+             g_plane_why ? "; composed into the frames: " : "",
+             g_plane_why ? g_plane_why : "");
     log_queue(line);
   }
   g_capture_ok = 0;
@@ -2405,6 +2438,12 @@ static int input_thread(SceSize args, void *argp) {
                   "- the menu closed\r\n");
       }
     }
+    /* on the plane the panel is drawn by the render thread; asked from
+     * here too, not only from the display hook, which a screen that is
+     * not being redrawn never calls (a static picture: nothing rendered) */
+    if (g_plane_mode && g_menu_open && g_render_sema >= 0 &&
+        (g_panel_seq != g_model_seq || g_panel_gen != g_overlay_gen))
+      ksceKernelSignalSema(g_render_sema, 1);
 
     /* enable "Save" once the display hook has captured a game frame */
     if (g_menu_open && g_capture_ok && !g_model.can_save) {
