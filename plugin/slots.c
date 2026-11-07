@@ -730,7 +730,9 @@ static int is_jamaisvu_file(const char *name) {
 /* md5(relative name, NUL, content) XORed into t->md5: the order the
  * folder lists its files in does not matter */
 static int tai_hash_file(const char *path, const char *rel, TaiPrint *t) {
-  static uint8_t buf[4096];
+  /* 64 KB reads: with 4 KB each, 1.6 MB of plugins took 4-6 s while a
+   * game streamed from the same drive (PS TV logs, "tai folders") */
+  static uint8_t buf[0x10000];
   uint8_t d[16];
   Md5 m;
   SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
@@ -846,10 +848,73 @@ static int tai_stamp_dir(const char *dir, const char *relbase, int depth,
  * reading every plugin again (2.6 s in GTA: San Andreas on the PS TV, each
  * time the menu opened). For the slot list only: save and load still
  * read everything (tai_fingerprint). */
+/* The quick fingerprint's cache, kept on the Memory Card so that the
+ * first menu of a session does not read every plugin either (each test
+ * session starts with a restart: 4-6 s before the slot list showed). */
+#define TAI_CACHE_MAGIC 0x43494154 /* "TAIC" */
+typedef struct {
+  uint32_t magic, version;
+  uint8_t ok[JV_TAI_DIRS];
+  uint8_t pad[4 - (JV_TAI_DIRS % 4)];
+  uint8_t stamp[JV_TAI_DIRS][16];
+  TaiPrint print[JV_TAI_DIRS];
+  uint32_t crc;
+} TaiCacheFile;
+
+static TaiPrint cache[JV_TAI_DIRS];
+static uint8_t cache_stamp[JV_TAI_DIRS][16];
+static int cache_ok[JV_TAI_DIRS];
+
+static void tai_cache_load(void) {
+  static TaiCacheFile f;
+  static char path[80];
+  if (!storage_mc_root())
+    return;
+  jv_file_path(path, sizeof(path), "taicache.bin");
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  if (fd < 0)
+    return;
+  int n = ksceIoRead(fd, &f, sizeof(f));
+  ksceIoClose(fd);
+  if (n != sizeof(f) || f.magic != TAI_CACHE_MAGIC || f.version != 1 ||
+      f.crc != crc32_update(0, &f, offsetof(TaiCacheFile, crc)))
+    return;
+  for (int i = 0; i < JV_TAI_DIRS; i++) {
+    cache_ok[i] = f.ok[i] == 1;
+    cache[i] = f.print[i];
+    memcpy(cache_stamp[i], f.stamp[i], 16);
+  }
+}
+
+static void tai_cache_store(void) {
+  static TaiCacheFile f;
+  static char path[80];
+  if (!storage_mc_root())
+    return;
+  memset(&f, 0, sizeof(f));
+  f.magic = TAI_CACHE_MAGIC;
+  f.version = 1;
+  for (int i = 0; i < JV_TAI_DIRS; i++) {
+    f.ok[i] = (uint8_t)(cache_ok[i] ? 1 : 0);
+    f.print[i] = cache[i];
+    memcpy(f.stamp[i], cache_stamp[i], 16);
+  }
+  f.crc = crc32_update(0, &f, offsetof(TaiCacheFile, crc));
+  jv_file_path(path, sizeof(path), "taicache.bin");
+  SceUID fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+  if (fd < 0)
+    return;
+  ksceIoWrite(fd, &f, sizeof(f));
+  ksceIoClose(fd);
+}
+
 void tai_fingerprint_quick(TaiPrint out[JV_TAI_DIRS]) {
-  static TaiPrint cache[JV_TAI_DIRS];
-  static uint8_t cache_stamp[JV_TAI_DIRS][16];
-  static int cache_ok[JV_TAI_DIRS];
+  static int loaded;
+  int changed = 0;
+  if (!loaded) {
+    loaded = 1;
+    tai_cache_load();
+  }
   for (int i = 0; i < JV_TAI_DIRS; i++) {
     uint8_t stamp[16];
     memset(stamp, 0, sizeof(stamp));
@@ -870,7 +935,10 @@ void tai_fingerprint_quick(TaiPrint out[JV_TAI_DIRS]) {
     cache_ok[i] = r == 0 && h == 0;
     cache[i] = out[i];
     memcpy(cache_stamp[i], stamp, 16);
+    changed = 1;
   }
+  if (changed)
+    tai_cache_store(); /* the card: the only storage JamaisVu writes to */
 }
 
 int tai_matches(const TaiPrint rec[JV_TAI_DIRS],
