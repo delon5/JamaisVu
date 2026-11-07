@@ -3829,25 +3829,28 @@ static void do_overlay_test(void) {
   int ro = set_owner ? set_owner(head, 1, KERNEL_PID) : -1;
   int r1b = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
   ksceKernelDelayThread(5 * 1000 * 1000);
-  /* back: transparent, blending off, layer off */
+  /* Back - carefully. c1f7862 ended with blending "off" (0x80) and the
+   * layer set to NULL, and the screen went black for good: the SDK's
+   * "NULL blacks out the output" holds for this plane too, and 0x80 may
+   * select the overlay plane alone rather than switch blending off. So:
+   * the buffer made transparent, blending kept on with the overlay's
+   * alpha at 0 (nothing of the plane is visible), and the buffer left
+   * in place - 2 MB of VRAM until the next restart, for this test. */
   memset(px, 0, bytes);
   for (uint32_t off = 0; off < bytes; off += 0x8000)
     fb_cache_sync((uint8_t *)px + off, bytes - off > 0x8000 ? 0x8000
                                                               : bytes - off);
   int r2 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
   ksceKernelDelayThread(500 * 1000);
-  int rm2 = set_merge ? set_merge(head, 0x80, 0) : -1;
-  int r3 = ksceDisplaySetFrameBufInternal(head, 1, NULL, 1);
-  ksceKernelDelayThread(200 * 1000);
-  ksceKernelFreeMemBlock(uid);
+  int rm2 = set_merge ? set_merge(head, 0, 0) : -1;
   snprintf(line, sizeof(line), "overlay test: head %d layer 1, %ux%u ARGB "
            "buffer (%u KB) in %s: blending on -> 0x%08X, shown -> 0x%08X "
            "(5 s); owner -> 0x%08X, shown again -> 0x%08X (5 s); made "
-           "transparent -> 0x%08X, blending off -> 0x%08X, layer off (NULL) "
-           "-> 0x%08X\r\n", head, (unsigned)W, (unsigned)H,
-           (unsigned)(size >> 10), names[ti], (unsigned)rm, (unsigned)r1,
-           (unsigned)ro, (unsigned)r1b, (unsigned)r2, (unsigned)rm2,
-           (unsigned)r3);
+           "transparent -> 0x%08X, overlay alpha 0 -> 0x%08X; the buffer "
+           "stays on the plane (not freed)\r\n", head, (unsigned)W,
+           (unsigned)H, (unsigned)(size >> 10), names[ti], (unsigned)rm,
+           (unsigned)r1, (unsigned)ro, (unsigned)r1b, (unsigned)r2,
+           (unsigned)rm2);
   log_append(line);
 }
 
