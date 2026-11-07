@@ -23,6 +23,13 @@ add_custom_command(OUTPUT ${JamaisVu_payload_object}
   COMMENT "Building payload object"
 )
 
+# No NEON vector code in the kernel plugin: in kernel context the Vita runs
+# it far slower than plain instructions (6ecd5fa "row cost" line, PS TV at
+# 1080p: the same loop 64 us a row vectorized, 19 us without; the menu's
+# compose was 29 ms a frame). The payload (payload/CMakeLists.txt) keeps its
+# own flags.
+add_compile_options(-fno-tree-vectorize -fno-tree-slp-vectorize)
+
 add_executable(JamaisVu
   plugin/main.c
   plugin/fs.c
