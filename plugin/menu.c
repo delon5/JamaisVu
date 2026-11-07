@@ -2087,14 +2087,47 @@ static int input_thread(SceSize args, void *argp) {
     uint32_t t0 = prof_now();
 
     memset(&pad, 0, sizeof(pad));
-    if (ksceCtrlPeekBufferPositive(0, &pad, 1) < 0)
+    int pr = ksceCtrlPeekBufferPositive(0, &pad, 1);
+    if (pr < 0) {
+      /* noted once per app: a game in which the menu never opens */
+      static SceUID failed_pid;
+      SceUID pid = fg_reader();
+      if (pid && pid != failed_pid) {
+        static char fl[120], ftid[16];
+        failed_pid = pid;
+        fg_title(ftid, sizeof(ftid));
+        snprintf(fl, sizeof(fl), "input: controller port 0 cannot be read "
+                 "in %s (0x%08X) - the menu's combo cannot be seen\r\n",
+                 ftid, (unsigned)pr);
+        log_queue(fl);
+      }
       continue;
+    }
+    uint32_t buttons1 = 0;
     if (g_dolce) {
       /* PS TV: a DualShock may report on port 1 rather than 0 */
       SceCtrlData pad1;
       memset(&pad1, 0, sizeof(pad1));
       if (ksceCtrlPeekBufferPositive(1, &pad1, 1) >= 0)
-        pad.buttons |= pad1.buttons;
+        buttons1 = pad1.buttons;
+      pad.buttons |= buttons1;
+    }
+    /* START seen while the menu is closed: noted once per app, with what
+     * came with it (a game in which START + UP does nothing: PCSG Trails
+     * 3rd Evolution, 17:5x log without a single line) */
+    if (!g_menu_open && (pad.buttons & JV_COMBO_BUTTON)) {
+      static SceUID start_pid;
+      SceUID pid = fg_reader();
+      if (pid != start_pid) {
+        static char sl[160], stid[16];
+        start_pid = pid;
+        fg_title(stid, sizeof(stid));
+        snprintf(sl, sizeof(sl), "input: START seen in %s: buttons 0x%08X "
+                 "(port 1: 0x%08X), job running %d, menu memory held %d\r\n",
+                 stid, (unsigned)pad.buttons, (unsigned)buttons1, g_busy,
+                 g_overlay_ready);
+        log_queue(sl);
+      }
     }
 
     if (g_rearm_input) {
