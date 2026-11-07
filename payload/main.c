@@ -39,9 +39,12 @@ void kscePervasiveMsifSetClock(int clock) {
  * that held on 3.65, but on 3.60 the payload never got past its first
  * delay, i.e. that timer does not run at 1 MHz there when the payload
  * runs. The cycle counter does not depend on how the OS left any timer.
- * Its rate is the CPU clock; JV_CPU_MHZ is the highest the Vita uses, so
- * at a lower clock every wait only gets longer, never shorter. */
+ * Its rate is the CPU clock: the plugin passes the clock at the request
+ * (PayloadArguments.cpu_mhz; PSV-Shell-Plus runs some consoles at 500);
+ * without it JV_CPU_MHZ, the highest the system itself uses, so that at a
+ * lower clock every wait only gets longer, never shorter. */
 #define JV_CPU_MHZ 444
+static uint32_t g_cpu_mhz = JV_CPU_MHZ;
 #define SOC_TIMER  0xe20b6000
 
 static uint32_t g_pmcr_saved, g_pmcnten_saved;
@@ -81,9 +84,9 @@ uint32_t jv_time_us(void) {
   uint32_t c = pmu_cycles();
   g_cyc_rem += c - g_cyc_last;
   g_cyc_last = c;
-  if (g_cyc_rem >= JV_CPU_MHZ) {
-    g_us += g_cyc_rem / JV_CPU_MHZ;
-    g_cyc_rem %= JV_CPU_MHZ;
+  if (g_cyc_rem >= g_cpu_mhz) {
+    g_us += g_cyc_rem / g_cpu_mhz;
+    g_cyc_rem %= g_cpu_mhz;
   }
   return g_us;
 }
@@ -231,7 +234,8 @@ void __attribute__((noreturn)) jv_exception(uint32_t type, uint32_t far,
     pargs->result = JV_ERR_CRASH;
     pargs->detail = (int32_t)type;
     guard_deny_all();
-    trace_flush(); /* best effort: the card driver may be mid-transfer */
+    if (!g_ms_busy)
+      trace_flush(); /* not while the card controller is mid-transfer */
     if (!(pargs->mode == JAMAISVU_MODE_LOAD && pargs->applied))
       jv_recover();
   }
@@ -598,6 +602,13 @@ static int payload_main(void) {
   pargs->detail = 0;
   pargs->soc_timer_10ms = 0;
   pargs->trace_n = 0;
+  if (pargs->refuse) {
+    /* the plugin found at suspend that the snapshot would be incomplete:
+     * nothing is touched, the reason goes back as detail */
+    pargs->result = JV_ERR_ARGS;
+    pargs->detail = (int32_t)pargs->refuse;
+    return 0;
+  }
   pargs->fault_type = 0;
   pargs->fault_addr = 0;
   pargs->fault_lr = 0;
@@ -682,6 +693,8 @@ int main(void) {
   uint32_t old_vbar;
 
   pargs = (PayloadArguments *)PAYLOAD_ARGS_PADDR;
+  g_cpu_mhz = pargs->cpu_mhz >= 100 && pargs->cpu_mhz <= 2000
+                  ? pargs->cpu_mhz : JV_CPU_MHZ;
   *(volatile uint32_t *)REGSNAP_PADDR = 0; /* filled by the PS TV test */
   g_in_exception = 0;
   g_trace_lba = 0;

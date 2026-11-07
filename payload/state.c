@@ -44,7 +44,7 @@
 #include "msif/ms.h"
 #include "ff.h"
 
-#define N_SEGMENTS      0x4000
+#define N_SEGMENTS      0x2000
 #define MAX_FILE_NUM    65536
 #define MAX_PATH_LEN    512
 #define MAX_DIR_DEPTH   16
@@ -58,6 +58,8 @@
 static Segment segments[N_SEGMENTS];
 static int n_segments = 0;
 static int segments_overflow = 0;
+/* format 3: crc32 of each segment's bytes, then the crc32 of that table */
+static uint32_t seg_crc[N_SEGMENTS + 1];
 
 static uint8_t __attribute__((aligned(64))) mbr_buf[SECTOR_SIZE];
 static uint8_t __attribute__((aligned(64))) mediaid_buf[SECTOR_SIZE];
@@ -126,6 +128,14 @@ static int is_segment_in_vram_dram(uint32_t addr, uint32_t size) {
 }
 
 static void add_segment(uint32_t addr, uint32_t size) {
+  /* page tables are walked in address order and physical pages are mostly
+   * handed out in runs: extend the last run instead of adding an entry */
+  if (n_segments > 0 &&
+      segments[n_segments - 1].addr + segments[n_segments - 1].size == addr &&
+      addr >= DRAM_VRAM_START) {
+    segments[n_segments - 1].size += size;
+    return;
+  }
   if (n_segments < N_SEGMENTS) {
     segments[n_segments].addr = addr;
     segments[n_segments].size = size;
@@ -160,12 +170,13 @@ static void l2_page_table(uint32_t tbl_paddr) {
   }
 }
 
-static void l1_page_table(uint32_t tbl_paddr) {
+/* Walks the L1 entries [first, end) of one translation table. */
+static void l1_page_table(uint32_t tbl_paddr, int first, int end) {
   const uint32_t *tbl = jv_phys(tbl_paddr, 0x1000 * 4);
   if (!tbl)
     return;
 
-  for (int i = 0; i < 0x1000; i++) {
+  for (int i = first; i < end; i++) {
     uint32_t entry = tbl[i];
     uint32_t addr, size;
 
@@ -226,13 +237,21 @@ static void coalesce_segments(void) {
 
 static void get_dram_vram_segments(void) {
   uint32_t num = pargs->process_num;
+  /* TTBCR.N splits the address space: the TTBR0 table (ttbs[num], the one
+   * shared by everything) has only 0x1000 >> N entries, and of a process's
+   * TTBR1 table the hardware uses only the entries from 0x1000 >> N on.
+   * Reading past the short table, or the unused half of a long one, only
+   * turns whatever lies there into bogus segments. N = 0: full tables. */
+  int split = 0x1000 >> (pargs->ttbcr_n & 7);
   if (num > JV_MAX_PROCESSES)
     num = JV_MAX_PROCESSES;
 
-  for (uint32_t i = 0; i < num + 1; i++) {
+  for (uint32_t i = 0; i < num; i++) {
     if (pargs->ttbs[i])
-      l1_page_table(pargs->ttbs[i]);
+      l1_page_table(pargs->ttbs[i], split == 0x1000 ? 0 : split, 0x1000);
   }
+  if (pargs->ttbs[num])
+    l1_page_table(pargs->ttbs[num], 0, split);
 
   coalesce_segments();
 }
@@ -773,7 +792,9 @@ int save_state(FATFS *fs, const char *path) {
   header.data_size = (uint32_t)data_size;
 
   if (data_size > 0xffffffffu ||
-      (uint64_t)header.data_offset + data_size > g_slot.size) {
+      ALIGN((uint64_t)header.data_offset + data_size, SECTOR_SIZE) +
+              (uint64_t)(n_segments + 1) * sizeof(uint32_t) >
+          g_slot.size) {
     res = JV_ERR_TOO_BIG;
     goto out;
   }
@@ -790,17 +811,33 @@ int save_state(FATFS *fs, const char *path) {
   header.body_crc = g_slot.crc;
   g_slot.crc_on = 0;
 
-  /* 6. Memory contents. */
+  /* 6. Memory contents, each segment with its own crc32. */
   for (int i = 0; i < n_segments; i++) {
     void *src = jv_phys(segments[i].addr, segments[i].size);
     if (!src) {
       res = JV_ERR_IO;
       goto out;
     }
+    g_slot.crc = 0;
+    g_slot.crc_on = 1;
     res = slot_write(src, segments[i].size);
+    g_slot.crc_on = 0;
     if (res < 0)
       goto out;
+    seg_crc[i] = g_slot.crc;
   }
+
+  res = slot_pad(SECTOR_SIZE);
+  if (res < 0)
+    goto out;
+
+  /* 6b. Segment CRC table (format 3), sector aligned after the data,
+   * followed by the crc32 of the table itself. */
+  seg_crc[n_segments] = crc32_update(0, seg_crc,
+                                     n_segments * sizeof(uint32_t));
+  res = slot_write(seg_crc, (n_segments + 1) * sizeof(uint32_t));
+  if (res < 0)
+    goto out;
 
   res = slot_pad(SECTOR_SIZE);
   if (res < 0)
@@ -1046,8 +1083,9 @@ static int validate_state(FATFS *fs, FIL *fp, SaveStateHeader *header) {
     return res;
   memcpy(header, io_buf, sizeof(*header));
 
+  /* format 2 (no segment CRC table) still loads: slots outlive updates */
   if (header->magic != SAVESTATE_MAGIC ||
-      header->version != SAVESTATE_VERSION ||
+      (header->version != 2 && header->version != SAVESTATE_VERSION) ||
       header->header_size != sizeof(SaveStateHeader))
     return JV_ERR_BAD_STATE;
 
@@ -1068,6 +1106,12 @@ static int validate_state(FATFS *fs, FIL *fp, SaveStateHeader *header) {
                 SECTOR_SIZE) ||
       (uint64_t)header->data_offset + header->data_size > fsize ||
       header->ignore_flag_paddr == 0 || (header->ignore_flag_paddr & 3))
+    return JV_ERR_BAD_STATE;
+
+  if (header->version >= 3 &&
+      ALIGN((uint64_t)header->data_offset + header->data_size, SECTOR_SIZE) +
+              (uint64_t)(header->segs_num + 1) * sizeof(uint32_t) >
+          fsize)
     return JV_ERR_BAD_STATE;
 
   /* Same card, same partition table */
@@ -1139,6 +1183,22 @@ static int validate_state(FATFS *fs, FIL *fp, SaveStateHeader *header) {
   if (g_read_crc != header->body_crc)
     return JV_ERR_BAD_STATE;
 
+  /* Segment CRC table (format 3): read and checked here so that a damaged
+   * table refuses the load before anything is touched; the segments
+   * themselves are checked against it while they are restored. */
+  if (header->version >= 3) {
+    uint32_t n = header->segs_num;
+    if (f_lseek(fp, (FSIZE_t)ALIGN((uint64_t)header->data_offset +
+                                       header->data_size, SECTOR_SIZE)) !=
+        FR_OK)
+      return JV_ERR_IO;
+    res = state_read(fp, seg_crc, (n + 1) * sizeof(uint32_t));
+    if (res < 0)
+      return res;
+    if (crc32_update(0, seg_crc, n * sizeof(uint32_t)) != seg_crc[n])
+      return JV_ERR_BAD_STATE;
+  }
+
   return 0;
 }
 
@@ -1180,12 +1240,17 @@ int load_state(FATFS *fs, const char *path) {
     goto out;
   }
   stage_mark(JV_STAGE_LOAD_SAVEDATA);
-  guard_deny_all();
-  guard_allow(vol_start, vol_end - vol_start);
-  res = restore_files(&fp, header.file_num);
-  guard_deny_all();
-  if (res < 0)
-    goto out;
+  /* savedata lives on ux0: it is only put back when this card is ux0 (the
+   * same rule the save applied), never onto a card that is mounted
+   * elsewhere now */
+  if (pargs->backup_savedata) {
+    guard_deny_all();
+    guard_allow(vol_start, vol_end - vol_start);
+    res = restore_files(&fp, header.file_num);
+    guard_deny_all();
+    if (res < 0)
+      goto out;
+  }
 
   /* 2b. mediaid sector: exactly one sector, verified in pass 1 */
   guard_allow(header.mediaid_sector, 1);
@@ -1213,6 +1278,8 @@ int load_state(FATFS *fs, const char *path) {
       res = JV_ERR_IO;
       goto out;
     }
+    g_read_crc = 0;
+    g_read_crc_on = header.version >= 3;
     for (uint32_t off = 0; off < segments[i].size;) {
       uint32_t n = MIN(segments[i].size - off, 0x800000u);
       res = state_read(&fp, (uint8_t *)dst + off, n);
@@ -1221,6 +1288,15 @@ int load_state(FATFS *fs, const char *path) {
       off += n;
       done += n;
       progress_load_at(segments[i].addr + off, done);
+    }
+    g_read_crc_on = 0;
+    /* a segment that does not match its crc32 is a damaged slot: the memory
+     * is already half restored, so this ends in the halt screen (applied
+     * is set), with the segment index as the detail */
+    if (header.version >= 3 && g_read_crc != seg_crc[i]) {
+      pargs->detail = (int32_t)i;
+      res = JV_ERR_BAD_STATE;
+      goto out;
     }
   }
 

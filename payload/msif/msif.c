@@ -345,6 +345,8 @@ static int mshc_reset(void) {
   return -ETIMEDOUT;
 }
 
+volatile int g_ms_busy;
+
 int msif_read_sector(int sector, int count, SceMsifAdmaDescriptor *desc) {
   int res;
 
@@ -353,10 +355,13 @@ int msif_read_sector(int sector, int count, SceMsifAdmaDescriptor *desc) {
   if (count <= 0)
     return -1;
 
+  g_ms_busy = 1;
   res = mshc_instructions(0, sizeof(mshc_instr_read_sector) / sizeof(uint16_t),
                           mshc_instr_read_sector);
-  if (res != 0)
+  if (res != 0) {
+    g_ms_busy = 0;
     return res;
+  }
 
   REG16(MSIF_REG + 0x10) = count;
   REG16(MSIF_REG + 0x00) = 0xe0;
@@ -370,11 +375,14 @@ int msif_read_sector(int sector, int count, SceMsifAdmaDescriptor *desc) {
   REG8(MSIF_REG + 0x24) = sector & 0xff;
 
   res = mshc_set_adma_desc(desc, 2);
-  if (res != 0)
+  if (res != 0) {
+    g_ms_busy = 0;
     return res;
+  }
 
   res = mshc_wait(0);
   mshc_clear_adma_desc();
+  g_ms_busy = 0;
 
   return res;
 }
@@ -387,10 +395,13 @@ int msif_write_sector(int sector, int count, SceMsifAdmaDescriptor *desc) {
   if (count <= 0)
     return -1;
 
+  g_ms_busy = 1;
   res = mshc_instructions(0, sizeof(mshc_instr_write_sector) / sizeof(uint16_t),
                           mshc_instr_write_sector);
-  if (res != 0)
+  if (res != 0) {
+    g_ms_busy = 0;
     return res;
+  }
 
   REG16(MSIF_REG + 0x10) = count;
   REG16(MSIF_REG + 0x00) = 0x90;
@@ -404,11 +415,14 @@ int msif_write_sector(int sector, int count, SceMsifAdmaDescriptor *desc) {
   REG8(MSIF_REG + 0x24) = sector & 0xff;
 
   res = mshc_set_adma_desc(desc, 2);
-  if (res != 0)
+  if (res != 0) {
+    g_ms_busy = 0;
     return res;
+  }
 
   res = mshc_wait(0);
   mshc_clear_adma_desc();
+  g_ms_busy = 0;
 
   return res;
 }

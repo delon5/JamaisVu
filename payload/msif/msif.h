@@ -54,6 +54,9 @@ typedef struct SceMsifAdmaDescriptor {
 
 int SceMsifSmshc(void);
 
+/* 1 while a card transfer is in progress (the exception handler must not
+ * start another) */
+extern volatile int g_ms_busy;
 int msif_read_sector(int sector, int count, SceMsifAdmaDescriptor *desc);
 int msif_write_sector(int sector, int count, SceMsifAdmaDescriptor *desc);
 
