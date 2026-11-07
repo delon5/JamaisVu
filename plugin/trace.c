@@ -517,6 +517,7 @@ static JvTraceSector g_wake __attribute__((aligned(64)));
 static uint32_t g_wake_rel;
 static const char *g_wake_dev;
 static int g_wake_on, g_wake_io, g_wake_writes, g_wake_ret;
+static volatile int g_wake_busy; /* raw writes in flight */
 static int64_t g_wake_t0;
 
 void trace_wake_begin(const PayloadArguments *pa) {
@@ -568,9 +569,11 @@ void trace_wake(uint8_t step) {
     return;
   /* the payload checked magic + nonce in this very sector before the run;
    * only it is written, through the card's raw device */
+  __sync_fetch_and_add(&g_wake_busy, 1);
   SceUID fd = ksceIoOpen(g_wake_dev, SCE_O_WRONLY, 0);
   if (fd < 0) {
     g_wake_ret = fd;
+    __sync_fetch_and_sub(&g_wake_busy, 1);
     return;
   }
   int r = (int)ksceIoLseek(fd, (SceOff)g_wake_rel * 512, SCE_SEEK_SET);
@@ -580,6 +583,11 @@ void trace_wake(uint8_t step) {
   g_wake_ret = r;
   if (r == 512)
     g_wake_writes++;
+  __sync_fetch_and_sub(&g_wake_busy, 1);
+}
+
+int trace_wake_busy(void) {
+  return g_wake_busy;
 }
 
 static int g_wake_keep;

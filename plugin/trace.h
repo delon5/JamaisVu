@@ -27,6 +27,8 @@ int trace_collect(char *out, int len);
 void trace_consumed(void);
 /* keep recording steps after the result was logged (see run_and_wait) */
 void trace_wake_keep(int on);
+/* raw trace.bin writes in flight right now (any thread) */
+int trace_wake_busy(void);
 
 void trace_from_args(JvTraceSector *t, const PayloadArguments *pa);
 

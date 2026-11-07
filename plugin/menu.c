@@ -3625,7 +3625,10 @@ static void alive_stop(void) {
     return;
   g_alive_until = 0;
   trace_wake_keep(0);
-  ksceKernelDelayThread(50 * 1000); /* a write in progress ends */
+  /* a write in progress ends (was a fixed 50 ms: a slow card could still
+   * be writing when the next run rewrote the sector with its nonce) */
+  for (int i = 0; i < 2000 && trace_wake_busy(); i++)
+    ksceKernelDelayThread(1000);
 }
 
 static int heartbeat_thread(SceSize args, void *argp) {
@@ -3895,7 +3898,10 @@ int menu_init(const char *status_text) {
 
   /* app starts/resumes: is the PSP emulator in front? (as PSV-Shell-Plus) */
 
-  thid = ksceKernelCreateThread("JamaisVuInput", input_thread, 0x3C, 0x2000,
+  /* 16 KB stacks for every thread that calls into SceIofilemgr / exFAT /
+   * SceSdstor: the heartbeat had 4 KB while writing trace.bin for a minute
+   * after every load (a kernel stack overflow corrupts silently) */
+  thid = ksceKernelCreateThread("JamaisVuInput", input_thread, 0x3C, 0x4000,
                                 0, 0x10000, NULL);
   if (thid >= 0)
     ksceKernelStartThread(thid, 0, NULL);
@@ -3906,7 +3912,7 @@ int menu_init(const char *status_text) {
     ksceKernelStartThread(thid, 0, NULL);
 
   thid = ksceKernelCreateThread("JamaisVuHeartbeat", heartbeat_thread, 0x40,
-                                0x1000, 0, 0x10000, NULL);
+                                0x4000, 0, 0x10000, NULL);
   if (thid >= 0)
     ksceKernelStartThread(thid, 0, NULL);
 
