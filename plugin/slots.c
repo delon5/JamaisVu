@@ -35,12 +35,14 @@ static uint32_t g_px32[CHUNK_PX]; /* v2/v3 conversion chunk (worker) */
 /* Everything JamaisVu writes lives on the official Memory Card. Callers
  * must check storage_mc_root() != NULL before writing. */
 static const char *mc_root(void) {
-  return storage_mc_root() ? storage_mc_root() : "";
+  const char *r = storage_mc_root(); /* read once: it can change meanwhile */
+  return r ? r : "";
 }
 
 void slots_sync(void) {
-  if (storage_mc_root())
-    ksceIoSync(storage_mc_root(), 0);
+  const char *r = storage_mc_root();
+  if (r)
+    ksceIoSync(r, 0);
 }
 
 void slot_path(char *out, int len, int slot, const char *ext) {
@@ -65,12 +67,13 @@ static int mkdir_ok(const char *path) {
 }
 
 int slots_mkdirs(void) {
-  static char path[32];
-  if (!storage_mc_root())
+  char path[32]; /* on the stack: called from the io thread and the worker */
+  const char *root = storage_mc_root();
+  if (!root)
     return -1;
-  snprintf(path, sizeof(path), "%sdata", mc_root());
+  snprintf(path, sizeof(path), "%sdata", root);
   mkdir_ok(path);
-  snprintf(path, sizeof(path), "%s" SLOT_SUBDIR, mc_root());
+  snprintf(path, sizeof(path), "%s" SLOT_SUBDIR, root);
   return mkdir_ok(path);
 }
 
@@ -221,11 +224,10 @@ int slot_info_write(int slot, SlotInfo *info, const uint16_t *thumb) {
   static char path[80], tmp[80];
   int res = 0;
 
-  path_for(path, sizeof(path), slot, "jvi");
-  path_for(tmp, sizeof(tmp), slot, "jvt");
-
   if (!storage_mc_root())
     return JV_ERR_SLOT_IO;
+  path_for(path, sizeof(path), slot, "jvi");
+  path_for(tmp, sizeof(tmp), slot, "jvt");
 
   info->magic = SLOT_INFO_MAGIC;
   info->version = SLOT_INFO_VERSION;

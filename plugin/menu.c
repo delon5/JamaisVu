@@ -2436,7 +2436,10 @@ static void log_append_locked(const char *text) {
   int n = snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d ",
                    t.year, t.month, t.day, t.hour, t.minute, t.second);
 
-  if (!storage_mc_root() || slots_mkdirs() < 0) {
+  const char *root = storage_mc_root();
+  /* no card, or the card's drive is read-only (after a load, until it is
+   * mounted afresh): kept in memory, written with the next line */
+  if (!root || fs_read_only_has(root) || slots_mkdirs() < 0) {
     log_backlog_add(line, n, text);
     return;
   }
@@ -2531,6 +2534,7 @@ static int card_wait(int ms) {
 
 static int g_card_remount_ret = 1;
 static const char *g_card_remount_root;
+static int g_card_open_files;
 
 static void after_resume(void) {
   static char msg[128];
@@ -2553,7 +2557,22 @@ static void after_resume(void) {
         g_res_result == JV_OK) {
       const char *root = NULL;
       trace_wake(JV_WAKE_CARD_REMOUNT);
-      g_card_remount_ret = storage_force_remount_card(&root);
+      /* a forced unmount with files still open on the card would leave
+       * their handles pointing into a released fnode pool: then the
+       * drive is re-read in place instead (as a late USB drive is) */
+      const char *croot = storage_card_root();
+      g_card_open_files = croot ? fs_open_handles(croot) : 0;
+      if (g_card_open_files > 0) {
+        g_card_remount_ret = fs_card_refresh(croot);
+        root = croot;
+        if (g_card_remount_ret == 0)
+          fs_card_ready(croot);
+      } else {
+        g_card_remount_ret = storage_force_remount_card(&root);
+        if (root && g_card_remount_ret >= 0)
+          fs_card_ready(root); /* writable again (update_filesystem left
+                                  it read-only until now) */
+      }
       g_card_remount_root = root;
       trace_wake(JV_WAKE_CARD_REMOUNTED);
       /* a USB drive on ux0 that was not back during the wake-up: re-read
@@ -2572,9 +2591,16 @@ static void after_resume(void) {
     g_log_trace_once = 1;
     log_append(line);
     if (g_card_remount_root) {
-      snprintf(line, sizeof(line), "    after the load: Memory Card on %s "
-               "mounted afresh, result 0x%08X\r\n", g_card_remount_root,
-               (unsigned)g_card_remount_ret);
+      if (g_card_open_files > 0)
+        snprintf(line, sizeof(line), "    after the load: Memory Card on %s "
+                 "re-read in place (%d files open on it; stale %d)%s\r\n",
+                 g_card_remount_root, g_card_open_files, g_card_remount_ret,
+                 g_card_remount_ret == 0 ? "" : " - stays read-only");
+      else
+        snprintf(line, sizeof(line), "    after the load: Memory Card on %s "
+                 "mounted afresh, result 0x%08X%s\r\n", g_card_remount_root,
+                 (unsigned)g_card_remount_ret,
+                 g_card_remount_ret < 0 ? " - stays read-only" : "");
       log_append(line);
       g_card_remount_root = NULL;
     }

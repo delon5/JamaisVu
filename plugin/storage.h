@@ -84,6 +84,8 @@ int storage_card_unmounted(const char **root);
  * (fresh filesystem on the card the payload restarted). 1 = nothing to
  * do (card on ux0 or not mounted), else the mount result. */
 int storage_force_remount_card(const char **root);
+/* the root of a card moved to uma0/xmc0 that is mounted now, or NULL */
+const char *storage_card_root(void);
 
 /* After a load, before the exFAT driver re-reads a drive: is its device
  * back? (ux0 on a USB drive - usbmc on the PCH-1000's PSVSD and the

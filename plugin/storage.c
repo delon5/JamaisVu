@@ -28,7 +28,7 @@ static const struct {
 #define MC_BLKDEV_PREFIX "sdstor0:xmc-"
 
 static MountLookupFn g_lookup = NULL;
-static const char *g_mc_root = NULL;
+static const char *volatile g_mc_root = NULL;
 static const char *g_mc_blkdev = NULL;
 static const char *g_reason = "not detected yet";
 
@@ -86,22 +86,28 @@ static const char *mc_blkdev_of(int id) {
 }
 
 const char *storage_detect(void) {
-  g_mc_root = NULL;
-  g_mc_blkdev = NULL;
-
+  /* the result is published at the end, root last: other threads read
+   * storage_mc_root() meanwhile (the io thread's card watch, the
+   * worker), and a NULL seen during a detection sent their write to a
+   * device-less path */
   if (!g_lookup) {
     g_reason = "the mount table is not available on this firmware";
+    g_mc_blkdev = NULL;
+    g_mc_root = NULL;
     return NULL;
   }
 
   for (size_t i = 0; i < N_MOUNTS; i++) {
     if (mount_is_mc(k_mounts[i].id) && mounted(k_mounts[i].root)) {
-      g_mc_root = k_mounts[i].root;
       g_mc_blkdev = mc_blkdev_of(k_mounts[i].id);
+      __sync_synchronize();
+      g_mc_root = k_mounts[i].root;
       g_reason = "ok";
       return g_mc_root;
     }
   }
+  g_mc_blkdev = NULL;
+  g_mc_root = NULL;
 
   g_reason = "no official Memory Card found (insert one, or mount it as "
              "ux0, uma0 or xmc0)";
@@ -160,6 +166,13 @@ int storage_remount_card(const char **root) {
     return g_mount(k_mounts[i].id, NULL, 0, 0, 0, 0);
   }
   return 1;
+}
+
+const char *storage_card_root(void) {
+  for (size_t i = 1; i < N_MOUNTS; i++)
+    if (mount_is_mc(k_mounts[i].id) && mounted(k_mounts[i].root))
+      return k_mounts[i].root;
+  return NULL;
 }
 
 int storage_force_remount_card(const char **root) {

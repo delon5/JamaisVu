@@ -50,6 +50,17 @@ void fs_set_write_mode(uint32_t mode);
 /* the drives FS_WRITES_READ_ONLY applies to, e.g. "ux0:" (empty if none) */
 int fs_read_only_names(char *out, int len);
 int fs_read_only_count(void);
+/* 1 if drive name (e.g. "uma0:") is read-only right now */
+int fs_read_only_has(const char *name);
+/* open-file table entries held open on drive name */
+int fs_open_handles(const char *name);
+/* After a load, the card's drive (left read-only by update_filesystem):
+ * fs_card_refresh re-reads it in place (as fs_refresh_late does for a
+ * late drive; returns the number of stale held-open files, < 0 on
+ * failure); fs_card_ready lifts its read-only state once it is mounted
+ * afresh or re-read without stale files. */
+int fs_card_refresh(const char *name);
+void fs_card_ready(const char *name);
 /* how update_filesystem() tells whether a drive's device is back
  * (storage_dev_state) */
 void fs_set_dev_check(int (*fn)(const char *root));

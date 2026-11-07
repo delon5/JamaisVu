@@ -584,8 +584,14 @@ static void check_devices(void) {
     g_skip_mask |= 1u << i;
     if (i < 16)
       f->deferred |= (uint16_t)(1u << i);
-    if (st == STORAGE_DEV_CARD_LATER)
-      continue; /* the card on uma0/xmc0: mounted afresh by the worker */
+    if (st == STORAGE_DEV_CARD_LATER) {
+      /* the card on uma0/xmc0: mounted afresh by the worker - until then
+       * the restored image's view of it (the save's directories and free
+       * clusters) must not be written through (3401860..91bc130 left it
+       * writable for the ~18 s the ux0 re-read takes) */
+      ro_add(name);
+      continue;
+    }
     /* NOT_READY: re-read later once it is back; UNKNOWN (no way to tell
      * when it is back): left as it is until restart */
     if (st == STORAGE_DEV_NOT_READY)
@@ -681,6 +687,70 @@ int update_filesystem(void) {
   f->stale = (uint16_t)(stale_open > 0xFFFF ? 0xFFFF : stale_open);
   ro_mask_record();
   return stale_open;
+}
+
+int fs_read_only_has(const char *name) {
+  return name && ro_find(name) >= 0;
+}
+
+static int fs_index_by_name(const char *name) {
+  if (!name || !g_off)
+    return -1;
+  for (uint32_t i = 0; i < g_off->fs_count && i < 32; i++) {
+    const char *n = fs_name((int)i);
+    if (n && name_eq(n, name))
+      return (int)i;
+  }
+  return -1;
+}
+
+int fs_open_handles(const char *name) {
+  int fsi = fs_index_by_name(name);
+  if (fsi < 0 || !g_num_vnodes || !g_vnodes || !g_vnode_size)
+    return 0;
+  int held = 0;
+  int num = *g_num_vnodes;
+  for (int i = 0; i < num; i++) {
+    void *vp = (void *)(*g_vnodes + *g_vnode_size * i);
+    void *fnode = *(uintptr_t **)(vp + 0x60);
+    if (fnode && fnode == *(uintptr_t **)(vp + 0x48) &&
+        fnode_fs(fnode) == fsi && *(uint32_t *)(vp + 0x58))
+      held++;
+  }
+  return held;
+}
+
+int fs_card_refresh(const char *name) {
+  int fsi = fs_index_by_name(name);
+  if (fsi < 0)
+    return -1;
+  uint32_t bit = 1u << fsi;
+  if (mgmt_patch_apply() < 0)
+    return -1;
+  int mr = remount_one((uint32_t)fsi);
+  mgmt_patch_remove();
+  if (mr < 0) {
+    mount_failed((uint32_t)fsi, mr);
+    return mr;
+  }
+  g_skip_mask &= ~bit;
+  invalidate_buff_caches(bit);
+  invalidate_file_caches(bit);
+  int stale = update_vnodes(bit);
+  uint32_t skipped;
+  update_fnodes(&skipped, bit);
+  ro_mask_record();
+  return stale;
+}
+
+void fs_card_ready(const char *name) {
+  int fsi = fs_index_by_name(name);
+  if (fsi >= 0)
+    g_skip_mask &= ~(1u << fsi);
+  ro_remove(name);
+  ro_mask_record();
+  if (!g_ro_n && g_ignore_writedevice == FS_WRITES_READ_ONLY)
+    fs_set_write_mode(FS_WRITES_ALLOWED);
 }
 
 int fs_refresh_late(uint32_t timeout_ms) {
