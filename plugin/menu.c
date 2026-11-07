@@ -473,6 +473,13 @@ static struct {
   uint32_t l0_calls, l1_calls, l1_set;
   uintptr_t l1_base;
   uint32_t l1_fmt, l1_w, l1_h, l1_pitch;
+  /* the frames the menu was drawn into: which layer, set by whom, with a
+   * game process registered as exclusive or not, and what the frame held
+   * before the first drawing (the menu's corner and the top-left pixel) -
+   * an app that is not a game (Splinter Cell) draws somewhere else */
+  int index, excl, fmt;
+  uint32_t px_menu, px_tl, px_read;
+  char setter[16];
 } g_fbd;
 
 /* where the last menu compose put a few of its pixels, and their values */
@@ -753,8 +760,25 @@ static void record_frame(const SceDisplayFrameBuf *p) {
   g_fb_rec = 1;
 }
 
-static void fbd_frame(const SceDisplayFrameBuf *p, int sync) {
+static void fbd_frame(const SceDisplayFrameBuf *p, int index, int sync) {
   uintptr_t b = (uintptr_t)p->base;
+  if (!g_fbd.frames) {
+    g_fbd.index = index;
+    g_fbd.excl = ksceAppMgrIsExclusiveProcessRunning();
+    g_fbd.fmt = p->pixelformat;
+    memset(g_fbd.setter, 0, sizeof(g_fbd.setter));
+    if (ksceKernelGetProcessTitleId(ksceKernelGetProcessId(), g_fbd.setter,
+                                    sizeof(g_fbd.setter)) < 0)
+      strncpy(g_fbd.setter, "?", sizeof(g_fbd.setter) - 1);
+    const uint32_t *fb = (const uint32_t *)p->base;
+    g_fbd.px_read = 0;
+    if (jv_copy_from_user(&g_fbd.px_tl, fb, 4) == 0)
+      g_fbd.px_read |= 1;
+    if (p->height > MENU_Y + 2 && p->width > MENU_X + 2 &&
+        jv_copy_from_user(&g_fbd.px_menu,
+                          fb + (MENU_Y + 2) * p->pitch + MENU_X + 2, 4) == 0)
+      g_fbd.px_read |= 2;
+  }
   g_fbd.frames++;
   if (b == g_fbd.prev)
     g_fbd.same_as_prev++;
@@ -1880,7 +1904,7 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
       if (g_menu_open || now_us() < g_toast_until) {
         if (g_menu_open) {
           drawn_over_check((uintptr_t)p->base);
-          fbd_frame(p, sync);
+          fbd_frame(p, index, sync);
           if (!g_fb_rec)
             record_frame(p);
         }
@@ -2017,7 +2041,9 @@ static void perf_report(void) {
              "    frames with the menu: %u, %ux%u pitch %u, buffers %u "
              "(%08X %08X %08X %08X), same buffer twice in a row %u, sync "
              "immediate/next-frame/other %u/%u/%u; cache clean %s, last "
-             "result 0x%08X (%u); copy failures %u\r\n",
+             "result 0x%08X (%u); copy failures %u; layer %d set by %s "
+             "(game process registered %d), format %d, before the first "
+             "drawing: top-left 0x%08X, menu corner 0x%08X (read %u)\r\n",
              (unsigned)g_fbd.frames, (unsigned)g_fbd.w, (unsigned)g_fbd.h,
              (unsigned)g_fbd.pitch, (unsigned)g_fbd.nbases,
              (unsigned)g_fbd.bases[0], (unsigned)g_fbd.bases[1],
@@ -2026,7 +2052,9 @@ static void perf_report(void) {
              (unsigned)g_fbd.sync_counts[1], (unsigned)g_fbd.sync_counts[2],
              g_dcache_clean_inv ? "resolved" : "MISSING",
              (unsigned)g_fbd.clean_ret, (unsigned)g_fbd.cleans,
-             (unsigned)g_fbd.copy_fail);
+             (unsigned)g_fbd.copy_fail, g_fbd.index, g_fbd.setter,
+             g_fbd.excl, g_fbd.fmt, (unsigned)g_fbd.px_tl,
+             (unsigned)g_fbd.px_menu, (unsigned)g_fbd.px_read);
     log_queue(line);
     snprintf(line, sizeof(line),
              "    menu drawn over by the game before the next frame: %u of %u "
