@@ -223,6 +223,7 @@ static volatile SceUID g_l0_pid;
 static volatile int64_t g_l0_us, g_l1_other_us;
 static const char *g_plane_why; /* why the plane was not used (log) */
 static volatile int64_t g_plane_hide_us; /* when the menu left the plane */
+static int64_t now_us(void); /* defined below, used by plane_hide */
 static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
 static volatile int g_plane_toast;  /* the message box is drawn in it */
 static volatile int g_render_active;
