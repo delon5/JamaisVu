@@ -672,15 +672,42 @@ static void set_message(MenuMode mode, const char *msg, int progress,
  * (PCH-1000 log: "not enough free kernel memory"); then the root pool's
  * physically contiguous part, then kernel memory from the user main pool,
  * each only for as long as the menu is shown. */
-static const SceKernelMemBlockType k_ovl_types[3] = {
+/* After the three usual pools, the partitions a game rarely fills (Dead
+ * Space on a PCH-1000, 9907829 log: root 384 KB, root contiguous 0, user
+ * main 0 - the menu needs 848 KB): the common-dialog pool (idle while the
+ * game shows no system dialog), VRAM through its CPU-cached mapping, the
+ * game and tmp partitions. Taken only while the menu is shown. */
+#define OVL_POOLS 7
+static const SceKernelMemBlockType k_ovl_types[OVL_POOLS] = {
   0x1020D006, /* KERNEL_ROOT_RW (= KERNEL_RW) */
   0x1080D006, /* KERNEL_ROOT_PHYCONT_RW (2 MB worked in Dead Nation) */
   0x10C0D006, /* KERNEL_ROOT_UMAIN_RW */
+  0x10A0D006, /* KERNEL_ROOT_CDIALOG_RW */
+  0x40404006, /* KERNEL_CDRAM_L1WBWA_RW (VRAM, cached) */
+  0x1050D006, /* KERNEL_ROOT_GAME_RW */
+  0x6020D006, /* KERNEL_TMP_RW */
+};
+static const char *const k_ovl_pool_names[OVL_POOLS] = {
+  "root", "root contiguous", "user main", "common dialog", "VRAM", "game",
+  "tmp"
 };
 static int g_ovl_fail_piece = -1;
 static uint32_t g_ovl_fail_size;
-static int g_ovl_fail_ret[3];
-static uint32_t g_ovl_pool_kb[3]; /* KB taken from each pool */
+static int g_ovl_fail_ret[OVL_POOLS];
+static uint32_t g_ovl_pool_kb[OVL_POOLS]; /* KB taken from each pool */
+
+/* "root contiguous 676 KB, root 172 KB" - the pools something came from */
+static int ovl_pools_text(char *out, int len, const uint32_t *kb) {
+  int n = 0, any = 0;
+  for (int i = 0; i < OVL_POOLS && n < len - 1; i++) {
+    if (!kb[i] && i >= 3)
+      continue; /* the usual three always, the others when used */
+    n += snprintf(out + n, len - n, "%s%s %u KB", any ? ", " : "",
+                  k_ovl_pool_names[i], (unsigned)kb[i]);
+    any = 1;
+  }
+  return n;
+}
 static int g_ovl_root_short; /* refused: no margin left in root */
 
 /* left free in the root pool after the menu took its memory (the kernel
@@ -733,13 +760,13 @@ static uint32_t ovl_total_size(void) {
  * (3401860 took 636 KB of root first and left the kernel under 128 KB).
  * So root contiguous first, then root - only while a block of
  * OVL_ROOT_MARGIN stays free there - then user main. */
-static const int k_ovl_order[3] = { 1, 0, 2 };
+static const int k_ovl_order[OVL_POOLS] = { 1, 0, 2, 3, 4, 5, 6 };
 /* The menu image (its 16-bit strips) is read 500 rows a frame by the
  * compose: from root contiguous memory a row took 65 us even when the
  * same row was read 64 times over (f44f095 "row cost" line) - that pool
  * is not cached for the CPU. So for the image: root (with the margin),
  * then user main, root contiguous last. */
-static const int k_panel_order[3] = { 0, 2, 1 };
+static const int k_panel_order[OVL_POOLS] = { 0, 2, 1, 3, 4, 5, 6 };
 
 static int root_margin_free(void) {
   SceUID t = ksceKernelAllocMemBlock("JamaisVuMargin", k_ovl_types[0],
@@ -753,7 +780,7 @@ static int root_margin_free(void) {
 static void *ovl_alloc(int k, uint32_t size) {
   size = (size + 0xfff) & ~0xfffu;
   const int *order = k < OVL_P_THUMBS ? k_panel_order : k_ovl_order;
-  for (int o = 0; o < 3; o++) {
+  for (int o = 0; o < OVL_POOLS; o++) {
     int i = order[o];
     SceUID uid = ksceKernelAllocMemBlock("JamaisVuMenu", k_ovl_types[i], size,
                                          NULL);
@@ -837,7 +864,7 @@ static int overlay_acquire(void) {
     g_ovl_root_short = 0;
     void *base[OVL_FIXED];
     int ok = 1;
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < OVL_POOLS; i++)
       g_ovl_pool_kb[i] = 0;
     /* largest first: they need the largest free blocks */
     for (int k = 0; k < OVL_FIXED && ok; k++)
@@ -1349,9 +1376,7 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
              (unsigned)(t2 - t1), (unsigned)(t3 - t2), (unsigned)(t4 - t3),
              (unsigned)(t5 - t4), (unsigned)(t6 - t5), (unsigned)(t7 - t6),
              (unsigned)(t8 - t7), (unsigned)(acc & 0xff),
-             g_mem_blks[OVL_P_PANEL] >= 0 && g_mem_pool[OVL_P_PANEL] == 0
-                 ? "root" : g_mem_pool[OVL_P_PANEL] == 2 ? "user main"
-                                                        : "root contiguous");
+             k_ovl_pool_names[g_mem_pool[OVL_P_PANEL] % OVL_POOLS]);
     log_queue(bl);
   }
 }
@@ -1807,41 +1832,45 @@ static int open_menu(void) {
      * system needs. Logged with the largest free blocks once per app
      * run (measuring takes memory too), briefly after that. */
     static SceUID logged_pid = -1;
-    static char line[420];
+    static char line[640];
     SceUID pid = fg_reader();
     refused_until = now_us() + 2000000;
     int k = g_ovl_fail_piece < 0 ? 0 : g_ovl_fail_piece;
     int n;
+    static char pools[160];
+    ovl_pools_text(pools, sizeof(pools), g_ovl_pool_kb);
     if (g_ovl_fail_piece < 0)
       n = snprintf(line, sizeof(line), "menu not opened in %s: the menu's "
-                   "memory (%u KB: root %u KB, root contiguous %u KB, user "
-                   "main %u KB) was found, but would leave the kernel no "
-                   "free block of %u KB in the root pool", tid,
-                   (unsigned)(ovl_total_size() >> 10),
-                   (unsigned)g_ovl_pool_kb[0], (unsigned)g_ovl_pool_kb[1],
-                   (unsigned)g_ovl_pool_kb[2],
+                   "memory (%u KB: %s) was found, but would leave the "
+                   "kernel no free block of %u KB in the root pool", tid,
+                   (unsigned)(ovl_total_size() >> 10), pools,
                    (unsigned)(OVL_ROOT_MARGIN >> 10));
-    else
+    else {
       n = snprintf(line, sizeof(line), "menu not opened in %s: not enough "
                    "free kernel memory for the %s (block %d of %d, %u KB; "
-                   "root contiguous 0x%08X, root 0x%08X%s, user main "
-                   "0x%08X; menu needs %u KB in all)", tid,
+                   "menu needs %u KB in all; the pools answered:", tid,
                    ovl_piece_name(k), k + 1, OVL_FIXED,
                    (unsigned)(g_ovl_fail_size >> 10),
-                   (unsigned)g_ovl_fail_ret[1], (unsigned)g_ovl_fail_ret[0],
-                   g_ovl_root_short ? " (held back: would leave the kernel "
-                   "too little)" : "", (unsigned)g_ovl_fail_ret[2],
                    (unsigned)(ovl_total_size() >> 10));
-    if (n < 0 || n > (int)sizeof(line) - 160)
-      n = (int)sizeof(line) - 160;
+      for (int i = 0; i < OVL_POOLS && n < (int)sizeof(line) - 200; i++)
+        n += snprintf(line + n, sizeof(line) - n, "%s %s 0x%08X%s",
+                      i ? "," : "", k_ovl_pool_names[i],
+                      (unsigned)g_ovl_fail_ret[i],
+                      i == 0 && g_ovl_root_short ? " (held back: would "
+                      "leave the kernel too little)" : "");
+      n += snprintf(line + n, sizeof(line) - n, ")");
+    }
+    if (n < 0 || n > (int)sizeof(line) - 200)
+      n = (int)sizeof(line) - 200;
     if (pid != logged_pid) {
       logged_pid = pid;
-      snprintf(line + n, sizeof(line) - n, "; largest free blocks now: "
-               "root %u KB, root contiguous %u KB, user main %u KB (2048 = "
-               "2 MB or more)\r\n",
-               (unsigned)(ovl_largest_free(k_ovl_types[0]) >> 10),
-               (unsigned)(ovl_largest_free(k_ovl_types[1]) >> 10),
-               (unsigned)(ovl_largest_free(k_ovl_types[2]) >> 10));
+      n += snprintf(line + n, sizeof(line) - n, "; largest free blocks "
+                    "now (2048 = 2 MB or more):");
+      for (int i = 0; i < OVL_POOLS && n < (int)sizeof(line) - 40; i++)
+        n += snprintf(line + n, sizeof(line) - n, "%s %s %u KB",
+                      i ? "," : "", k_ovl_pool_names[i],
+                      (unsigned)(ovl_largest_free(k_ovl_types[i]) >> 10));
+      snprintf(line + n, sizeof(line) - n, "\r\n");
     } else {
       snprintf(line + n, sizeof(line) - n, "\r\n");
     }
@@ -1850,11 +1879,11 @@ static int open_menu(void) {
   }
   if (!had) {
     static char line[220];
+    static char pools[160];
+    ovl_pools_text(pools, sizeof(pools), g_ovl_pool_kb);
     snprintf(line, sizeof(line), "menu opened in %s, memory %u KB in %d "
-             "blocks: root contiguous %u KB, root %u KB, user main %u KB\r\n",
-             tid, (unsigned)(ovl_total_size() >> 10), OVL_FIXED,
-             (unsigned)g_ovl_pool_kb[1], (unsigned)g_ovl_pool_kb[0],
-             (unsigned)g_ovl_pool_kb[2]);
+             "blocks: %s\r\n", tid, (unsigned)(ovl_total_size() >> 10),
+             OVL_FIXED, pools);
     log_queue(line);
   }
   g_capture_ok = 0;
