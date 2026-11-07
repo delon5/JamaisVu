@@ -210,7 +210,7 @@ static SceUID g_render_sema = -1;
 static SceUID g_plane_uid = -1;
 static uint32_t *g_plane_px; /* JV_SCREEN_W x JV_SCREEN_H ARGB */
 static const char *g_plane_pool;
-static int g_plane_fail; /* no buffer or no driver functions: compose */
+static int g_plane_fail; /* no driver functions: compose for good */
 static volatile int g_plane_mode;   /* this overlay generation uses it */
 static volatile int g_plane_shown;  /* the plane is set up with the buffer */
 static volatile int g_plane_lost;   /* something else set the plane */
@@ -548,9 +548,17 @@ static int plane_alloc(void) {
       return 0;
     }
   }
-  g_plane_fail = 1;
-  log_queue("overlay plane: no 2 MB block in VRAM or root contiguous - the "
-            "menu is drawn into the game's frames\r\n");
+  /* Not sticky: the pools fill and empty with the game. Logged once per
+   * app, so a game that leaves no 2 MB does not fill the log. */
+  {
+    static SceUID failed_pid;
+    SceUID pid = fg_reader();
+    if (pid != failed_pid) {
+      failed_pid = pid;
+      log_queue("overlay plane: no 2 MB block in VRAM or root contiguous - "
+                "the menu is drawn into the game's frames\r\n");
+    }
+  }
   return -1;
 }
 
@@ -4512,6 +4520,12 @@ int menu_init(const char *status_text) {
     }
   }
   g_render_thread_ok = g_render_sema >= 0;
+
+  /* The plane's 2 MB buffer is taken now, with the pools still untouched:
+   * a game can leave no 2 MB block (Chinatown Wars left none in VRAM nor
+   * in root contiguous), and the buffer is kept for good either way. */
+  if (g_render_thread_ok)
+    plane_alloc();
 
   return 0;
 }
