@@ -15,6 +15,8 @@
 #include <taihen.h>
 #include <psp2kern/kernel/sysroot.h>
 
+int ksceAppMgrIsExclusiveProcessRunning(void); /* used before its later declaration */
+
 #include <stdio.h>
 #include <string.h>
 
