@@ -164,7 +164,11 @@ static SceUID g_ovl_mtx = -1;
 static volatile int g_overlay_ready;
 static volatile int g_overlay_users;
 static volatile uint32_t g_overlay_gen; /* +1 per acquire: buffers are new */
-static uint32_t *g_toast_band, *g_rowbuf, *g_band_px;
+static uint32_t *g_toast_band, *g_band_px;
+/* one composed frame row (1080p: 7.7 KB), written 1000 times a frame: in
+ * the plugin's own memory, not the overlay block (the compose-build time
+ * did not move with the arithmetic -> the loop is bound by its stores) */
+static uint32_t g_rowbuf[1920 + 16];
 
 /* Widest frame the menu is drawn on: 960 on the handhelds; the PS TV's
  * home screen may use a larger frame for the TV (up to 1920x1088), so
@@ -705,7 +709,7 @@ static uint32_t ovl_piece_bytes(int k) {
     return (n > THUMB_PER_BLOCK ? THUMB_PER_BLOCK : n) * THUMB_PX * 2;
   }
   if (k == OVL_P_BAND) /* band, row buffer, both images' corners */
-    return MENU_W * BAND_ROWS * 4 + JV_MAX_FB_W * 4 + 2 * CORNER_PX * 4;
+    return MENU_W * BAND_ROWS * 4 + 2 * CORNER_PX * 4;
   if (k == OVL_P_TOAST) /* the box, 16-bit, and its drawing band */
     return TOAST_W * TOAST_H * 2 + TOAST_W * TOAST_BAND_ROWS * 4;
   return 0; /* letter sets: sized to the names, taken when they are read */
@@ -843,8 +847,7 @@ static int overlay_acquire(void) {
         g_thumbs[i] = (uint16_t *)base[OVL_P_THUMBS + i / THUMB_PER_BLOCK] +
                       (i % THUMB_PER_BLOCK) * THUMB_PX;
       g_band_px = base[OVL_P_BAND];
-      g_rowbuf = g_band_px + MENU_W * BAND_ROWS;
-      g_panel_img.corner = g_rowbuf + JV_MAX_FB_W;
+      g_panel_img.corner = g_band_px + MENU_W * BAND_ROWS;
       g_toast_img.corner = g_panel_img.corner + CORNER_PX;
       g_toast_img.strip[0] = base[OVL_P_TOAST];
       g_toast_band = (uint32_t *)(g_toast_img.strip[0] + TOAST_W * TOAST_H);
@@ -889,7 +892,7 @@ static void overlay_release(void) {
           log_queue(line);
         }
       }
-      g_toast_band = g_rowbuf = g_band_px = NULL;
+      g_toast_band = g_band_px = NULL;
       for (int k = 0; k < PANEL_STRIPS; k++)
         g_panel_img.strip[k] = NULL;
       g_panel_img.corner = g_toast_img.corner = NULL;
@@ -1128,9 +1131,10 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
     int sy = j * c->h / fh;
     uint32_t *dst = (uint32_t *)p->base + (fy0 + j) * p->pitch + fx0;
     RowSpan sp = spans[sy];
-    /* the time split is sampled on every 8th row (three clock reads per
-     * row were ~3000 calls a frame at 1080p) */
-    int sampled = (j & 7) == 0;
+    /* the time split is sampled on every 7th row (three clock reads per
+     * row were ~3000 calls a frame at 1080p; an odd stride so that both
+     * rows of a doubled pair - only the first builds - get sampled) */
+    int sampled = j % 7 == 0;
     t = sampled ? prof_now() : 0;
     if (sp.l == 0 && sp.r == 0) {
       /* opaque (nearly every row): converted and scaled in one pass, once
@@ -1229,9 +1233,37 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
     g_chk.n = n;
   }
   prof_add(PROF_C_SYNC, t);
-  prof_add_us(PROF_C_READ, t_read * 8); /* sampled: every 8th row */
-  prof_add_us(PROF_C_BUILD, t_build * 8);
-  prof_add_us(PROF_C_WRITE, t_write * 8);
+  prof_add_us(PROF_C_READ, t_read * 7); /* sampled: every 7th row */
+  prof_add_us(PROF_C_BUILD, t_build * 7);
+  prof_add_us(PROF_C_WRITE, t_write * 7);
+
+  /* once per boot, when the frame is twice the menu's width (PS TV at
+   * 1080p): what one row costs to build, into this buffer and into the
+   * overlay block, and to copy into the frame - for log.txt */
+  static int benched;
+  if (!benched && fw == 2 * c->w && g_band_px) {
+    benched = 1;
+    uint32_t *blk = g_band_px; /* MENU_W * BAND_ROWS words: room for 1920 */
+    const uint16_t *row = img_row16(c, 0);
+    uint32_t t0 = prof_now();
+    for (int k = 0; k < 64; k++)
+      build_row565(g_rowbuf, row, xmap, c->w, fw);
+    uint32_t t1 = prof_now();
+    for (int k = 0; k < 64; k++)
+      build_row565(blk, row, xmap, c->w, fw);
+    uint32_t t2 = prof_now();
+    for (int k = 0; k < 64; k++)
+      if (jv_copy_to_user((uint32_t *)p->base + fy0 * p->pitch + fx0,
+                          g_rowbuf, fw * 4) < 0)
+        break;
+    uint32_t t3 = prof_now();
+    static char bl[200];
+    snprintf(bl, sizeof(bl), "row cost at %dx%d (64 rows each): build into "
+             "own buffer %u us, into the overlay block %u us, copy into the "
+             "frame %u us\r\n", w, h, (unsigned)(t1 - t0), (unsigned)(t2 - t1),
+             (unsigned)(t3 - t2));
+    log_queue(bl);
+  }
 }
 
 /* The render thread: brings the panel up to date with the model. */
