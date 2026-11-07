@@ -135,6 +135,13 @@ typedef struct {
    * (JV_REFUSE_*): the payload then does nothing and returns JV_ERR_ARGS
    * with this as detail. */
   uint32_t refuse;
+  /* save: sectors per card write command (0: the default of 128; the
+   * write test uses 255, the most the command's count byte holds) */
+  uint32_t write_sectors;
+  /* write test (JV_TEST_VERIFY): words that read back differently - of
+   * which inside the screen's frame (drawn during the save, so different
+   * by design) - the first differing physical address, read-back time */
+  uint32_t verify_bad, verify_screen, verify_first, verify_ms;
 } PayloadArguments;
 
 #define JV_REFUSE_PROCESSES 1 /* more processes than the snapshot holds */
@@ -247,6 +254,8 @@ enum JamaisVuModes {
 #endif
 
 #define JV_TEST_DISPLAY 3 /* switches the screen on, test picture, off again */
+#define JV_TEST_VERIFY  4 /* a real save into an empty slot (255 sectors per
+                             card write), then read back and compared */
 
 /* Payload progress (PayloadArguments.stage) */
 #define JV_STAGE_ENTRY        1
@@ -275,6 +284,7 @@ enum JamaisVuModes {
 /* Loads, pass 2: savedata restored to the card, then memory */
 #define JV_STAGE_LOAD_SAVEDATA 23
 #define JV_STAGE_LOAD_MEMORY  24
+#define JV_STAGE_VERIFY       25 /* write test: reading the slot back */
 
 /* Payload result codes (PayloadArguments.result) */
 #define JV_TEST_DONE            1 /* a diagnostics run finished */

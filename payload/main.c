@@ -457,6 +457,9 @@ static void screen_step(int n) {
       case JV_STAGE_SLOT_TOKEN:
         jv_screen_status("Slot file checked", 4);
         break;
+      case JV_STAGE_VERIFY:
+        jv_screen_status("Written - reading back", 0);
+        break;
       case JV_STAGE_WRITING:
         jv_screen_status("Writing savedata", 5);
         break;
@@ -482,7 +485,9 @@ static void screen_finish(int result) {
     return;
   const char *msg = "Stopped - details in log.txt";
   if (result == JV_TEST_DONE)
-    msg = "Dry run passed - nothing was written";
+    msg = pargs->debug_mode == JV_TEST_VERIFY
+              ? "Write test done - details in log.txt"
+              : "Dry run passed - nothing was written";
   else if (result == JV_OK && g_screen_save)
     msg = "Saved";
   else if (result == JV_OK && g_screen_load)
@@ -548,14 +553,18 @@ static int run(void) {
    * off and the run goes on exactly as without it. */
   if (pargs->disp_fb_paddr && pargs->mode == JAMAISVU_MODE_SAVE &&
       (pargs->debug_mode == JV_TEST_DRYRUN ||
+       pargs->debug_mode == JV_TEST_VERIFY ||
        pargs->debug_mode == JV_TEST_NONE)) {
     static char title[] = "Saving slot ?";
     JvDisplayArgs a;
     display_args(&a);
     g_screen_save = pargs->debug_mode == JV_TEST_NONE;
     title[sizeof(title) - 2] = (char)('1' + (pargs->slot % 9));
-    if (jv_screen_begin(&a, display_mark, g_screen_save ? title :
-                        "Dry run - nothing is written") == 0)
+    const char *t = g_screen_save ? title
+                    : pargs->debug_mode == JV_TEST_VERIFY
+                          ? "Write test - saving, then reading back"
+                          : "Dry run - nothing is written";
+    if (jv_screen_begin(&a, display_mark, t) == 0)
       jv_screen_status("Memory Card ready", g_screen_save ? 1 : 30);
   } else if (pargs->disp_fb_paddr && pargs->mode == JAMAISVU_MODE_LOAD &&
              pargs->debug_mode == JV_TEST_NONE) {
@@ -695,6 +704,8 @@ int main(void) {
   pargs = (PayloadArguments *)PAYLOAD_ARGS_PADDR;
   g_cpu_mhz = pargs->cpu_mhz >= 100 && pargs->cpu_mhz <= 2000
                   ? pargs->cpu_mhz : JV_CPU_MHZ;
+  g_ms_write_max = pargs->write_sectors >= 1 && pargs->write_sectors <= 255
+                       ? (int)pargs->write_sectors : 128;
   *(volatile uint32_t *)REGSNAP_PADDR = 0; /* filled by the PS TV test */
   g_in_exception = 0;
   g_trace_lba = 0;

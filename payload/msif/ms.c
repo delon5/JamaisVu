@@ -139,6 +139,7 @@ static int sceMsifPrepareDmaTable(void *buf, uint32_t size, int is_write) {
  * exceed 255 sectors or the card and the DMA engine disagree on the length.
  * Split every request into chunks well below that limit. */
 #define MS_MAX_SECTORS_PER_CMD 128
+int g_ms_write_max = MS_MAX_SECTORS_PER_CMD;
 
 static int ms_read_chunk(void *buf, int sector, int count) {
   int res;
@@ -196,8 +197,10 @@ int ms_write_sector(const void *buf, int sector, int count) {
   if (sector < 0 || count < 0)
     return -1;
 
+  int per_cmd = g_ms_write_max >= 1 && g_ms_write_max <= 255
+                    ? g_ms_write_max : MS_MAX_SECTORS_PER_CMD;
   while (count > 0) {
-    int n = MIN(count, MS_MAX_SECTORS_PER_CMD);
+    int n = MIN(count, per_cmd);
     res = ms_write_chunk(p, sector, n);
     if (res != 0)
       return res < 0 ? res : -1;

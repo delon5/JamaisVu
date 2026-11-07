@@ -80,6 +80,11 @@ JV_PIN(appdb_changed, 2140);
 JV_PIN(ttbcr_n, 2144);
 JV_PIN(cpu_mhz, 2148);
 JV_PIN(refuse, 2152);
+JV_PIN(write_sectors, 2156);
+JV_PIN(verify_bad, 2160);
+JV_PIN(verify_screen, 2164);
+JV_PIN(verify_first, 2168);
+JV_PIN(verify_ms, 2172);
 _Static_assert(sizeof(PayloadArguments) >= 2084,
                "PayloadArguments shrank: old snapshots would break");
 
@@ -116,6 +121,7 @@ int ms_write_sector(const void *buf, int sector, int count) {
 
 uint64_t ksceKernelGetSystemTimeWide(void) { return 0; }
 void stage_mark(int n) { (void)n; }
+uint32_t jv_time_us(void) { return 0; }
 void progress_total(uint32_t total) { (void)total; }
 void progress_at(uint32_t pos) { (void)pos; }
 void progress_load_begin(uint32_t total) { (void)total; }
@@ -803,6 +809,31 @@ int main(int argc, char **argv) {
     printf("  %-44s -> %d\n", "load after interrupted save", res);
     CHECK(res == JV_ERR_BAD_STATE && args.applied == 0 &&
           changed_outside(NULL, NULL) == 0, "interrupted save must not be loadable");
+  }
+
+  /* --- Write test: a save, then the slot read back and compared --------- */
+  printf("write test (save, read back, compare)\n");
+  {
+    stamp_slot(slot);
+    snapshot_card();
+    reset_args(JAMAISVU_MODE_SAVE, slot, slot_size);
+    args.debug_mode = JV_TEST_VERIFY;
+    args.write_sectors = 255;
+    mount();
+    res = save_state(&fs, slot);
+    unmount();
+    printf("  %-44s -> %d (%u words differ, %u ms)\n", "write test", res,
+           args.verify_bad, args.verify_ms);
+    CHECK(res == JV_TEST_DONE, "write test result: %d", res);
+    CHECK(args.verify_bad == 0 && args.verify_screen == 0 &&
+          args.verify_first == 0, "write test: read back differs");
+    CHECK(changed_outside(&ext, NULL) == 0, "write test wrote outside its slot");
+    /* the slot now holds a complete state: it must load like a save's */
+    reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+    mount();
+    res = load_state(&fs, slot);
+    unmount();
+    CHECK(res == JV_OK, "state written by the write test must load: %d", res);
   }
 
   /* --- Memory Card mounted as uma0 (ux0 = SD2Vita/PSVSD) ---------------- */

@@ -67,12 +67,14 @@ static inline uint16_t rgba_to_565_round(uint32_t c) {
   return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
+/* 565 -> 8888 through three small tables (each channel expanded and
+ * already in place): 9 operations per pixel instead of ~18; the menu at
+ * 1080p converts half a million pixels per frame (compose-build was 18 ms
+ * of 27 on the PS TV). Values identical to the arithmetic form. */
+extern const uint32_t jv_lut_r5[32], jv_lut_g6[64], jv_lut_b5[32];
 static inline uint32_t rgb565_to_rgba(uint16_t v) {
-  uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
-  r = (r << 3) | (r >> 2);
-  g = (g << 2) | (g >> 4);
-  b = (b << 3) | (b >> 2);
-  return r | (g << 8) | (b << 16) | 0xff000000u;
+  return jv_lut_r5[v >> 11] | jv_lut_g6[(v >> 5) & 63] | jv_lut_b5[v & 31] |
+         0xff000000u;
 }
 
 /* the colour of c as the 16-bit menu image holds it, alpha kept (the

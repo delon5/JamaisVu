@@ -37,7 +37,7 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 #define EVF_RESUMED 2
 
 enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY,
-       OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY };
+       OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY, OP_TEST_WRITE };
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
 #define PENDING  JV_NUM_SLOTS /* thumbnail index of the live capture */
@@ -1128,7 +1128,10 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
     int sy = j * c->h / fh;
     uint32_t *dst = (uint32_t *)p->base + (fy0 + j) * p->pitch + fx0;
     RowSpan sp = spans[sy];
-    t = prof_now();
+    /* the time split is sampled on every 8th row (three clock reads per
+     * row were ~3000 calls a frame at 1080p) */
+    int sampled = (j & 7) == 0;
+    t = sampled ? prof_now() : 0;
     if (sp.l == 0 && sp.r == 0) {
       /* opaque (nearly every row): converted and scaled in one pass, once
        * per image row, written to every frame row it covers (two at
@@ -1159,22 +1162,26 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
         if (jv_copy_from_user(g_rowbuf + dr, dst + dr, (fw - dr) * 4) < 0)
           return;
       }
-      uint32_t t1 = prof_now();
-      t_read += t1 - t;
-      t = t1;
+      if (sampled) {
+        uint32_t t1 = prof_now();
+        t_read += t1 - t;
+        t = t1;
+      }
       const uint32_t *src = img_row32(c, sy, g_row32);
       cv_compose_row(g_rowbuf, src, xmap, dl);
       cv_compose_row(g_rowbuf + dr, src, xmap + dr, fw - dr);
       for (int i = dl; i < dr; i++)
         g_rowbuf[i] = 0xff000000u | (src[xmap[i]] & 0x00ffffffu);
     }
-    uint32_t t1 = prof_now();
-    t_build += t1 - t;
+    uint32_t t1 = sampled ? prof_now() : 0;
+    if (sampled)
+      t_build += t1 - t;
     if (jv_copy_to_user(dst, g_rowbuf, fw * 4) < 0) {
       g_fbd.copy_fail++;
       return;
     }
-    t_write += prof_now() - t1;
+    if (sampled)
+      t_write += prof_now() - t1;
   }
   /* one cache clean for the whole area (was two per row) */
   t = prof_now();
@@ -1222,9 +1229,9 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
     g_chk.n = n;
   }
   prof_add(PROF_C_SYNC, t);
-  prof_add_us(PROF_C_READ, t_read);
-  prof_add_us(PROF_C_BUILD, t_build);
-  prof_add_us(PROF_C_WRITE, t_write);
+  prof_add_us(PROF_C_READ, t_read * 8); /* sampled: every 8th row */
+  prof_add_us(PROF_C_BUILD, t_build * 8);
+  prof_add_us(PROF_C_WRITE, t_write * 8);
 }
 
 /* The render thread: brings the panel up to date with the model. */
@@ -1918,6 +1925,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
          * along the screen edges, B is clean. L + triangle still runs A. */
         g_disp_vic = (held & SCE_CTRL_LTRIGGER) ? 0 : 0x20;
         start_op(OP_TEST_DISPLAY, sel);
+      } else if (pressed & SCE_CTRL_RIGHT) {
+        start_op(OP_TEST_WRITE, sel);
       }
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
@@ -2666,7 +2675,26 @@ static void after_resume(void) {
       hwdump_regs(log_append, "ours", g_regsnap);
     }
     /* diagnostics: report and never touch the slot info */
-    if (g_res_result == JV_TEST_DONE)
+    if (g_res_debug == JV_TEST_VERIFY && g_res_result == JV_TEST_DONE) {
+      static char wl[256];
+      const PayloadArguments *pa = &g_res_pa;
+      snprintf(wl, sizeof(wl), "    write test: %u sectors per card "
+               "command; %u MB written in %u ms, read back in %u ms; %u "
+               "words differ (first at 0x%08X), %u inside the screen's "
+               "frame (expected)\r\n", (unsigned)pa->write_sectors,
+               (unsigned)(pa->mem_bytes >> 20),
+               (unsigned)(pa->mem_ms - pa->verify_ms), /* mem_ms spans both */
+               (unsigned)pa->verify_ms, (unsigned)pa->verify_bad,
+               (unsigned)pa->verify_first, (unsigned)pa->verify_screen);
+      log_append(wl);
+      if (pa->verify_bad == 0)
+        snprintf(msg, sizeof(msg), "Write test passed: %u MB written in "
+                 "%u s, read back identical", (unsigned)(pa->mem_bytes >> 20),
+                 (unsigned)((pa->mem_ms - pa->verify_ms) / 1000));
+      else
+        snprintf(msg, sizeof(msg), "Write test FAILED: %u words read back "
+                 "differently (log.txt)", (unsigned)pa->verify_bad);
+    } else if (g_res_result == JV_TEST_DONE)
       snprintf(msg, sizeof(msg), "%s passed - reached stage %u (%s)",
                g_res_debug == JV_TEST_RESET ? "Reset test" :
                g_res_debug == JV_TEST_DISPLAY ? "Display test" : "Dry run",
@@ -2676,7 +2704,8 @@ static void after_resume(void) {
       snprintf(msg, sizeof(msg), "Stopped: stage %u, code %d/%d - %s (%s)",
                (unsigned)g_res_stage, (int)g_res_result, (int)g_res_detail,
                result_text(g_res_result), stage_name(g_res_stage));
-    report(msg, g_res_result != JV_TEST_DONE);
+    report(msg, g_res_result != JV_TEST_DONE ||
+                    (g_res_debug == JV_TEST_VERIFY && g_res_pa.verify_bad));
     return;
   }
 
@@ -2850,6 +2879,32 @@ static void fs_notes_log(void) {
                (unsigned long long)e->size_now, (unsigned)e->refs);
     log_append(line);
   }
+  /* where the lookup time went: the slowest folders first */
+  snprintf(line, sizeof(line), "    lookup time: finding the folders %u ms, "
+           "searching the files in them %u ms; %u folders\r\n",
+           (unsigned)(f->parent_us / 1000), (unsigned)(f->search_us / 1000),
+           (unsigned)f->dirs);
+  log_append(line);
+  uint32_t shown = 0;
+  for (int k = 0; k < 6; k++) {
+    const FsDirStat *best = NULL;
+    for (uint32_t i = 0; i < f->dirs && i < FS_DIR_MAX; i++) {
+      const FsDirStat *d = &f->dir[i];
+      if (shown & (1u << i))
+        continue;
+      if (!best || d->us > best->us)
+        best = d;
+    }
+    if (!best)
+      break;
+    shown |= 1u << (uint32_t)(best - f->dir);
+    snprintf(line, sizeof(line), "      %s: %u files, %u ms (folder %u ms, "
+             "longest %u ms, %u ms each)\r\n", best->path, (unsigned)best->n,
+             (unsigned)(best->us / 1000), (unsigned)(best->parent_us / 1000),
+             (unsigned)(best->max_us / 1000),
+             (unsigned)(best->n ? best->us / best->n / 1000 : 0));
+    log_append(line);
+  }
 }
 
 static void run_and_wait(int mode, int slot, const uint8_t *nonce,
@@ -2867,7 +2922,8 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
            "trace.bin: %s\r\n", mode == JAMAISVU_MODE_LOAD ? "load" : "save",
            debug_mode == JV_TEST_RESET ? " (reset test)" :
            debug_mode == JV_TEST_DRYRUN ? " (dry run)" :
-           debug_mode == JV_TEST_DISPLAY ? " (display test)" : "", slot + 1,
+           debug_mode == JV_TEST_DISPLAY ? " (display test)" :
+           debug_mode == JV_TEST_VERIFY ? " (write test)" : "", slot + 1,
            jv_build_id(), variant == JV_PAYLOAD_DEFAULT ? "default" : "?",
            why);
   log_append(start);
@@ -3401,9 +3457,11 @@ static int display_frame_check(char *why, int len, int for_test) {
 }
 
 /* kind: 0 reset test, 1 dry run, 2 display test */
+/* kind: 0 reset test, 1 dry run, 2 display test, 3 write test (a save into
+ * an empty slot with 255-sector card commands, read back and compared) */
 static void do_test(int kind, int slot, int variant) {
   static uint8_t nonce[16];
-  int dry = kind == 1;
+  int dry = kind == 1 || kind == 3; /* both need an empty, prepared slot */
 
   if (!jv_armed()) {
     set_message(MV_MESSAGE, "Tests need an armed build", -1, 1);
@@ -3418,7 +3476,7 @@ static void do_test(int kind, int slot, int variant) {
   /* Display test and dry run: the frame to draw into. The display test
    * refuses without one; a dry run then just runs without its progress
    * screen, as before. */
-  if (kind == 2 || kind == 1) {
+  if (kind == 2 || kind == 1 || kind == 3) {
     static char why[160];
     if (display_frame_check(why, sizeof(why), kind == 2)) {
       jv_set_display_frame(g_fb_pa, g_fb_pitch, g_fb_w, g_fb_h,
@@ -3434,7 +3492,9 @@ static void do_test(int kind, int slot, int variant) {
 
   if (dry) {
     if (slot_is_loadable(slot)) {
-      set_message(MV_MESSAGE, "Dry run: select an empty slot", -1, 1);
+      set_message(MV_MESSAGE, kind == 3 ? "Write test: select an empty slot"
+                                        : "Dry run: select an empty slot",
+                  -1, 1);
       return;
     }
     slots_mkdirs();
@@ -3452,10 +3512,12 @@ static void do_test(int kind, int slot, int variant) {
   }
 
   set_message(MV_BUSY, kind == 2 ? "Display test..." :
+              kind == 3 ? "Write test..." :
               dry ? "Dry run..." : "Reset test...", -1, 0);
   slots_sync();
   run_and_wait(JAMAISVU_MODE_SAVE, slot, dry ? nonce : NULL,
                kind == 2 ? JV_TEST_DISPLAY :
+               kind == 3 ? JV_TEST_VERIFY :
                dry ? JV_TEST_DRYRUN : JV_TEST_RESET, variant);
 }
 
@@ -3600,6 +3662,9 @@ static int worker_thread(SceSize args, void *argp) {
         break;
       case OP_TEST_DISPLAY:
         do_test(2, g_op_slot, JV_PAYLOAD_DEFAULT);
+        break;
+      case OP_TEST_WRITE:
+        do_test(3, g_op_slot, JV_PAYLOAD_DEFAULT);
         break;
       case OP_PREPARE:
         do_prepare(0, g_op_slot);

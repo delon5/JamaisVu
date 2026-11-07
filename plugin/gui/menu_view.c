@@ -189,6 +189,7 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
       labels[n] = "Reset test"; icons[n] = ok_icon(m); n++;
       labels[n] = "Dry run";    icons[n] = ICON_SQUARE; n++;
       labels[n] = "Display test"; icons[n] = ICON_TRIANGLE; n++;
+      labels[n] = "Write test"; icons[n] = ICON_RIGHT; n++;
       labels[n] = "Back";       icons[n] = back_icon(m); n++;
       break;
     case MV_BUSY:
@@ -343,7 +344,8 @@ static void draw_details(Canvas *c, const MenuModel *m) {
                        "Diagnostics - nothing is written", C_TEXT,
                        MENU_W - 48);
       cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y,
-                       "Dry run uses the selected slot; it must be empty",
+                       "Dry run and write test use the selected slot; it "
+                       "must be empty",
                        C_TEXT_DIM, MENU_W - 48);
       break;
 

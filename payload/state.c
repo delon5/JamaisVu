@@ -657,6 +657,64 @@ out:
 /* Save                                                                     */
 /* ------------------------------------------------------------------------ */
 
+/* Write test (JV_TEST_VERIFY): reads the slot back and compares it with
+ * memory, a word at a time (the CPU runs uncached here: a byte loop over
+ * 556 MB takes minutes, words take seconds). The screen's frame is drawn
+ * during the save and differs by design; its words are counted apart. */
+static int verify_slot(const char *path, const SaveStateHeader *h) {
+  FIL fp;
+  UINT br;
+  uint32_t t0 = jv_time_us();
+  uint32_t bad = 0, screen = 0, first = 0, done = 0;
+  uint32_t fb0 = pargs->disp_fb_paddr;
+  uint32_t fb1 = fb0 + pargs->disp_fb_pitch * pargs->disp_fb_height * 4;
+
+  stage_mark(JV_STAGE_VERIFY);
+  if (f_open(&fp, path, FA_READ) != FR_OK)
+    return JV_ERR_IO;
+  if (f_lseek(&fp, h->data_offset) != FR_OK) {
+    f_close(&fp);
+    return JV_ERR_IO;
+  }
+  for (int i = 0; i < n_segments; i++) {
+    const uint8_t *src = jv_phys(segments[i].addr, segments[i].size);
+    if (!src) {
+      f_close(&fp);
+      return JV_ERR_IO;
+    }
+    for (uint32_t off = 0; off < segments[i].size;) {
+      uint32_t n = MIN(segments[i].size - off, sizeof(io_buf));
+      if (f_read(&fp, io_buf, n, &br) != FR_OK || br != n) {
+        f_close(&fp);
+        return JV_ERR_IO;
+      }
+      const uint32_t *a = (const uint32_t *)io_buf;
+      const uint32_t *b = (const uint32_t *)(src + off);
+      for (uint32_t w = 0; w < n / 4; w++) {
+        if (a[w] == b[w])
+          continue;
+        uint32_t pa = segments[i].addr + off + w * 4;
+        if (fb0 && pa >= fb0 && pa < fb1) {
+          screen++;
+        } else {
+          bad++;
+          if (!first)
+            first = pa;
+        }
+      }
+      off += n;
+      done += n;
+      progress_at(h->data_offset + done); /* the bar runs a second time */
+    }
+  }
+  f_close(&fp);
+  pargs->verify_bad = bad;
+  pargs->verify_screen = screen;
+  pargs->verify_first = first;
+  pargs->verify_ms = (jv_time_us() - t0) / 1000;
+  return JV_TEST_DONE;
+}
+
 int save_state(FATFS *fs, const char *path) {
   static SaveStateHeader header;
   uint32_t mbr_crc;
@@ -841,6 +899,11 @@ int save_state(FATFS *fs, const char *path) {
   memset(g_slot.stage, 0, SECTOR_SIZE);
   memcpy(g_slot.stage, &header, sizeof(header));
   res = slot_write_sectors(0, g_slot.stage, 1);
+
+  /* Write test: the slot is complete; now read it back. The plugin never
+   * marks the slot as used (JV_TEST_DONE, not JV_OK). */
+  if (res == 0 && pargs->debug_mode == JV_TEST_VERIFY)
+    res = verify_slot(path, &header);
 
 out:
   guard_deny_all();

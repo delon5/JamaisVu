@@ -13,5 +13,7 @@
 
 int ms_read_sector(void *buf, int sector, int count);
 int ms_write_sector(const void *buf, int sector, int count);
+/* sectors per WRITE_DATA command (1..255; 128 unless the plugin asks) */
+extern int g_ms_write_max;
 
 #endif

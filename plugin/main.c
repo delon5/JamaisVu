@@ -567,6 +567,9 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   if (!(debug_mode == JV_TEST_NONE && mode == JAMAISVU_MODE_LOAD))
     pargs.disp_fb2_paddr = 0; /* the snapshot's frame: loads only */
   pargs.refuse = 0;
+  pargs.write_sectors = debug_mode == JV_TEST_VERIFY ? 255 : 0;
+  pargs.verify_bad = pargs.verify_screen = pargs.verify_first = 0;
+  pargs.verify_ms = 0;
   {
     uint32_t ttbcr = 0;
     __asm__ volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));

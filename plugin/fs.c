@@ -255,6 +255,51 @@ static int fnode_index(const void *fnode) {
   return (int)i;
 }
 
+FsLoadNotes g_fs_notes;
+
+/* one lookup's time, booked to the file's folder (drive + path up to the
+ * last '/'; UTF-16 path in the fnode, ASCII here) */
+static void dir_note(const void *fnode, int fsi, uint32_t parent_us,
+                     uint32_t search_us) {
+  FsLoadNotes *f = &g_fs_notes;
+  char key[72];
+  const uint16_t *w = (const uint16_t *)fnode;
+  const char *nm = fs_name(fsi);
+  uint32_t k = 0, last = 0, n;
+  for (n = 0; n < 0x208 / 2 && w[n]; n++)
+    if (w[n] == '/')
+      last = n;
+  for (; nm && nm[k] && k < 8; k++)
+    key[k] = nm[k];
+  for (n = 0; n < last && k < sizeof(key) - 1; n++)
+    key[k++] = w[n] < 0x80 && w[n] >= 0x20 ? (char)w[n] : '?';
+  key[k] = '\0';
+
+  f->parent_us += parent_us;
+  f->search_us += search_us;
+  FsDirStat *d = NULL;
+  for (uint32_t i = 0; i < f->dirs && i < FS_DIR_MAX; i++)
+    if (strncmp(f->dir[i].path, key, sizeof(key)) == 0) {
+      d = &f->dir[i];
+      break;
+    }
+  if (!d) {
+    if (f->dirs < FS_DIR_MAX) {
+      d = &f->dir[f->dirs];
+      memset(d, 0, sizeof(*d));
+      memcpy(d->path, key, sizeof(key));
+    }
+    f->dirs++;
+    if (!d)
+      return; /* table full: counted in dirs, not broken down */
+  }
+  d->n++;
+  d->us += parent_us + search_us;
+  d->parent_us += parent_us;
+  if (parent_us + search_us > d->max_us)
+    d->max_us = parent_us + search_us;
+}
+
 /* *looked_up = 1 once the file was searched on the card again and its
  * cluster caches were reset (not if the drive lock failed). */
 static int update_fnode(void *fnode, int *looked_up) {
@@ -283,8 +328,10 @@ static int update_fnode(void *fnode, int *looked_up) {
 
   void **pFileSystem = fileSystem;
   void *temp = UVFAT_GetParentFnode(g_shared_resource, fileSystem, file.path);
+  int64_t t1 = ksceKernelGetSystemTimeWide();
   res = UVFAT_SearchFile_common(g_shared_resource, &file, &pFileSystem, fnode,
                                 temp);
+  int64_t t2 = ksceKernelGetSystemTimeWide();
   UVFAT_ReleaseFnode(g_shared_resource, temp);
 
   invalidate_cluster_cache_data(fnode);
@@ -295,6 +342,7 @@ static int update_fnode(void *fnode, int *looked_up) {
 
   ksceKernelUnlockFastMutex(drive + 0x1e0);
   *looked_up = 1;
+  dir_note(fnode, fsi, (uint32_t)(t1 - t0), (uint32_t)(t2 - t1));
 
   uint32_t one = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
   JvWakeFs *fw = trace_wake_fs();
@@ -343,8 +391,6 @@ static uint32_t update_fnodes(uint32_t *skipped, uint32_t only) {
   }
   return used;
 }
-
-FsLoadNotes g_fs_notes;
 
 static void note_file(void *fnode, uint32_t refs, int res, int freed,
                       uint64_t was, uint64_t now) {

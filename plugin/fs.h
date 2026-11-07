@@ -100,6 +100,16 @@ typedef struct {
   uint8_t freed;           /* entry freed by JamaisVu */
   uint64_t size_was, size_now;
 } FsNote;
+/* where the lookup time goes, per folder (diagnostics for the 17 s ux0
+ * re-read after a load: 1024 entries, ~17 ms each on the PS TV) */
+#define FS_DIR_MAX 12
+typedef struct {
+  char path[72];      /* drive + folder, ASCII */
+  uint32_t n;         /* lookups of files in this folder */
+  uint32_t us;        /* their total time */
+  uint32_t parent_us; /* of which: finding the folder itself */
+  uint32_t max_us;    /* the slowest one */
+} FsDirStat;
 typedef struct {
   uint32_t gone, freed, held, resized;
   uint32_t busy; /* entries whose lock could not be taken in 200 ms: left */
@@ -107,6 +117,9 @@ typedef struct {
                     failed): left to the kernel */
   uint32_t n;
   FsNote note[FS_NOTE_MAX];
+  uint32_t dirs;             /* distinct folders seen (table may be full) */
+  uint32_t parent_us, search_us; /* all lookups: folder part, file part */
+  FsDirStat dir[FS_DIR_MAX];
 } FsLoadNotes;
 extern FsLoadNotes g_fs_notes;
 

@@ -518,6 +518,22 @@ void cv_triangle(Canvas *c, int x0, int y0, int x1, int y1, int x2, int y2,
     }
 }
 
+/* rgb565_to_rgba tables (render.h): the 5/6-bit value expanded to 8 bits
+ * by replicating its top bits, shifted into its channel */
+#define JV_X5(i) ((uint32_t)(((i) << 3) | ((i) >> 2)))
+#define JV_X6(i) ((uint32_t)(((i) << 2) | ((i) >> 4)))
+#define JV_R8(f, s, b) f(b, s), f(b + 1, s), f(b + 2, s), f(b + 3, s), \
+                       f(b + 4, s), f(b + 5, s), f(b + 6, s), f(b + 7, s)
+#define JV_R32(f, s) JV_R8(f, s, 0), JV_R8(f, s, 8), JV_R8(f, s, 16), \
+                     JV_R8(f, s, 24)
+#define JV_R64(f, s) JV_R32(f, s), JV_R8(f, s, 32), JV_R8(f, s, 40), \
+                     JV_R8(f, s, 48), JV_R8(f, s, 56)
+#define JV_E5(i, s) (JV_X5(i) << (s))
+#define JV_E6(i, s) (JV_X6(i) << (s))
+const uint32_t jv_lut_r5[32] = { JV_R32(JV_E5, 0) };
+const uint32_t jv_lut_g6[64] = { JV_R64(JV_E6, 8) };
+const uint32_t jv_lut_b5[32] = { JV_R32(JV_E5, 16) };
+
 void cv_compose_row(uint32_t *dst, const uint32_t *src_row, const int *xmap,
                     int n) {
   for (int i = 0; i < n; i++) {

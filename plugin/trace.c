@@ -60,6 +60,7 @@ const char *jv_stage_name(uint32_t stage) {
     case JV_STAGE_DISP_OFF:   return "display-link-off";
     case JV_STAGE_LOAD_SAVEDATA: return "restoring-savedata";
     case JV_STAGE_LOAD_MEMORY:   return "restoring-memory";
+    case JV_STAGE_VERIFY:        return "reading-back";
     default:                  return "none";
   }
 }
