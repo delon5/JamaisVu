@@ -1116,6 +1116,56 @@ static void build_row565(uint32_t *out, const uint16_t *src, const int *xmap,
     out[i] = rgb565_to_rgba(src[xmap[i]]);
 }
 
+/* Row-cost benchmark variants (the "row cost" line, see compose): the same
+ * build without the compiler's NEON vector instructions, the arithmetic
+ * conversion, a plain copy, and arithmetic alone - to tell vector code,
+ * memory and ALU apart. 542d34e: 65 us a row wherever the row came from
+ * or went to, which neither memory nor the arithmetic explains. */
+#define JV_NOVEC __attribute__((optimize("no-tree-vectorize", \
+                                          "no-tree-slp-vectorize")))
+JV_NOVEC static void bench_build_novec(uint32_t *out, const uint16_t *src,
+                                       int sw) {
+  const uint32_t *two = (const uint32_t *)src;
+  for (int i = 0; i < sw / 2; i++) {
+    uint32_t v = two[i];
+    uint32_t a = rgb565_to_rgba((uint16_t)v);
+    uint32_t b = rgb565_to_rgba((uint16_t)(v >> 16));
+    out[4 * i] = a;
+    out[4 * i + 1] = a;
+    out[4 * i + 2] = b;
+    out[4 * i + 3] = b;
+  }
+}
+static inline uint32_t cv565_arith(uint16_t v) {
+  uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+  r = (r << 3) | (r >> 2);
+  g = (g << 2) | (g >> 4);
+  b = (b << 3) | (b >> 2);
+  return r | (g << 8) | (b << 16) | 0xff000000u;
+}
+JV_NOVEC static void bench_build_arith(uint32_t *out, const uint16_t *src,
+                                       int sw) {
+  const uint32_t *two = (const uint32_t *)src;
+  for (int i = 0; i < sw / 2; i++) {
+    uint32_t v = two[i];
+    uint32_t a = cv565_arith((uint16_t)v);
+    uint32_t b = cv565_arith((uint16_t)(v >> 16));
+    out[4 * i] = a;
+    out[4 * i + 1] = a;
+    out[4 * i + 2] = b;
+    out[4 * i + 3] = b;
+  }
+}
+JV_NOVEC static uint32_t bench_alu(uint32_t acc, int n) {
+  for (int i = 0; i < n; i++)
+    acc = cv565_arith((uint16_t)acc) ^ (acc >> 7) ^ (uint32_t)i;
+  return acc;
+}
+JV_NOVEC static void bench_copy(uint32_t *dst, const uint32_t *src, int n) {
+  for (int i = 0; i < n; i++)
+    dst[i] = src[i];
+}
+
 /* Puts image c, laid out at (dx,dy) on a 960x544 screen, onto the
  * framebuffer, scaling to the framebuffer's resolution. */
 static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
@@ -1271,12 +1321,28 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
     for (int k = 0; k < 64; k++)
       build_row565(g_rowbuf, rowcopy, xmap, c->w, fw);
     uint32_t t4 = prof_now();
-    static char bl[240];
+    for (int k = 0; k < 64; k++)
+      bench_build_novec(g_rowbuf, rowcopy, c->w);
+    uint32_t t5 = prof_now();
+    for (int k = 0; k < 64; k++)
+      bench_build_arith(g_rowbuf, rowcopy, c->w);
+    uint32_t t6 = prof_now();
+    static uint32_t src32[1920];
+    for (int k = 0; k < 64; k++)
+      bench_copy(g_rowbuf, src32, fw);
+    uint32_t t7 = prof_now();
+    uint32_t acc = bench_alu((uint32_t)t7, 64 * c->w);
+    uint32_t t8 = prof_now();
+    static char bl[400];
     snprintf(bl, sizeof(bl), "row cost at %dx%d (64 rows each): build into "
              "own buffer %u us, into the overlay block %u us, copy into the "
-             "frame %u us; build from a copy of the row in own memory %u us "
-             "(menu image in %s)\r\n", w, h, (unsigned)(t1 - t0),
+             "frame %u us; from a copy of the row in own memory %u us; the "
+             "same without vector instructions %u us, arithmetic instead of "
+             "tables %u us, plain word copy %u us, arithmetic alone %u us "
+             "(%u) (menu image in %s)\r\n", w, h, (unsigned)(t1 - t0),
              (unsigned)(t2 - t1), (unsigned)(t3 - t2), (unsigned)(t4 - t3),
+             (unsigned)(t5 - t4), (unsigned)(t6 - t5), (unsigned)(t7 - t6),
+             (unsigned)(t8 - t7), (unsigned)(acc & 0xff),
              g_mem_blks[OVL_P_PANEL] >= 0 && g_mem_pool[OVL_P_PANEL] == 0
                  ? "root" : g_mem_pool[OVL_P_PANEL] == 2 ? "user main"
                                                         : "root contiguous");
