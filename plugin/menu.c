@@ -13,6 +13,7 @@
 #include <psp2kern/display.h>
 #include <psp2kern/registrymgr.h>
 #include <taihen.h>
+#include <psp2kern/kernel/sysroot.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -3746,6 +3747,16 @@ static void do_overlay_test(void) {
   void *buf = NULL;
   int ti = -1, head = ksceDisplayGetPrimaryHead();
 
+  /* only over a game: in the LiveArea the shell's own picture lives on
+   * that plane (c1f7862 / ed04ef3 runs: claiming it replaced the LiveArea
+   * with the menu, and a transparent buffer at the end left nothing) */
+  if (!ksceAppMgrIsExclusiveProcessRunning()) {
+    set_message(MV_MESSAGE, "Overlay test: run it in a game - in the "
+                "LiveArea that plane is the LiveArea itself", -1, 1);
+    log_append("overlay test: not run - the LiveArea's picture lives on "
+               "the overlay plane\r\n");
+    return;
+  }
   set_message(MV_BUSY, "Overlay test: the menu on the display's second "
               "layer for 5 s", -1, 0);
   for (int i = 0; i < 3 && uid < 0; i++) {
@@ -3807,8 +3818,11 @@ static void do_overlay_test(void) {
    * on for its own transitions. SceDisplayForDriver: SetMergeConf (0x80
    * = off, else on; alpha 0x100 = the pixels' own) and SetOwner. */
   int (*set_merge)(int head, int control, uint32_t alpha) = NULL;
+  int (*set_owner)(int head, int index, SceUID pid) = NULL;
   module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0x6B198052,
                          (uintptr_t *)&set_merge);
+  module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0xB54962A1,
+                         (uintptr_t *)&set_owner);
 
   SceDisplayFrameBuf fb;
   memset(&fb, 0, sizeof(fb));
@@ -3818,35 +3832,34 @@ static void do_overlay_test(void) {
   fb.pixelformat = 0; /* SCE_DISPLAY_PIXELFORMAT_A8B8G8R8 */
   fb.width = W;
   fb.height = H;
-  /* blending on, the buffer on layer 1, 5 s. (c1f7862 / ed04ef3 also
-   * claimed the plane for the kernel with SetOwner after 5 s: the screen
-   * went black at that moment and stayed black - never again.) */
+  /* c1f7862 / ed04ef3 in the LiveArea: with blending on and the buffer
+   * on layer 1 nothing changed (the shell owns the plane); once the plane
+   * was claimed for the kernel (SetOwner) the buffer showed; the endings
+   * (overlay alpha 0, or 0x80 + NULL) left the screen black for good. So,
+   * over a game: blending on with the pixels' own alpha, the plane
+   * claimed, shown 5 s, the buffer made transparent, the plane handed
+   * back to the shell; blending and the buffer left as they are. */
+  SceUID shell = ksceKernelSysrootGetShellPid();
   int rm = set_merge ? set_merge(head, 0, 0x100) : -1;
+  int ro = set_owner ? set_owner(head, 1, KERNEL_PID) : -1;
   int r1 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
   ksceKernelDelayThread(5 * 1000 * 1000);
-  int ro = 0, r1b = 0;
-  /* Back - carefully. c1f7862 ended with blending "off" (0x80) and the
-   * layer set to NULL, and the screen went black for good: the SDK's
-   * "NULL blacks out the output" holds for this plane too, and 0x80 may
-   * select the overlay plane alone rather than switch blending off. So:
-   * the buffer made transparent, blending kept on with the overlay's
-   * alpha at 0 (nothing of the plane is visible), and the buffer left
-   * in place - 2 MB of VRAM until the next restart, for this test. */
   memset(px, 0, bytes);
   for (uint32_t off = 0; off < bytes; off += 0x8000)
     fb_cache_sync((uint8_t *)px + off, bytes - off > 0x8000 ? 0x8000
                                                               : bytes - off);
   int r2 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
   ksceKernelDelayThread(500 * 1000);
-  int rm2 = set_merge ? set_merge(head, 0, 0) : -1;
+  int r1b = set_owner && shell > 0 ? set_owner(head, 1, shell) : -1;
+  int rm2 = (int)shell; /* logged: the shell's process */
   snprintf(line, sizeof(line), "overlay test: head %d layer 1, %ux%u ARGB "
-           "buffer (%u KB) in %s: blending on -> 0x%08X, shown -> 0x%08X "
-           "(5 s); (no owner change: 0x%08X/0x%08X); made "
-           "transparent -> 0x%08X, overlay alpha 0 -> 0x%08X; the buffer "
-           "stays on the plane (not freed)\r\n", head, (unsigned)W,
+           "buffer (%u KB) in %s: blending on -> 0x%08X, plane claimed -> "
+           "0x%08X, shown -> 0x%08X (5 s); made transparent -> 0x%08X, "
+           "plane back to the shell (%08X) -> 0x%08X; the buffer stays on "
+           "the plane (not freed)\r\n", head, (unsigned)W,
            (unsigned)H, (unsigned)(size >> 10), names[ti], (unsigned)rm,
-           (unsigned)r1, (unsigned)ro, (unsigned)r1b, (unsigned)r2,
-           (unsigned)rm2);
+           (unsigned)ro, (unsigned)r1, (unsigned)r2, (unsigned)rm2,
+           (unsigned)r1b);
   log_append(line);
 }
 
