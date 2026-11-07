@@ -214,7 +214,7 @@ static int g_plane_fail; /* no driver functions: compose for good */
 static volatile int g_plane_mode;   /* this overlay generation uses it */
 static volatile int g_plane_shown;  /* the plane is set up with the buffer */
 static volatile int g_plane_lost;   /* something else set the plane */
-static volatile int g_plane_reshow; /* the input thread claims it again */
+static volatile int g_plane_yield;  /* the input thread closes the menu */
 static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
 static volatile int g_plane_toast;  /* the message box is drawn in it */
 static volatile int g_render_active;
@@ -1641,7 +1641,8 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
     /* the plane: the render thread keeps the panel in the buffer; here
      * only the message box, and clearing what is no longer shown */
     if (g_plane_lost)
-      g_plane_reshow = 1; /* the input thread claims the plane again */
+      g_plane_yield = 1; /* the input thread closes the menu: the system's
+                          * own overlay has the plane, never fought over */
     if (g_menu_open) {
       if (g_panel_seq != g_model_seq || g_panel_gen != g_overlay_gen)
         ksceKernelSignalSema(g_render_sema, 1);
@@ -1805,8 +1806,8 @@ static void drawn_over_check(uintptr_t next_base) {
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
-  /* the overlay plane set by someone else (the shell's own overlays): ours
-   * is claimed again by the input thread when it is needed */
+  /* the overlay plane set by someone else (the system's own overlays: PS
+   * button menu, notifications): the menu yields, see the input thread */
   if (index == 1 && g_plane_shown && p && p->base &&
       p->base != (void *)g_plane_px)
     g_plane_lost = 1;
@@ -2391,10 +2392,18 @@ static int input_thread(SceSize args, void *argp) {
       g_rearm_input = 0;
       prev = 0xffffffff;
     }
-    if (g_plane_reshow) {
-      g_plane_reshow = 0;
-      if (g_plane_mode && g_overlay_ready)
-        plane_show();
+    if (g_plane_yield) {
+      g_plane_yield = 0;
+      /* the system put its own overlay on the plane (PS button menu, a
+       * notification, a dialog): it keeps it; the menu and any message
+       * close instead of being drawn over it, and the plane is handed
+       * back below with the overlay memory */
+      if (g_plane_mode && (g_menu_open || now_us() < g_toast_until)) {
+        close_menu();
+        g_toast_until = 0;
+        log_queue("overlay plane: taken by the system for its own overlay "
+                  "- the menu closed\r\n");
+      }
     }
 
     /* enable "Save" once the display hook has captured a game frame */
