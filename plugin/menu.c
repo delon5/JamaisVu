@@ -90,6 +90,7 @@ static SceUID g_mem_blks[OVL_PIECES];
  * suspected: kernel memory not given back): KB of each block held, the
  * blocks and KB JamaisVu holds now, and frees the system refused. */
 static uint32_t g_mem_kb[OVL_PIECES];
+static int g_mem_pool[OVL_PIECES]; /* k_ovl_types index each piece came from */
 static volatile int g_held_blocks;
 static volatile uint32_t g_held_kb, g_taken_total, g_freed_total;
 static volatile int g_free_errs, g_free_err_last;
@@ -732,6 +733,12 @@ static uint32_t ovl_total_size(void) {
  * So root contiguous first, then root - only while a block of
  * OVL_ROOT_MARGIN stays free there - then user main. */
 static const int k_ovl_order[3] = { 1, 0, 2 };
+/* The menu image (its 16-bit strips) is read 500 rows a frame by the
+ * compose: from root contiguous memory a row took 65 us even when the
+ * same row was read 64 times over (f44f095 "row cost" line) - that pool
+ * is not cached for the CPU. So for the image: root (with the margin),
+ * then user main, root contiguous last. */
+static const int k_panel_order[3] = { 0, 2, 1 };
 
 static int root_margin_free(void) {
   SceUID t = ksceKernelAllocMemBlock("JamaisVuMargin", k_ovl_types[0],
@@ -744,8 +751,9 @@ static int root_margin_free(void) {
 
 static void *ovl_alloc(int k, uint32_t size) {
   size = (size + 0xfff) & ~0xfffu;
+  const int *order = k < OVL_P_THUMBS ? k_panel_order : k_ovl_order;
   for (int o = 0; o < 3; o++) {
-    int i = k_ovl_order[o];
+    int i = order[o];
     SceUID uid = ksceKernelAllocMemBlock("JamaisVuMenu", k_ovl_types[i], size,
                                          NULL);
     g_ovl_fail_ret[i] = uid;
@@ -758,6 +766,7 @@ static void *ovl_alloc(int k, uint32_t size) {
     if (uid >= 0 && ksceKernelGetMemBlockBase(uid, &base) >= 0 && base) {
       g_mem_blks[k] = uid;
       g_mem_kb[k] = size >> 10;
+      g_mem_pool[k] = i;
       g_held_blocks++;
       g_held_kb += size >> 10;
       g_taken_total++;
@@ -1257,11 +1266,20 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
                           g_rowbuf, fw * 4) < 0)
         break;
     uint32_t t3 = prof_now();
-    static char bl[200];
+    static uint16_t rowcopy[MENU_W];
+    memcpy(rowcopy, row, c->w * 2);
+    for (int k = 0; k < 64; k++)
+      build_row565(g_rowbuf, rowcopy, xmap, c->w, fw);
+    uint32_t t4 = prof_now();
+    static char bl[240];
     snprintf(bl, sizeof(bl), "row cost at %dx%d (64 rows each): build into "
              "own buffer %u us, into the overlay block %u us, copy into the "
-             "frame %u us\r\n", w, h, (unsigned)(t1 - t0), (unsigned)(t2 - t1),
-             (unsigned)(t3 - t2));
+             "frame %u us; build from a copy of the row in own memory %u us "
+             "(menu image in %s)\r\n", w, h, (unsigned)(t1 - t0),
+             (unsigned)(t2 - t1), (unsigned)(t3 - t2), (unsigned)(t4 - t3),
+             g_mem_blks[OVL_P_PANEL] >= 0 && g_mem_pool[OVL_P_PANEL] == 0
+                 ? "root" : g_mem_pool[OVL_P_PANEL] == 2 ? "user main"
+                                                        : "root contiguous");
     log_queue(bl);
   }
 }
