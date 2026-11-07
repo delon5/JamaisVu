@@ -33,6 +33,7 @@ int ksceAppMgrIsExclusiveProcessRunning(void); /* used before its later declarat
 #include "appdb.h"
 #include "fs.h"
 #include "gui/menu_view.h"
+#include "gui/rle16.h"
 
 int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 
@@ -68,26 +69,39 @@ static volatile int g_cancel_req; /* ○ while preparing a slot */
  * see-through rounded corners - MENU_EDGE_COLS pixels at each end of the
  * MENU_EDGE_ROWS rows at the top and at the bottom - keep 32 bits, for
  * their alpha (colours rounded the same way); everything else is opaque
- * (checked by the host tests). Menu image 516 KB (was 1032 KB 32-bit),
- * message box 61 KB (was 122 KB).
+ * (checked by the host tests). Menu image ~50 KB compressed (516 KB raw,
+ * 1032 KB when it was 32-bit), message box 61 KB (was 122 KB).
  * The thumbnails (RGB565, as in the slot files) are three to a block. */
-#define PANEL_STRIP_ROWS 100
-#define PANEL_STRIPS ((MENU_H + PANEL_STRIP_ROWS - 1) / PANEL_STRIP_ROWS)
+/* The menu image is stored compressed (gui/rle16.c: runs, literals, and
+ * the thumbnails by reference), ~50 KB instead of 516 KB raw. It grows in
+ * 64 KB pieces, the first taken when the menu opens, the others while it
+ * is drawn; two copies alternate so that the one on screen is never
+ * written while it is read. */
+#define PANEL_CHUNK_BYTES 0x10000
+#define PANEL_CHUNKS 10 /* at most 640 KB: more than the raw image */
 #define TOAST_BAND_ROWS 8 /* the message box is drawn in bands this high */
 #define CORNER_PX (2 * MENU_EDGE_ROWS * 2 * MENU_EDGE_COLS)
 #define THUMB_PER_BLOCK 3
 #define THUMB_BLOCKS ((JV_NUM_SLOTS + THUMB_PER_BLOCK) / THUMB_PER_BLOCK)
 /* in allocation order, largest first */
 enum {
-  OVL_P_PANEL = 0,                       /* PANEL_STRIPS, 16-bit, 172 KB */
-  OVL_P_THUMBS = PANEL_STRIPS,           /* THUMB_BLOCKS, 3 x 16-bit, 88 KB */
+  OVL_P_PANEL = 0,                       /* menu image, first 64 KB piece */
+  OVL_P_THUMBS,                          /* THUMB_BLOCKS, 3 x 16-bit, 88 KB */
   OVL_P_BAND = OVL_P_THUMBS + THUMB_BLOCKS, /* band, row buffer, corners */
   OVL_P_TOAST,                           /* message box + its band, 80 KB */
   OVL_P_EXT0,                            /* Japanese letter sets: not */
   OVL_P_EXT1,                            /* taken when the menu opens */
-  OVL_PIECES,
+  OVL_P_PANEL1,                          /* menu image, further 64 KB
+                                            pieces, taken while drawing */
+  OVL_PIECES = OVL_P_PANEL1 + PANEL_CHUNKS - 1,
   OVL_FIXED = OVL_P_EXT0                 /* blocks taken when it opens */
 };
+static inline int panel_piece(int chunk) {
+  return chunk == 0 ? OVL_P_PANEL : OVL_P_PANEL1 + chunk - 1;
+}
+static inline int is_panel_piece(int k) {
+  return k == OVL_P_PANEL || k >= OVL_P_PANEL1;
+}
 static SceUID g_mem_blks[OVL_PIECES];
 /* Bookkeeping for log.txt (reboots and frozen app starts since d132bb4,
  * suspected: kernel memory not given back): KB of each block held, the
@@ -98,16 +112,39 @@ static volatile int g_held_blocks;
 static volatile uint32_t g_held_kb, g_taken_total, g_freed_total;
 static volatile int g_free_errs, g_free_err_last;
 
-/* a 16-bit image with 32-bit corners */
+/* one compressed copy of the menu image: where each row lies in the
+ * image's pieces (pos: piece index * PANEL_CHUNK_BYTES + offset) */
 typedef struct {
-  uint16_t *strip[PANEL_STRIPS];
-  int strip_rows;
+  uint32_t pos[MENU_H];
+  uint16_t len[MENU_H];
+  int chunks[PANEL_CHUNKS]; /* the pieces this copy uses, in order */
+  int nchunks;
+  uint32_t fill;            /* bytes used in the last piece */
+  uint32_t used;            /* bytes in all */
+  int rows;                 /* rows stored so far */
+  uint32_t version;         /* +1 every time the copy is drawn anew */
+  const uint16_t *refs[JV_NUM_SLOTS]; /* the thumbnails it refers to */
+} RleStream;
+
+/* a 16-bit image with 32-bit corners: raw rows (the message box) or
+ * compressed (the menu image, see PANEL_CHUNK_BYTES) */
+typedef struct {
+  uint16_t *raw;    /* w x h RGB565, or NULL when compressed */
   int w, h;
   uint32_t *corner; /* CORNER_PX: per edge row, the left then the right
                        MENU_EDGE_COLS pixels */
+  int rle;          /* compressed: the fields below */
+  uint8_t *chunk_mem[PANEL_CHUNKS];
+  int chunk_owner[PANEL_CHUNKS]; /* -1 free, else the copy using it */
+  RleStream stream[2];
+  volatile int rd;  /* the copy on screen, -1 none yet */
+  int wr;           /* the copy being drawn */
 } Img16;
-static Img16 g_panel_img = { { 0 }, PANEL_STRIP_ROWS, MENU_W, MENU_H, 0 };
-static Img16 g_toast_img = { { 0 }, TOAST_H, TOAST_W, TOAST_H, 0 };
+static Img16 g_panel_img = { .w = MENU_W, .h = MENU_H, .rle = 1, .rd = -1 };
+static Img16 g_toast_img = { .w = TOAST_W, .h = TOAST_H, .rd = -1 };
+/* for log.txt: the last complete menu image */
+static volatile uint32_t g_panel_stat_bytes, g_panel_stat_maxrow;
+static volatile int g_panel_stat_blocks;
 
 static inline int img_edge(const Img16 *im, int y) {
   if (y < MENU_EDGE_ROWS)
@@ -116,8 +153,42 @@ static inline int img_edge(const Img16 *im, int y) {
     return y - (im->h - 2 * MENU_EDGE_ROWS);
   return -1;
 }
-static inline uint16_t *img_row16(const Img16 *im, int y) {
-  return im->strip[y / im->strip_rows] + (y % im->strip_rows) * im->w;
+/* row y of an image as 16-bit pixels. A compressed row is decoded into
+ * one buffer (the display hook is the only reader) and kept while the
+ * same row of the same copy is asked for again - compose asks twice per
+ * row at 1080p. A row that is not there (none drawn yet, or the copy is
+ * being drawn anew) comes back black. */
+static uint16_t g_dec_row[MENU_W];
+static int g_dec_y = -1, g_dec_s = -1;
+static uint32_t g_dec_ver;
+static const uint16_t *img_row16(const Img16 *im, int y) {
+  if (!im->rle)
+    return im->raw + y * im->w;
+  int sidx = im->rd;
+  const RleStream *st = sidx < 0 ? NULL : &im->stream[sidx];
+  if (st && g_dec_y == y && g_dec_s == sidx && g_dec_ver == st->version)
+    return g_dec_row;
+  const uint8_t *src = NULL;
+  int len = 0;
+  if (st && y < st->rows) {
+    uint32_t pos = st->pos[y];
+    int ci = (int)(pos / PANEL_CHUNK_BYTES), co = (int)(pos % PANEL_CHUNK_BYTES);
+    len = st->len[y];
+    if (ci < st->nchunks && im->chunk_mem[st->chunks[ci]] &&
+        co + len <= PANEL_CHUNK_BYTES)
+      src = im->chunk_mem[st->chunks[ci]] + co;
+  }
+  if (!src) {
+    memset(g_dec_row, 0, im->w * 2);
+    g_dec_y = -1;
+    return g_dec_row;
+  }
+  rle16_decode_row(src, len, g_dec_row, im->w, st->refs, JV_NUM_SLOTS,
+                   THUMB_PX);
+  g_dec_y = y;
+  g_dec_s = sidx;
+  g_dec_ver = st->version;
+  return g_dec_row;
 }
 /* The apps that read the controller lately (JamaisVu's controller hooks
  * run inside the reading app): two places, the oldest is replaced. Used at
@@ -224,6 +295,7 @@ static volatile int64_t g_l0_us, g_l1_other_us;
 static const char *g_plane_why; /* why the plane was not used (log) */
 static volatile int64_t g_plane_hide_us; /* when the menu left the plane */
 static int64_t now_us(void); /* defined below, used by plane_hide */
+static void close_menu(void); /* defined below, used by render_panel */
 static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
 static volatile int g_plane_toast;  /* the message box is drawn in it */
 static volatile int g_render_active;
@@ -579,6 +651,23 @@ static int plane_alloc(void) {
   return -1;
 }
 
+/* data/JamaisVu/noplane on the Memory Card: the menu is composed into
+ * the game's frames as before the plane, on this console */
+static int plane_switched_off(void) {
+  static int noted;
+  char path[160];
+  SceIoStat st;
+  jv_file_path(path, sizeof(path), "noplane");
+  if (ksceIoGetstat(path, &st) < 0)
+    return 0;
+  if (!noted) {
+    noted = 1;
+    log_queue("overlay plane: off - data/JamaisVu/noplane is on the card; "
+              "the menu is composed into the game's frames\r\n");
+  }
+  return 1;
+}
+
 /* The plane shows the buffer: blending on with the pixels' own alpha,
  * the plane claimed for the kernel, the buffer set. Called again after
  * the shell used the plane (g_plane_lost) - never from inside the
@@ -912,7 +1001,7 @@ static int g_ovl_root_short; /* refused: no margin left in root */
 #define OVL_ROOT_MARGIN 0x20000
 
 static const char *ovl_piece_name(int k) {
-  if (k < OVL_P_THUMBS)
+  if (is_panel_piece(k))
     return "menu image";
   if (k < OVL_P_BAND)
     return "thumbnails";
@@ -924,12 +1013,8 @@ static const char *ovl_piece_name(int k) {
 }
 
 static uint32_t ovl_piece_bytes(int k) {
-  if (k < OVL_P_THUMBS) {
-    int rows = MENU_H - k * PANEL_STRIP_ROWS;
-    if (rows > PANEL_STRIP_ROWS)
-      rows = PANEL_STRIP_ROWS;
-    return rows * MENU_W * 2;
-  }
+  if (is_panel_piece(k))
+    return PANEL_CHUNK_BYTES;
   if (k < OVL_P_BAND) {
     int n = JV_NUM_SLOTS + 1 - (k - OVL_P_THUMBS) * THUMB_PER_BLOCK;
     return (n > THUMB_PER_BLOCK ? THUMB_PER_BLOCK : n) * THUMB_PX * 2;
@@ -976,7 +1061,7 @@ static int root_margin_free(void) {
 
 static void *ovl_alloc(int k, uint32_t size) {
   size = (size + 0xfff) & ~0xfffu;
-  const int *order = k < OVL_P_THUMBS ? k_panel_order : k_ovl_order;
+  const int *order = is_panel_piece(k) ? k_panel_order : k_ovl_order;
   for (int o = 0; o < OVL_POOLS; o++) {
     int i = order[o];
     SceUID uid = ksceKernelAllocMemBlock("JamaisVuMenu", k_ovl_types[i], size,
@@ -1079,6 +1164,8 @@ static int overlay_acquire(void) {
         g_plane_why = "the game's own frames are not on the screen";
       else if (tn - g_l1_other_us < 2000000)
         g_plane_why = "the system has a picture on the plane";
+      else if (plane_switched_off())
+        g_plane_why = "switched off by the noplane file";
       else if (plane_alloc() != 0)
         g_plane_why = "no plane buffer";
       else
@@ -1104,17 +1191,23 @@ static int overlay_acquire(void) {
       }
     }
     if (ok) {
-      for (int k = 0; k < PANEL_STRIPS; k++)
-        g_panel_img.strip[k] = base[OVL_P_PANEL + k];
+      for (int i = 0; i < PANEL_CHUNKS; i++) {
+        g_panel_img.chunk_mem[i] = i == 0 ? base[OVL_P_PANEL] : NULL;
+        g_panel_img.chunk_owner[i] = -1;
+      }
+      g_panel_img.stream[0].nchunks = g_panel_img.stream[1].nchunks = 0;
+      g_panel_img.stream[0].rows = g_panel_img.stream[1].rows = 0;
+      g_panel_img.rd = -1;
+      g_panel_img.wr = 0;
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = (uint16_t *)base[OVL_P_THUMBS + i / THUMB_PER_BLOCK] +
                       (i % THUMB_PER_BLOCK) * THUMB_PX;
       g_band_px = base[OVL_P_BAND];
       g_panel_img.corner = g_band_px + MENU_W * BAND_ROWS;
       g_toast_img.corner = g_panel_img.corner + CORNER_PX;
-      g_toast_img.strip[0] = base[OVL_P_TOAST];
+      g_toast_img.raw = base[OVL_P_TOAST];
       g_toast_band = plane ? g_plane_toast_band
-                           : (uint32_t *)(g_toast_img.strip[0] +
+                           : (uint32_t *)(g_toast_img.raw +
                                           TOAST_W * TOAST_H);
       g_ext_set[0] = g_ext_set[1] = NULL; /* taken when the names are read */
       g_plane_mode = plane;
@@ -1165,10 +1258,14 @@ static void overlay_release(void) {
         }
       }
       g_toast_band = g_band_px = NULL;
-      for (int k = 0; k < PANEL_STRIPS; k++)
-        g_panel_img.strip[k] = NULL;
+      g_panel_img.rd = -1;
+      for (int i = 0; i < PANEL_CHUNKS; i++) {
+        g_panel_img.chunk_mem[i] = NULL;
+        g_panel_img.chunk_owner[i] = -1;
+      }
+      g_panel_img.stream[0].nchunks = g_panel_img.stream[1].nchunks = 0;
       g_panel_img.corner = g_toast_img.corner = NULL;
-      g_toast_img.strip[0] = NULL;
+      g_toast_img.raw = NULL;
       g_ext_set[0] = g_ext_set[1] = NULL;
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = NULL;
@@ -1312,15 +1409,112 @@ static uint32_t g_row32[MENU_W];
  * every pixel as RGB565 (nearest shade), the corners also 32-bit (alpha
  * kept, colours rounded the same way). Only the corners may be
  * see-through: anything else is shown opaque (noted once in log.txt). */
-static void img_store_rows(Img16 *im, const uint32_t *band, int y0,
-                           int rows, RowSpan *blend) {
+/* Room for one more row in the copy of the menu image being drawn: in
+ * the piece it is filling, or a piece nobody uses, or a new 64 KB piece
+ * from the pools. NULL: no memory. Called from the drawing thread only. */
+static uint8_t *panel_room(Img16 *im, uint32_t *pos, int *cap) {
+  RleStream *st = &im->stream[im->wr];
+  if (st->nchunks == 0 ||
+      st->fill + RLE16_MAX_BYTES(MENU_W) > PANEL_CHUNK_BYTES) {
+    if (st->nchunks >= PANEL_CHUNKS)
+      return NULL;
+    int i;
+    for (i = 0; i < PANEL_CHUNKS; i++) /* a piece held but unused */
+      if (im->chunk_mem[i] && im->chunk_owner[i] < 0)
+        break;
+    if (i == PANEL_CHUNKS) {
+      for (i = 0; i < PANEL_CHUNKS && im->chunk_mem[i]; i++)
+        ;
+      if (i == PANEL_CHUNKS)
+        return NULL;
+      im->chunk_mem[i] = ovl_alloc(panel_piece(i), PANEL_CHUNK_BYTES);
+      if (!im->chunk_mem[i])
+        return NULL;
+    }
+    im->chunk_owner[i] = im->wr;
+    st->chunks[st->nchunks++] = i;
+    st->fill = 0;
+  }
+  *pos = (uint32_t)(st->nchunks - 1) * PANEL_CHUNK_BYTES + st->fill;
+  *cap = (int)(PANEL_CHUNK_BYTES - st->fill);
+  return im->chunk_mem[st->chunks[st->nchunks - 1]] + st->fill;
+}
+
+/* the hidden copy is drawn anew: its pieces are free to fill again */
+static void panel_begin(Img16 *im, const MenuModel *m) {
+  int s = im->rd == 0 ? 1 : 0;
+  RleStream *st = &im->stream[s];
+  for (int i = 0; i < PANEL_CHUNKS; i++)
+    if (im->chunk_owner[i] == s)
+      im->chunk_owner[i] = -1;
+  st->nchunks = 0;
+  st->fill = st->used = 0;
+  st->rows = 0;
+  st->version++;
+  for (int i = 0; i < JV_NUM_SLOTS; i++)
+    st->refs[i] = m->slots[i].thumb;
+  __sync_synchronize();
+  im->wr = s;
+}
+
+/* the copy just drawn is complete: it is the one shown from now on */
+static void panel_commit(Img16 *im) {
+  RleStream *st = &im->stream[im->wr];
+  int blocks = 0;
+  for (int i = 0; i < PANEL_CHUNKS; i++)
+    blocks += im->chunk_mem[i] != NULL;
+  g_panel_stat_bytes = st->used;
+  g_panel_stat_blocks = blocks;
+  __sync_synchronize();
+  im->rd = im->wr;
+}
+
+/* Stores rendered band rows (32-bit, image rows y0 ..) in a 16-bit image:
+ * every pixel as RGB565 (nearest shade), the corners also 32-bit (alpha
+ * kept, colours rounded the same way). Only the corners may be
+ * see-through: anything else is shown opaque (noted once in log.txt).
+ * A compressed image stores the rows in its hidden copy, referring to the
+ * thumbnails of m where the rows equal them; -1 when memory ran out. */
+static int img_store_rows(Img16 *im, const uint32_t *band, int y0,
+                          int rows, RowSpan *blend, const MenuModel *m) {
   static int warned;
+  static uint16_t row16[MENU_W]; /* the drawing thread's */
   for (int r = 0; r < rows; r++) {
     int y = y0 + r;
     const uint32_t *src = band + r * im->w;
-    uint16_t *dst = img_row16(im, y);
+    uint16_t *dst = im->rle ? row16 : im->raw + y * im->w;
     for (int x = 0; x < im->w; x++)
       dst[x] = rgba_to_565_round(src[x]);
+    if (im->rle) {
+      Rle16Ref refs[JV_NUM_SLOTS];
+      int nrefs = 0;
+      if (m && y >= THUMB_Y && y < THUMB_Y + JV_THUMB_H)
+        for (int i = 0; i < JV_NUM_SLOTS; i++) {
+          refs[nrefs].base = m->slots[i].thumb;
+          refs[nrefs].off = (uint32_t)(y - THUMB_Y) * JV_THUMB_W;
+          refs[nrefs].x0 = THUMBS_X + i * (JV_THUMB_W + THUMB_GAP);
+          refs[nrefs].len = JV_THUMB_W;
+          refs[nrefs].idx = (uint8_t)i;
+          nrefs++;
+        }
+      uint32_t pos;
+      int cap;
+      uint8_t *out = panel_room(im, &pos, &cap);
+      if (!out)
+        return -1;
+      int n = rle16_encode_row(dst, im->w, refs, nrefs, out, cap);
+      if (n < 0)
+        return -1; /* cannot happen: the room is RLE16_MAX_BYTES */
+      RleStream *st = &im->stream[im->wr];
+      st->pos[y] = pos;
+      st->len[y] = (uint16_t)n;
+      st->fill += (uint32_t)n;
+      st->used += (uint32_t)n;
+      if ((uint32_t)n > g_panel_stat_maxrow)
+        g_panel_stat_maxrow = (uint32_t)n;
+      __sync_synchronize();
+      st->rows = y + 1;
+    }
     int e = img_edge(im, y);
     int lim = e >= 0 ? MENU_EDGE_COLS : 0;
     if (e >= 0) {
@@ -1345,6 +1539,7 @@ static void img_store_rows(Img16 *im, const uint32_t *band, int y0,
         blend[r].r = (uint16_t)lim;
     }
   }
+  return 0;
 }
 
 /* One stored (RGB565) row at the framebuffer's width, every pixel opaque:
@@ -1644,8 +1839,10 @@ static void render_panel(void) {
     }
 
     uint32_t t0 = prof_now();
-    int stopped = 0;
+    int stopped = 0, nomem = 0;
     g_render_active = 1;
+    if (!g_plane_mode)
+      panel_begin(&g_panel_img, &local);
     for (int y0 = 0; y0 < MENU_H; y0 += BAND_ROWS) {
       if (!g_overlay_ready || !g_menu_open) { /* closing: stop early */
         stopped = 1;
@@ -1664,7 +1861,12 @@ static void render_panel(void) {
         g_plane_panel = 1;
       } else {
         scan_blend_rows(&b, blend);
-        img_store_rows(&g_panel_img, g_band_px, y0, rows, blend);
+        if (img_store_rows(&g_panel_img, g_band_px, y0, rows, blend,
+                           &local) < 0) {
+          nomem = 1;
+          stopped = 1;
+          break;
+        }
         memcpy(&g_panel_blend[y0], blend, rows * sizeof(RowSpan));
       }
       __sync_synchronize();
@@ -1672,8 +1874,28 @@ static void render_panel(void) {
     g_render_active = 0;
     if (xi >= 0)
       __sync_fetch_and_sub(&g_ext_users[xi], 1);
+    if (nomem) {
+      /* no 64 KB piece for the menu image: the copy on screen stays as it
+       * is; with none on screen yet the menu closes (nothing to show) */
+      static uint32_t noted_gen;
+      if (noted_gen != gen) {
+        static char line[200];
+        noted_gen = gen;
+        snprintf(line, sizeof(line), "menu image: no memory for another "
+                 "64 KB piece while drawing it (%u KB stored) - %s\r\n",
+                 (unsigned)(g_panel_img.stream[g_panel_img.wr].used >> 10),
+                 g_panel_img.rd >= 0 ? "the menu keeps its previous picture"
+                                     : "the menu closed");
+        log_queue(line);
+      }
+      if (g_panel_img.rd < 0)
+        close_menu();
+      break;
+    }
     if (stopped)
       break;
+    if (!g_plane_mode)
+      panel_commit(&g_panel_img);
     prof_add(PROF_RENDER, t0);
     g_panel_seq = s1;
     __sync_synchronize();
@@ -1762,18 +1984,26 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       __sync_synchronize();
       if (g_model_seq == s1) {
         uint32_t t0 = prof_now();
+        int complete = 1;
+        panel_begin(&g_panel_img, &local);
         for (int y0 = 0; y0 < MENU_H; y0 += BAND_ROWS) {
           int rows = MENU_H - y0 < BAND_ROWS ? MENU_H - y0 : BAND_ROWS;
           Canvas b = { g_band_px, MENU_W, rows, y0 };
           menu_view_render(&b, &local);
           scan_blend_rows(&b, &g_panel_blend[y0]);
-          img_store_rows(&g_panel_img, g_band_px, y0, rows,
-                         &g_panel_blend[y0]);
+          if (img_store_rows(&g_panel_img, g_band_px, y0, rows,
+                             &g_panel_blend[y0], &local) < 0) {
+            complete = 0;
+            break;
+          }
         }
         prof_add(PROF_RENDER, t0);
         /* the render is complete (of the model at s1): show it now; if the
          * model changed meanwhile, the next frame renders again */
-        rendered_seq = s1;
+        if (complete) {
+          panel_commit(&g_panel_img);
+          rendered_seq = s1;
+        }
       }
       if (xi >= 0)
         __sync_fetch_and_sub(&g_ext_users[xi], 1);
@@ -1795,7 +2025,7 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
         menu_view_render_toast(&b, g_toast_msg, g_toast_err);
         scan_blend_rows(&b, &g_toast_blend[y0]);
         img_store_rows(&g_toast_img, g_toast_band, y0, rows,
-                       &g_toast_blend[y0]);
+                       &g_toast_blend[y0], NULL);
       }
     }
     compose(p, &g_toast_img, g_toast_blend, TOAST_X, TOAST_Y, 0);
@@ -2077,6 +2307,15 @@ static void perf_report(void) {
              g_fbd.excl, g_fbd.fmt, (unsigned)g_fbd.px_tl,
              (unsigned)g_fbd.px_menu, (unsigned)g_fbd.px_read);
     log_queue(line);
+    if (g_panel_stat_bytes) {
+      snprintf(line, sizeof(line), "    menu image: %u KB compressed (%u KB "
+               "raw) in %d pieces of 64 KB, longest row %u bytes\r\n",
+               (unsigned)((g_panel_stat_bytes + 1023) >> 10),
+               (unsigned)(MENU_W * MENU_H * 2 / 1024), g_panel_stat_blocks,
+               (unsigned)g_panel_stat_maxrow);
+      log_queue(line);
+      g_panel_stat_bytes = g_panel_stat_maxrow = 0;
+    }
     snprintf(line, sizeof(line),
              "    menu drawn over by the game before the next frame: %u of %u "
              "frames (%u of %u pixels changed, checked up to %u ms after "

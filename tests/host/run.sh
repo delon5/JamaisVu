@@ -95,6 +95,12 @@ gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_md5" \
   "$ROOT/tests/host/test_md5.c" "$ROOT/plugin/md5.c"
 "$WORK/test_md5" || rc=1
 
+gcc -O1 -g -Wall -Wextra -fsanitize=address,undefined \
+  -fno-sanitize-recover=undefined -I"$ROOT/plugin/gui" -o "$WORK/test_rle16" \
+  "$ROOT/tests/host/test_rle16.c" "$ROOT/plugin/gui/rle16.c"
+"$WORK/test_rle16" || rc=1
+echo
+
 for enums in "" "-fshort-enums"; do
   gcc -Wall -Wextra $enums -I"$ROOT/plugin" -o "$WORK/test_remap" \
     "$ROOT/tests/host/test_remap.c" "$ROOT/plugin/remap.c"
@@ -105,6 +111,7 @@ echo
 gcc -O2 -Wall -Wextra -fsanitize=address,undefined -I"$ROOT/plugin/gui" \
   -o "$WORK/test_render" "$ROOT/tests/host/test_render.c" \
   "$ROOT/plugin/gui/render.c" "$ROOT/plugin/gui/menu_view.c" \
+  "$ROOT/plugin/gui/rle16.c" \
   "$ROOT/plugin/gui/logo.c" \
   "$ROOT/plugin/gui/font_data.c" "$ROOT/plugin/gui/jpfont.c"
 "$WORK/test_render" "$ROOT/plugin/gui/jpfont.bin" || rc=1

@@ -11,6 +11,7 @@
 
 #include "menu_view.h"
 #include "jpfont.h"
+#include "rle16.h"
 
 static uint32_t ext_mem[EXT_SET_SIZE(EXT_BITMAP_SIZE) / 4];
 static ExtGlyphs *ext;
@@ -84,6 +85,59 @@ static int check_toast(const char *name, const char *msg, int err) {
   if (!opaque_but_corners(name, tw, TOAST_W, TOAST_H))
     return 1;
   printf("  %s: identical in bands, opaque but the corners\n", name);
+  return 0;
+}
+
+/* The menu image as the plugin stores it: 16-bit rows, compressed, the
+ * thumbnails referred to rather than copied. Decoding must give the very
+ * 16-bit row back; the total is what the kernel pool pays for the image. */
+static int check_compressed(const char *name, const MenuModel *m) {
+  static uint8_t enc[RLE16_MAX_BYTES(MENU_W)];
+  static uint16_t row[MENU_W], dec[MENU_W];
+  const uint16_t *bases[JV_NUM_SLOTS];
+  Canvas c = { whole, MENU_W, MENU_H, 0 };
+  int total = 0, worst = 0;
+
+  menu_view_render(&c, m);
+  for (int i = 0; i < JV_NUM_SLOTS; i++)
+    bases[i] = m->slots[i].thumb;
+  for (int y = 0; y < MENU_H; y++) {
+    Rle16Ref refs[JV_NUM_SLOTS];
+    int nrefs = 0;
+    for (int x = 0; x < MENU_W; x++)
+      row[x] = rgba_to_565_round(whole[y * MENU_W + x]);
+    if (y >= THUMB_Y && y < THUMB_Y + JV_THUMB_H)
+      for (int i = 0; i < JV_NUM_SLOTS; i++) {
+        refs[nrefs].base = m->slots[i].thumb;
+        refs[nrefs].off = (uint32_t)(y - THUMB_Y) * JV_THUMB_W;
+        refs[nrefs].x0 = THUMBS_X + i * (JV_THUMB_W + THUMB_GAP);
+        refs[nrefs].len = JV_THUMB_W;
+        refs[nrefs].idx = (uint8_t)i;
+        nrefs++;
+      }
+    int n = rle16_encode_row(row, MENU_W, refs, nrefs, enc, sizeof(enc));
+    if (n < 0) {
+      printf("  %s: row %d would not encode\n", name, y);
+      return 1;
+    }
+    if (rle16_decode_row(enc, n, dec, MENU_W, bases, JV_NUM_SLOTS,
+                         JV_THUMB_W * JV_THUMB_H) != 0 ||
+        memcmp(row, dec, sizeof(row)) != 0) {
+      printf("  %s: row %d differs after decoding\n", name, y);
+      return 1;
+    }
+    total += n;
+    if (n > worst)
+      worst = n;
+  }
+  printf("  %s: compressed %d KB of %d KB raw, longest row %d bytes - "
+         "decodes identical\n", name, (total + 1023) / 1024,
+         MENU_W * MENU_H * 2 / 1024, worst);
+  /* the budget the plugin counts on: one 64 KB block holds a menu */
+  if (total > 60 * 1024) {
+    printf("  %s: over 60 KB\n", name);
+    return 1;
+  }
   return 0;
 }
 
@@ -275,6 +329,28 @@ int main(int argc, char **argv) {
     m.selected = s;
     snprintf(name, sizeof(name), "browse, slot %d", s + 1);
     rc |= check(name, &m);
+  }
+  printf("=== menu image compressed (thumbnails by reference) ===\n");
+  for (int s = 0; s < JV_NUM_SLOTS; s++) {
+    char name[32];
+    m.selected = s;
+    snprintf(name, sizeof(name), "browse, slot %d", s + 1);
+    rc |= check_compressed(name, &m);
+  }
+  {
+    /* every slot used and locked over its thumbnail: the most text */
+    MenuModel full = m;
+    for (int i = 0; i < JV_NUM_SLOTS; i++) {
+      full.slots[i].used = 1;
+      full.slots[i].thumb = thumbs[i];
+    }
+    rc |= check_compressed("browse, five thumbnails", &full);
+    for (int i = 0; i < JV_NUM_SLOTS; i++) {
+      full.slots[i].used = 0;
+      full.slots[i].thumb = NULL;
+      full.slots[i].locked = 1;
+    }
+    rc |= check_compressed("browse, five locked slots", &full);
   }
   m.selected = 1;
   m.swap_ox = 1;

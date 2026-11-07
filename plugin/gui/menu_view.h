@@ -31,6 +31,14 @@
 #define MENU_X ((JV_SCREEN_W - MENU_W) / 2)
 #define MENU_Y ((JV_SCREEN_H - MENU_H) / 2)
 
+/* where the slot thumbnails lie in the menu image (slot i at
+ * THUMBS_X + i * (JV_THUMB_W + THUMB_GAP), THUMB_Y), drawn 1:1: the stored
+ * image refers to the thumbnails instead of holding their pixels again */
+#define THUMB_Y    70
+#define THUMB_GAP  12
+#define THUMBS_X   ((MENU_W - (JV_NUM_SLOTS * JV_THUMB_W + \
+                              (JV_NUM_SLOTS - 1) * THUMB_GAP)) / 2)
+
 #define TOAST_W 560
 #define TOAST_H 56
 #define TOAST_X ((JV_SCREEN_W - TOAST_W) / 2)

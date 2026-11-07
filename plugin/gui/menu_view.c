@@ -30,10 +30,6 @@
 #define C_BAR_BG     RGBA(200, 208, 220, 255)
 
 #define HEADER_H   52
-#define THUMB_Y    70
-#define THUMB_GAP  12
-#define THUMBS_X   ((MENU_W - (JV_NUM_SLOTS * JV_THUMB_W + \
-                              (JV_NUM_SLOTS - 1) * THUMB_GAP)) / 2)
 #define TITLE_Y    184
 #define INFO_Y     218
 #define FOOTER_Y   252

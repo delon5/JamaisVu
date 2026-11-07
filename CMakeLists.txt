@@ -46,6 +46,7 @@ add_executable(JamaisVu
   plugin/trace.c
   plugin/hwdump.c
   plugin/gui/render.c
+  plugin/gui/rle16.c
   plugin/gui/menu_view.c
   plugin/gui/logo.c
   plugin/gui/font_data.c
