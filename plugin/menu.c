@@ -435,6 +435,7 @@ static struct {
 #define CHK_N 32
 static struct {
   uintptr_t base;
+  SceUID pid; /* the frame's process: its address space */
   int n;
   int64_t t;
   uint32_t off[CHK_N], val[CHK_N];
@@ -529,18 +530,8 @@ static void record_frame(const SceDisplayFrameBuf *p) {
   g_fb_bad_off = 0;
   g_fb_method = 0;
 
-  /* CPU translations with the domains open (the kernel keeps the user
-   * domain at "no access"), interrupts off, no kernel calls meanwhile */
-  __asm__ volatile("mrs %0, cpsr\n\tcpsid if" : "=r"(cpsr) :: "memory");
-  __asm__ volatile("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
-  __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(0xFFFF0000u)
-                   : "memory");
-  g_fb_par_priv = ats(base, 0);
-  g_fb_par_user = ats(base, 1);
-  __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(dacr) : "memory");
-  __asm__ volatile("msr cpsr_c, %0" :: "r"(cpsr) : "memory");
-
-  /* the kernel's own translations */
+  /* the kernel's own translations first (used on every console so far,
+   * "used method 3") */
   {
     uintptr_t pa = 0;
     void *spa = NULL;
@@ -549,16 +540,31 @@ static void record_frame(const SceDisplayFrameBuf *p) {
     g_fb_sw_ret = g_va2pa_sw ? g_va2pa_sw((const void *)base, &spa) : -1;
     g_fb_sw_pa = (uint32_t)(uintptr_t)spa;
   }
+  g_fb_par_priv = g_fb_par_user = 1; /* "fault": not probed */
 
   int m = 0;
-  if (!(g_fb_par_priv & 1))
-    m = 1;
-  else if (!(g_fb_par_user & 1))
-    m = 2;
-  else if (g_fb_hw_ret >= 0 && g_fb_hw_pa)
+  if (g_fb_hw_ret >= 0 && g_fb_hw_pa)
     m = 3;
   else if (g_fb_sw_ret >= 0 && g_fb_sw_pa)
     m = 4;
+  else {
+    /* Only without them: CPU translations with the domains open (the
+     * kernel keeps the user domain at "no access"), interrupts off, no
+     * kernel calls meanwhile - a privileged trick kept as the fallback */
+    __asm__ volatile("mrs %0, cpsr\n\tcpsid if" : "=r"(cpsr) :: "memory");
+    __asm__ volatile("mrc p15, 0, %0, c3, c0, 0" : "=r"(dacr));
+    __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(0xFFFF0000u)
+                     : "memory");
+    g_fb_par_priv = ats(base, 0);
+    g_fb_par_user = ats(base, 1);
+    __asm__ volatile("mcr p15, 0, %0, c3, c0, 0\n\tisb" :: "r"(dacr)
+                     : "memory");
+    __asm__ volatile("msr cpsr_c, %0" :: "r"(cpsr) : "memory");
+    if (!(g_fb_par_priv & 1))
+      m = 1;
+    else if (!(g_fb_par_user & 1))
+      m = 2;
+  }
   g_fb_method = m;
 
   if (m) {
@@ -1212,6 +1218,7 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
       }
     }
     g_chk.base = (uintptr_t)p->base;
+    g_chk.pid = ksceKernelGetProcessId();
     g_chk.t = now_us();
     __sync_synchronize();
     g_chk.n = n;
@@ -1396,10 +1403,22 @@ static void drawn_over_check(uintptr_t next_base) {
   int n = g_chk.n;
   if (!n || !g_chk.base || g_chk.base == next_base)
     return;
+  /* the recorded addresses belong to the process that submitted that
+   * frame; from another process (LiveArea <-> game with the menu open)
+   * they mean nothing - and a cache operation on an unmapped address
+   * faults in kernel mode, so the guarded copy comes first */
+  if (g_chk.pid != ksceKernelGetProcessId()) {
+    g_chk.n = 0;
+    return;
+  }
   uint32_t changed = 0;
   for (int i = 0; i < n; i++) {
     uint32_t v;
     uint32_t *a = (uint32_t *)g_chk.base + g_chk.off[i];
+    if (jv_copy_from_user(&v, a, 4) < 0) { /* mapped? */
+      g_chk.n = 0;
+      return;
+    }
     fb_cache_sync(a, 4);
     if (jv_copy_from_user(&v, a, 4) < 0) {
       g_chk.n = 0;
@@ -1726,6 +1745,7 @@ static void close_menu(void) {
   if (g_menu_open)
     perf_report(); /* this menu session's numbers, frames included */
   g_menu_open = 0;
+  g_chk.n = 0; /* never checked against the next menu session's frames */
   g_capture_req = 0;
   g_block_input_until = now_us() + 300000;
 }
