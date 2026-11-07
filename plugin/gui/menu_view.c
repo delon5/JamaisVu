@@ -54,6 +54,11 @@ static void u_to_dec(char *out, unsigned v, int digits) {
 }
 
 
+/* a slot number as written on its badge and in prompts: 1..9, then 10.. */
+static void slot_num(char *out, unsigned v) {
+  u_to_dec(out, v, v < 10 ? 1 : 2);
+}
+
 static void draw_counter(Canvas *c, const MenuModel *m) {
   char buf[32] = "SLOT ";
   char num[8];
@@ -85,7 +90,7 @@ static void draw_slot(Canvas *c, const MenuModel *m, int i) {
   int y = THUMB_Y;
   int sel = (i == sel_pos(m));
   char num[8];
-  u_to_dec(num, (unsigned)(slot_at(m, i) + 1), 2);
+  slot_num(num, (unsigned)(slot_at(m, i) + 1));
 
   if (sel) {
     cv_round_rect(c, x - 9, y - 9, JV_THUMB_W + 18, JV_THUMB_H + 18, 10,
@@ -220,7 +225,7 @@ static void draw_details(Canvas *c, const MenuModel *m) {
   const MenuSlot *s = &m->slots[sel_pos(m)];
   char prompt[96];
   char num[8];
-  u_to_dec(num, m->total ? (unsigned)(m->selected + 1) : 0, 2);
+  slot_num(num, m->total ? (unsigned)(m->selected + 1) : 0);
 
   switch (m->mode) {
     case MV_BROWSE:
