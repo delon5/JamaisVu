@@ -119,10 +119,6 @@ void jv_clocks_restore(char *out, int len) {
            a, c);
 }
 
-uint32_t jv_last_process_num(void) {
-  return pargs.process_num;
-}
-
 const char *jv_build_id(void) {
 #if defined(JAMAISVU_TESTING)
   return JV_BUILD_ID "-testing";
@@ -150,6 +146,10 @@ static uint32_t *g_rtc_ctx;
 uint32_t ori_resume_func_vaddr;
 
 PayloadArguments pargs;
+
+uint32_t jv_last_process_num(void) {
+  return pargs.process_num;
+}
 uint32_t pargs_size = sizeof(PayloadArguments);
 
 static int g_armed = 0;
