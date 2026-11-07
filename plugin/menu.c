@@ -2740,9 +2740,10 @@ static void fs_notes_log(void) {
   static char line[300];
   const FsLoadNotes *f = &g_fs_notes;
   snprintf(line, sizeof(line), "    open files after the load: %u gone (%u "
-           "entries freed, %u held open), %u changed size\r\n",
-           (unsigned)f->gone, (unsigned)f->freed, (unsigned)f->held,
-           (unsigned)f->resized);
+           "entries freed, %u held open, %u left to the kernel), %u changed "
+           "size, %u entries busy (left)\r\n", (unsigned)f->gone,
+           (unsigned)f->freed, (unsigned)f->held, (unsigned)f->left,
+           (unsigned)f->resized, (unsigned)f->busy);
   log_append(line);
   for (uint32_t i = 0; i < f->n && i < FS_NOTE_MAX; i++) {
     const FsNote *e = &f->note[i];
@@ -2750,7 +2751,8 @@ static void fs_notes_log(void) {
       snprintf(line, sizeof(line), "      gone: %s%s (refs %u, lookup "
                "0x%08X, entry %s)\r\n", e->drive, e->path,
                (unsigned)e->refs, (unsigned)e->res,
-               e->freed ? "freed" : "kept, drive read-only");
+               e->freed ? "freed" : e->refs ? "kept, drive read-only"
+                                            : "left to the kernel");
     else
       snprintf(line, sizeof(line), "      size: %s%s %llu -> %llu bytes "
                "(refs %u)\r\n", e->drive, e->path,

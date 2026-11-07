@@ -87,6 +87,10 @@ gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_slot_policy" \
   "$ROOT/tests/host/test_slot_policy.c" "$ROOT/plugin/slot_policy.c"
 "$WORK/test_slot_policy" || rc=1
 
+gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_fs_policy" \
+  "$ROOT/tests/host/test_fs_policy.c" "$ROOT/plugin/fs_policy.c"
+"$WORK/test_fs_policy" || rc=1
+
 gcc -Wall -Wextra -I"$ROOT/plugin" -o "$WORK/test_md5" \
   "$ROOT/tests/host/test_md5.c" "$ROOT/plugin/md5.c"
 "$WORK/test_md5" || rc=1

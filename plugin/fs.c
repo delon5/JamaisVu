@@ -17,10 +17,42 @@
 #include "main.h"
 #include "trace.h"
 #include "fs.h"
+#include "fs_policy.h"
 #include "storage.h"
 #include "prof.h"
 
 int ksceVopInactive(void *vp);
+int ksceKernelGetThreadId(void);
+
+/* The kernel's vnode lock (SceVfsVnode.vdlock, psp2kern/vfs.h): owner_id at
+ * vp+4 is -1 when free and the owning thread's ID when taken; the kernel's
+ * own try-lock (3.60 SceIofilemgr text+0xc380) is one compare-and-swap on
+ * it, replicated here. Unlocking is left to the kernel's exported
+ * vfsUnlockVnode (waiters are woken there); vfsFreeVnode releases the lock
+ * itself when the caller holds it (text+0xbd70), as the kernel's unmount
+ * reaper (text+0xc620) relies on: lock -> ref 0 -> inactive -> free. */
+static int (* vfs_unlock_vnode)(void *vp);
+
+static int vnode_try_lock(void *vp) {
+  volatile uint32_t *owner = (volatile uint32_t *)((uintptr_t)vp + 4);
+  uint32_t me = (uint32_t)ksceKernelGetThreadId();
+  if (__sync_bool_compare_and_swap(owner, 0xFFFFFFFFu, me)) {
+    __sync_synchronize();
+    return 0;
+  }
+  return -1;
+}
+
+/* up to ~200 ms per entry (an entry in use by a thread that is itself
+ * waiting for the card would otherwise stall the whole wake-up) */
+static int vnode_lock(void *vp) {
+  for (int i = 0; i < 200; i++) {
+    if (vnode_try_lock(vp) == 0)
+      return 0;
+    ksceKernelDelayThread(1000);
+  }
+  return -1;
+}
 /* Resolved at runtime: its stub name differs between VitaSDK versions
  * (ksceVfsFreeVnode / vfsFreeVnode). */
 static int (* vfs_free_vnode)(void *vp);
@@ -350,48 +382,92 @@ void fs_vnode_usage(uint32_t *total, uint32_t *with_file, uint32_t *held) {
 
 /* Returns the number of files that are still open but no longer exist on
  * the card. Their cached cluster chains are stale; writing through them
- * could overwrite other files. */
+ * could overwrite other files.
+ *
+ * Every entry is handled under its vnode lock, and the decision is taken
+ * from fields re-read under that lock (fs_vnode_action): the rest of the
+ * system is running meanwhile, and with the table nearly full (GTA: San
+ * Andreas on the PS TV, 1021 of 1024) the kernel's reclaim recycles exactly
+ * the unreferenced exFAT entries this walk goes through - dejavu's unlocked
+ * read-then-free could give back an entry the kernel had just reused. */
 static int update_vnodes(uint32_t only) {
   int stale_open = 0;
   int num = *g_num_vnodes;
   for (int i = 0; i < num; i++) {
     void *vp = (void *)(*g_vnodes + *g_vnode_size * i);
     void *nodeData = *(uintptr_t **)(vp + 0x48);
-    uint32_t refCount = *(uint32_t *)(vp + 0x58);
     void *fnode = *(uintptr_t **)(vp + 0x60);
 
-    if (fnode && fnode == nodeData && fs_wanted(fnode_fs(fnode), only)) {
-      int looked_up;
-      int res = update_fnode(fnode, &looked_up);
-      int idx = fnode_index(fnode);
-      if (looked_up && idx >= 0)
-        g_fnode_done[idx / 32] |= 1u << (idx % 32);
-      if (res < 0) {
-        g_fs_notes.gone++;
-        note_file(fnode, refCount, res, refCount == 0, 0, 0);
-        if (refCount == 0) {
-          g_fs_notes.freed++;
-          void *nc = *(uintptr_t **)(vp + 0x70);
-          if (nc)
-            clear_ncache(nc, 0);
-          ksceVopInactive(vp);
-          vfs_free_vnode(vp);
-        } else {
-          g_fs_notes.held++;
-          stale_open++;
-          const char *nm = fs_name(fnode_fs(fnode));
-          ro_add(nm ? nm : "?");
-        }
-      } else if (res != FNODE_UNUSED) {
-        uint64_t was = *(uint64_t *)(vp + 0x80);
-        uint64_t now = *(uint64_t *)(fnode + 0x218);
-        if (was != now) {
-          g_fs_notes.resized++;
-          note_file(fnode, refCount, res, 0, was, now);
-        }
-        *(uint64_t *)(vp + 0x80) = *(uint64_t *)(fnode + 0x218);
-      }
+    /* a quick look without the lock: only exFAT entries on wanted drives */
+    if (!fnode || fnode != nodeData || !fs_wanted(fnode_fs(fnode), only))
+      continue;
+    if (vnode_lock(vp) < 0) {
+      g_fs_notes.busy++;
+      continue;
     }
+    /* again, under the lock: the entry may have been reused meanwhile */
+    nodeData = *(uintptr_t **)(vp + 0x48);
+    fnode = *(uintptr_t **)(vp + 0x60);
+    if (!fnode || fnode != nodeData || !fs_wanted(fnode_fs(fnode), only)) {
+      vfs_unlock_vnode(vp);
+      continue;
+    }
+
+    int looked_up;
+    int res = update_fnode(fnode, &looked_up);
+    int idx = fnode_index(fnode);
+    if (looked_up && idx >= 0)
+      g_fnode_done[idx / 32] |= 1u << (idx % 32);
+
+    uint32_t refCount = *(uint32_t *)(vp + 0x58);
+    uint32_t state = *(uint32_t *)(vp + 0x74);
+    uint32_t type = *(uint32_t *)(vp + 0x78);
+    JvVnodeAction act = res == FNODE_UNUSED
+                            ? JV_VN_LEAVE
+                            : fs_vnode_action(res, looked_up, refCount, state,
+                                              type);
+    switch (act) {
+    case JV_VN_FREE:
+      g_fs_notes.gone++;
+      g_fs_notes.freed++;
+      note_file(fnode, refCount, res, 1, 0, 0);
+      {
+        void *nc = *(uintptr_t **)(vp + 0x70);
+        if (nc)
+          clear_ncache(nc, 0);
+      }
+      ksceVopInactive(vp);
+      vfs_free_vnode(vp); /* releases the lock we hold (see vnode_try_lock) */
+      continue;
+    case JV_VN_HOLD_RO: {
+      g_fs_notes.gone++;
+      g_fs_notes.held++;
+      note_file(fnode, refCount, res, 0, 0, 0);
+      stale_open++;
+      const char *nm = fs_name(fnode_fs(fnode));
+      ro_add(nm ? nm : "?");
+      break;
+    }
+    case JV_VN_REFRESH: {
+      uint64_t was = *(uint64_t *)(vp + 0x80);
+      uint64_t now = *(uint64_t *)(fnode + 0x218);
+      if (was != now) {
+        g_fs_notes.resized++;
+        note_file(fnode, refCount, res, 0, was, now);
+      }
+      *(uint64_t *)(vp + 0x80) = now;
+      break;
+    }
+    case JV_VN_LEAVE:
+    default:
+      if (res != FNODE_UNUSED) {
+        g_fs_notes.left++;
+        if (res < 0 && looked_up)
+          note_file(fnode, refCount, res, 0, 0, 0);
+      }
+      break;
+    }
+    vfs_unlock_vnode(vp);
   }
   return stale_open;
 }
@@ -758,6 +834,9 @@ int fs_init(const FwOffsets *o) {
   if (module_get_export_func(KERNEL_PID, "SceIofilemgr", 0x40FD29C7,
                              0x21D57633, (uintptr_t *)&vfs_free_vnode) < 0)
     return -1;
+  if (module_get_export_func(KERNEL_PID, "SceIofilemgr", 0x40FD29C7,
+                             0x6048F245, (uintptr_t *)&vfs_unlock_vnode) < 0)
+    return -1; /* vfsUnlockVnode */
 
   g_write_hook = taiHookFunctionOffsetForKernel(KERNEL_PID,
                                                 &UVFAT_WriteDevice_Ref,

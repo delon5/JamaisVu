@@ -88,6 +88,9 @@ typedef struct {
 } FsNote;
 typedef struct {
   uint32_t gone, freed, held, resized;
+  uint32_t busy; /* entries whose lock could not be taken in 200 ms: left */
+  uint32_t left; /* gone but not freed (state/type, or the drive lock
+                    failed): left to the kernel */
   uint32_t n;
   FsNote note[FS_NOTE_MAX];
 } FsLoadNotes;

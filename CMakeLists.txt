@@ -26,6 +26,7 @@ add_custom_command(OUTPUT ${JamaisVu_payload_object}
 add_executable(JamaisVu
   plugin/main.c
   plugin/fs.c
+  plugin/fs_policy.c
   plugin/offsets.c
   plugin/slots.c
   plugin/md5.c
