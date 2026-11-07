@@ -3801,6 +3801,18 @@ static void do_overlay_test(void) {
   close_menu(); /* from here on layer 0 is the game alone */
   ksceKernelDelayThread(200 * 1000);
 
+  /* 96eb617 (PCH-1000): the buffer was accepted on layer 1 (every call
+   * returned 0) but nothing showed - the plane is only composited while
+   * the head's "merge" (overlay blending) is on, which the shell switches
+   * on for its own transitions. SceDisplayForDriver: SetMergeConf (0x80
+   * = off, else on; alpha 0x100 = the pixels' own) and SetOwner. */
+  int (*set_merge)(int head, int control, uint32_t alpha) = NULL;
+  int (*set_owner)(int head, int index, SceUID pid) = NULL;
+  module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0x6B198052,
+                         (uintptr_t *)&set_merge);
+  module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0xB54962A1,
+                         (uintptr_t *)&set_owner);
+
   SceDisplayFrameBuf fb;
   memset(&fb, 0, sizeof(fb));
   fb.size = sizeof(fb);
@@ -3809,22 +3821,33 @@ static void do_overlay_test(void) {
   fb.pixelformat = 0; /* SCE_DISPLAY_PIXELFORMAT_A8B8G8R8 */
   fb.width = W;
   fb.height = H;
+  /* phase A: blending on, the buffer on layer 1, 5 s */
+  int rm = set_merge ? set_merge(head, 0, 0x100) : -1;
   int r1 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
   ksceKernelDelayThread(5 * 1000 * 1000);
+  /* phase B: the plane claimed for the kernel as well, 5 s more */
+  int ro = set_owner ? set_owner(head, 1, KERNEL_PID) : -1;
+  int r1b = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
+  ksceKernelDelayThread(5 * 1000 * 1000);
+  /* back: transparent, blending off, layer off */
   memset(px, 0, bytes);
   for (uint32_t off = 0; off < bytes; off += 0x8000)
     fb_cache_sync((uint8_t *)px + off, bytes - off > 0x8000 ? 0x8000
                                                               : bytes - off);
   int r2 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
-  ksceKernelDelayThread(1000 * 1000);
+  ksceKernelDelayThread(500 * 1000);
+  int rm2 = set_merge ? set_merge(head, 0x80, 0) : -1;
   int r3 = ksceDisplaySetFrameBufInternal(head, 1, NULL, 1);
   ksceKernelDelayThread(200 * 1000);
   ksceKernelFreeMemBlock(uid);
   snprintf(line, sizeof(line), "overlay test: head %d layer 1, %ux%u ARGB "
-           "buffer (%u KB) in %s: shown -> 0x%08X (held 5 s), made "
-           "transparent -> 0x%08X, layer off (NULL) -> 0x%08X\r\n", head,
-           (unsigned)W, (unsigned)H, (unsigned)(size >> 10), names[ti],
-           (unsigned)r1, (unsigned)r2, (unsigned)r3);
+           "buffer (%u KB) in %s: blending on -> 0x%08X, shown -> 0x%08X "
+           "(5 s); owner -> 0x%08X, shown again -> 0x%08X (5 s); made "
+           "transparent -> 0x%08X, blending off -> 0x%08X, layer off (NULL) "
+           "-> 0x%08X\r\n", head, (unsigned)W, (unsigned)H,
+           (unsigned)(size >> 10), names[ti], (unsigned)rm, (unsigned)r1,
+           (unsigned)ro, (unsigned)r1b, (unsigned)r2, (unsigned)rm2,
+           (unsigned)r3);
   log_append(line);
 }
 
