@@ -2619,10 +2619,15 @@ static void after_resume(void) {
     if (g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_LOAD &&
         g_res_result == JV_OK) {
       uint32_t bad = canary_bad();
-      snprintf(line, sizeof(line), "    memory canary after the load: %u "
-               "of %u words %s\r\n", (unsigned)bad, (unsigned)CANARY_WORDS,
-               bad ? "NOT the snapshot's (memory not restored, or a stale "
-                     "cache line)" : "as saved");
+      if (bad)
+        snprintf(line, sizeof(line), "    memory canary after the load: %u "
+                 "of %u words NOT the snapshot's (memory not restored, or "
+                 "a stale cache line)\r\n", (unsigned)bad,
+                 (unsigned)CANARY_WORDS);
+      else
+        snprintf(line, sizeof(line), "    memory canary after the load: "
+                 "intact (all %u words as saved)\r\n",
+                 (unsigned)CANARY_WORDS);
       log_append(line);
     }
     if (g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_SAVE) {

@@ -336,7 +336,7 @@ typedef struct {
   int n_ext;
   uint32_t size;       /* slot file size in bytes */
   uint32_t pos;        /* current byte position */
-  uint32_t max_chunk;  /* sectors per card write (= cluster size) */
+  uint32_t max_chunk;  /* sectors per card write */
   int crc_on;
   uint32_t crc;
   uint8_t __attribute__((aligned(64))) stage[SECTOR_SIZE];
@@ -474,7 +474,9 @@ static int slot_open(FATFS *fs, const char *path) {
   }
 
   g_slot.size = pargs->slot_size;
-  g_slot.max_chunk = fs->csize;
+  /* one card command per write (ms.c splits above 128 sectors anyway);
+   * was the cluster size, i.e. twice the commands for the same bytes */
+  g_slot.max_chunk = 128;
   remaining = g_slot.size / SECTOR_SIZE;
 
   for (DWORD *t = &clmt[1]; *t != 0 && remaining > 0; t += 2) {
