@@ -100,12 +100,11 @@ The original README warned that *"your SD Card and/or Memory Card may be corrupt
 
 **Nothing is written until the whole file has been checked.** Before a load touches the card, it verifies:
 - the header CRC and body CRC
-- the table of per-segment CRCs (format 3 slots; slots from earlier builds, format 2, still load)
 - every savedata path (only `ux0:user/00/savedata/<TITLEID>/…`; no `..`)
 - every memory segment (only DRAM/VRAM and the two known system regions)
 - that the state was made on the same Memory Card
 
-A corrupted or tampered state is rejected with nothing changed. While the memory is being restored, every segment is checked against its CRC as it is read: a slot damaged in its data stops the load on the halt screen (naming the segment in `log.txt`) instead of waking a half-correct image.
+A corrupted or tampered state is rejected with nothing changed. (The memory contents themselves carry no checksum: the payload runs with the data cache off, and a CPU pass over the whole image would take minutes. The card's own error correction covers the medium.)
 
 **Load writes are fenced.**
 - Savedata restore can only write inside ux0's exFAT area, never the partition table or boot sectors.

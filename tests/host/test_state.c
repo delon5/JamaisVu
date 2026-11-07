@@ -30,11 +30,10 @@
 #include "ms.h"
 #include "ff.h"
 
-/* Compatibility guard: snapshots saved by earlier builds (formats 2 and 3)
- * must still load after an update. If the format changes, keep a load path
- * for every older version (the "format 2 slot" test below exercises 2) and
- * extend this check instead of just bumping the number. */
-_Static_assert(SAVESTATE_VERSION == 3,
+/* Compatibility guard: snapshots saved by earlier builds (format 2) must
+ * still load after an update. If the format changes, keep a load path for
+ * version 2 and extend this check instead of just bumping the number. */
+_Static_assert(SAVESTATE_VERSION == 2,
                "snapshot format changed: old slots must stay loadable");
 
 /* PayloadArguments is read after a load by the plugin build *inside the
@@ -560,24 +559,6 @@ static void t_path_len(uint8_t *st) {
 
 static void t_none(uint8_t *st) { (void)st; }
 
-/* offset of the format 3 segment CRC table */
-static uint32_t segcrc_offset(const uint8_t *st) {
-  const SaveStateHeader *h = (const SaveStateHeader *)st;
-  return (h->data_offset + h->data_size + 511u) & ~511u;
-}
-/* the same slot as an older build would have written it (format 2) */
-static void t_as_v2(uint8_t *st) {
-  SaveStateHeader *h = (SaveStateHeader *)st;
-  h->version = 2;
-  memset(st + segcrc_offset(st), 0, (h->segs_num + 1) * 4);
-  refresh_crcs(st);
-}
-static void t_flip_segcrc(uint8_t *st) { st[segcrc_offset(st) + 1] ^= 0x01; }
-static void t_flip_data(uint8_t *st) {
-  const SaveStateHeader *h = (const SaveStateHeader *)st;
-  st[h->data_offset + h->data_size / 2] ^= 0x01;
-}
-
 /* ------------------------------------------------------------------------ */
 
 int main(int argc, char **argv) {
@@ -740,51 +721,6 @@ int main(int argc, char **argv) {
   ((master_block_t *)card)->partitions[0].code = 0;
   expect_rejected("no mediaid partition", slot, state_copy, slot_size, t_none, JV_ERR_MEDIAID);
   ((master_block_t *)card)->partitions[0].code = 0xd;
-  expect_rejected("damaged segment CRC table", slot, state_copy, slot_size, t_flip_segcrc, JV_ERR_BAD_STATE);
-
-  /* --- Segment CRCs and older formats ----------------------------------- */
-  printf("segment CRCs (format 3) and format 2 slots\n");
-  {
-    static uint8_t tmp[16 * 1024 * 1024];
-    const SaveStateHeader *h = (const SaveStateHeader *)state_copy;
-    CHECK(h->version == 3, "new slots are format 3");
-    CHECK(segcrc_offset(state_copy) + (h->segs_num + 1) * 4 <= slot_size,
-          "segment CRC table inside the slot");
-
-    /* a format 2 slot (no CRC table) loads exactly like before */
-    memcpy(tmp, state_copy, slot_size);
-    t_as_v2(tmp);
-    write_state(slot, tmp, slot_size);
-    fill_pattern(0xeeee);
-    snapshot_card();
-    reset_args(JAMAISVU_MODE_LOAD, slot, 0);
-    mount();
-    res = load_state(&fs, slot);
-    unmount();
-    printf("  %-44s -> %d\n", "format 2 slot", res);
-    CHECK(res == JV_OK, "format 2 slot must load: %d", res);
-    CHECK(ram_equal(ram_a), "format 2 slot: memory not restored");
-
-    /* a flipped byte in the memory image is caught by its segment's crc:
-     * the load has started (applied) and stops, naming the segment */
-    memcpy(tmp, state_copy, slot_size);
-    t_flip_data(tmp);
-    write_state(slot, tmp, slot_size);
-    fill_pattern(0xeeee);
-    snapshot_card();
-    reset_args(JAMAISVU_MODE_LOAD, slot, 0);
-    mount();
-    res = load_state(&fs, slot);
-    unmount();
-    printf("  %-44s -> %d (applied=%u, detail=%d)\n", "flipped memory byte",
-           res, args.applied, args.detail);
-    CHECK(res == JV_ERR_BAD_STATE, "flipped memory byte: %d", res);
-    CHECK(args.applied == 1, "flipped memory byte: load had started");
-    CHECK(args.detail >= 0 && (uint32_t)args.detail < h->segs_num,
-          "flipped memory byte: detail names a segment");
-    write_state(slot, state_copy, slot_size); /* restore */
-  }
-
   /* --- Save failure modes ------------------------------------------------ */
   printf("save failure modes\n");
   {

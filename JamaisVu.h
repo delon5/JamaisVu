@@ -312,17 +312,13 @@ typedef struct {
   uint32_t reserved;
 } SaveStateFile;
 
-/* Savestate file layout (version 3; version 2 is the same without the
- * segment CRC table and still loads):
+/* Savestate file layout (version 2):
  *   [0x000, 0x200)            SaveStateHeader (rest of the sector is zero)
  *   [0x200, 0x400)            copy of the mediaid sector
  *   [files_offset, +files_size)    SaveStateFile records (savedata backup)
  *   [segtab_offset, +segtab_size)  Segment table
  *   zero padding up to data_offset (sector aligned)
  *   [data_offset, +data_size)       memory contents, in segment table order
- *   zero padding up to the next sector
- *   segs_num + 1 uint32_t          crc32 of each segment's bytes, then the
- *                                  crc32 of that table (version 3)
  *
  * body_crc covers [0x200, data_offset). The header is written last, so an
  * interrupted save never produces a loadable file. */
@@ -353,7 +349,7 @@ typedef struct {
  * snapshot, and that old plugin reads PayloadArguments after the load:
  * PayloadArguments is append-only (existing fields never move or change
  * meaning; the layout is pinned in tests/host/test_state.c). */
-#define SAVESTATE_VERSION 3
+#define SAVESTATE_VERSION 2
 
 #define SAVESTATE_MEDIAID_OFFSET 0x200
 #define SAVESTATE_FILES_OFFSET   0x400
