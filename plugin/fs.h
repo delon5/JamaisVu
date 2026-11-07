@@ -68,6 +68,9 @@ void fs_set_dev_check(int (*fn)(const char *root));
  * wake-up, waiting up to timeout_ms for them; lifts read-only where that
  * worked. Returns how many were re-read. */
 int fs_refresh_late(uint32_t timeout_ms);
+/* 1 if a drive is still waiting for fs_refresh_late() (the card on
+ * uma0/xmc0 is deferred too, but to the worker's remount, not to this). */
+int fs_late_pending(void);
 uint32_t fs_get_write_mode(void);
 volatile uint32_t *fs_write_mode_addr(void);
 

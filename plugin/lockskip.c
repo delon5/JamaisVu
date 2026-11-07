@@ -54,9 +54,14 @@ static const ShellBuild k_builds[] = {
 static SceUID g_inject[2] = { -1, -1 };
 static SceUID g_lock_mtx = -1;
 
-static void lock(void) {
+void lockskip_init(void) {
   if (g_lock_mtx < 0)
     g_lock_mtx = ksceKernelCreateMutex("JamaisVuLockSkip", 0, 0, NULL);
+}
+
+static void lock(void) {
+  if (g_lock_mtx < 0)
+    lockskip_init(); /* not reached: menu_init() made it */
   if (g_lock_mtx >= 0)
     ksceKernelLockMutex(g_lock_mtx, 1, NULL);
 }

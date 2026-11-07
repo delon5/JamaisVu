@@ -753,6 +753,10 @@ void fs_card_ready(const char *name) {
     fs_set_write_mode(FS_WRITES_ALLOWED);
 }
 
+int fs_late_pending(void) {
+  return g_late_mask != 0;
+}
+
 int fs_refresh_late(uint32_t timeout_ms) {
   JvWakeFs *f = trace_wake_fs();
   int done = 0;

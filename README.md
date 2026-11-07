@@ -96,19 +96,26 @@ The original README warned that *"your SD Card and/or Memory Card may be corrupt
 - The header sector is cleared first and written last, with CRCs over the header and all metadata.
 - A slot only counts as used once its `.jvi` info file is written, which happens after the save succeeds.
 
+**An incomplete snapshot is never taken.** If the list of running processes cannot be read in full at suspend time (more than 32, or a process context the kernel will not give), the payload refuses the save and the menu says so; nothing is written.
+
 **Nothing is written until the whole file has been checked.** Before a load touches the card, it verifies:
 - the header CRC and body CRC
+- the table of per-segment CRCs (format 3 slots; slots from earlier builds, format 2, still load)
 - every savedata path (only `ux0:user/00/savedata/<TITLEID>/…`; no `..`)
 - every memory segment (only DRAM/VRAM and the two known system regions)
 - that the state was made on the same Memory Card
 
-A corrupted or tampered state is rejected with nothing changed.
+A corrupted or tampered state is rejected with nothing changed. While the memory is being restored, every segment is checked against its CRC as it is read: a slot damaged in its data stops the load on the halt screen (naming the segment in `log.txt`) instead of waking a half-correct image.
 
 **Load writes are fenced.**
 - Savedata restore can only write inside ux0's exFAT area, never the partition table or boot sectors.
 - The mediaid sector is restored only to the sector it came from, and can no longer fall back to sector 0 (the MBR), which the original could.
 
 **The restored OS cannot write with stale caches.** The payload arms a write block *inside the restored memory image*. The plugin re-reads every exFAT drive from its storage before writes are allowed again. If a file that was open at snapshot time no longer exists, **that drive** stays **read-only until restart** rather than risk writing to the wrong clusters. The other drives, including the system's own internal storage, stay writable. (Blocking writes on every drive, as an earlier version did, left the system unable to write anything and made it restart.)
+
+- Each entry of the kernel's open-file table is decided under its own lock, read afresh: an entry the kernel is reclaiming or setting up at that moment, or one that cannot be locked, is left to the kernel. A file that is gone is freed only when nothing holds it open; a drive whose lookup could not be made is never counted as changed.
+- The Memory Card on uma0/xmc0 stays **read-only from the wake-up until it has been mounted afresh** (about 18 s after a load). Before, the restored image's view of the card was writable for that time.
+- After a load, `log.txt` records what the re-read found (`open files after the load: … gone … changed size … busy`), how the card came back (`mounted afresh` or `re-read in place`), and a check of a memory canary written before the load, which catches a restore that left stale cache lines behind.
 
 **Storage that is away during the wake-up is not touched.** With a storage plugin, the drives behind ux0 and uma0 come back from the wake-up at their own pace:
 - **A USB drive as ux0** (usbmc's PSVSD or USB stick) is only re-read once one sector of it can be read again. JamaisVu waits up to 3 s during the wake-up, and up to 20 s more afterwards. Until then it stays exactly as it was and read-only. Re-reading it too early failed and left ux0 unusable: the game went black, VitaShell reported its data as corrupt, and the PS TV restarted.

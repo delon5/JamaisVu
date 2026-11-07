@@ -236,10 +236,8 @@ static volatile uint32_t g_toast_seq;
 static volatile int g_capture_req, g_capture_ok;
 static char g_capture_tid[16];
 
-/* ✕/○ convention of what is running (see remap.c). In the LiveArea the
- * console's own setting applies; in a game, its region and any ✕/○ swap
- * set for it in PSV-Shell-Plus or reVita. */
-static int g_system_circle_enter;
+/* ✕/○ convention of what is running (see remap.c): 1 swaps ✕ and ○ in
+ * the menu. Always 0 at present (✕ confirms everywhere). */
 static volatile int g_swap_ox;
 static char g_swap_tid[16]; /* title the current g_swap_ox was decided for */
 static void log_append(const char *text);
@@ -1831,19 +1829,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   /* ✕ always confirms and ○ goes back (user: "just default to x and not
    * even attempt at the remap" - following the game's region and the
    * remap plugins showed ○ first and then ✕ in a remapped Japanese game).
-   * The detection below is kept but switched off. */
-  if (0 && g_capture_ok &&
-      strncmp(g_swap_tid, g_capture_tid, sizeof(g_swap_tid))) {
-    strncpy(g_swap_tid, g_capture_tid, sizeof(g_swap_tid) - 1);
-    /* instant, no file access: the game's region; the io thread then
-     * checks PSV-Shell-Plus / reVita and corrects it if they swap */
-    g_swap_ox = title_confirms_with_circle(g_swap_tid);
-    ksceKernelLockMutex(g_logq_mtx, 1, NULL);
-    strncpy(g_decide_tid, g_swap_tid, sizeof(g_decide_tid) - 1);
-    ksceKernelUnlockMutex(g_logq_mtx, 1);
-    if (g_io_evf >= 0)
-      ksceKernelSetEventFlag(g_io_evf, IOEV_DECIDE);
-  }
+   * g_swap_ox therefore stays 0; the io thread's decide_buttons() and
+   * remap.c remain for the day a per-game choice is wanted again. */
   if (g_swap_ox) {
     uint32_t ox = pressed & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE);
     if (ox == SCE_CTRL_CROSS || ox == SCE_CTRL_CIRCLE)
@@ -2616,7 +2603,7 @@ static void after_resume(void) {
       trace_wake(JV_WAKE_CARD_REMOUNTED);
       /* a USB drive on ux0 that was not back during the wake-up: re-read
        * it once it is (at most 20 s); until then it stays read-only */
-      if (g_res_late) {
+      if (g_res_late && fs_late_pending()) {
         trace_wake(JV_WAKE_FS_LATE);
         fs_refresh_late(20000);
         trace_wake(JV_WAKE_FS_LATE_DONE);
@@ -2788,16 +2775,25 @@ _Static_assert(N_OBJ_CLASSES + 2 <= COUNTS_MAX, "COUNTS_MAX too small");
 
 static int counts_text(char *out, int len, int *vals) {
   int n = 0;
+  if (len <= 0)
+    return 0;
+  out[0] = '\0';
   for (unsigned i = 0; i < N_OBJ_CLASSES && n < len - 40; i++) {
     int c = jv_count_class(k_obj_classes[i][0]);
+    int r;
     if (vals)
       vals[i] = c;
     if (c >= 0)
-      n += snprintf(out + n, len - n, "%s%s %d", i ? ", " : "",
-                    k_obj_classes[i][1], c);
+      r = snprintf(out + n, len - n, "%s%s %d", i ? ", " : "",
+                   k_obj_classes[i][1], c);
     else
-      n += snprintf(out + n, len - n, "%s%s ?", i ? ", " : "",
-                    k_obj_classes[i][1]);
+      r = snprintf(out + n, len - n, "%s%s ?", i ? ", " : "",
+                   k_obj_classes[i][1]);
+    if (r < 0 || r >= len - n) { /* cut: the would-be length is not used */
+      n = len - 1;
+      break;
+    }
+    n += r;
   }
   uint32_t tot, with_file, held;
   fs_vnode_usage(&tot, &with_file, &held);
@@ -3600,7 +3596,6 @@ static int worker_thread(SceSize args, void *argp) {
       case OP_TEST_DISPLAY:
         do_test(2, g_op_slot, JV_PAYLOAD_DEFAULT);
         break;
-        break;
       case OP_PREPARE:
         do_prepare(0, g_op_slot);
         break;
@@ -3674,6 +3669,7 @@ static int (*g_mod_by_addr)(SceUID pid, const void *addr, uint32_t *nid,
  * calls); the io thread formats the events */
 #define MOUNT_EV_N 16
 static struct {
+  volatile uint8_t ready; /* 1 once every field is filled in */
   uint8_t unmount;
   int id, arg, ret, ms;
   uintptr_t lr;
@@ -3710,6 +3706,8 @@ static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
   g_mount_ev[k].lr = lr;
   g_mount_ev[k].pid = ksceKernelGetProcessId();
   g_mount_ev[k].ms = g_t_resume ? (int)((now - g_t_resume) / 1000) : -1;
+  __sync_synchronize();
+  g_mount_ev[k].ready = 1; /* the io thread reads the entry only now */
 }
 
 /* before a new run: the last load's record is closed first */
@@ -3761,6 +3759,9 @@ static void mount_events_log(void) {
     int k = g_mount_ev_r % MOUNT_EV_N;
     char name[0x1C + 4];
     const void *text = NULL;
+    if (!g_mount_ev[k].ready)
+      return; /* a hook is still filling it in: next time */
+    __sync_synchronize();
     memset(name, 0, sizeof(name));
     if (!g_mod_by_addr ||
         g_mod_by_addr(0x10005, (const void *)g_mount_ev[k].lr, NULL, &text,
@@ -3779,6 +3780,7 @@ static void mount_events_log(void) {
              (unsigned)(g_mount_ev[k].lr - (uintptr_t)text),
              (unsigned)g_mount_ev[k].pid, g_mount_ev[k].ms);
     log_append(line);
+    g_mount_ev[k].ready = 0;
     g_mount_ev_r++;
   }
   g_mount_ev_r = g_mount_ev_w > g_mount_ev_r + MOUNT_EV_N ? g_mount_ev_w
@@ -3938,11 +3940,9 @@ static int io_thread(SceSize args, void *argp) {
 }
 
 int menu_init(const char *status_text) {
-  int assign = 1;
-  /* /CONFIG/SYSTEM/button_assign: 0 = ○ confirms (Japan), 1 = ✕ confirms */
-  if (ksceRegMgrGetKeyInt("/CONFIG/SYSTEM", "button_assign", &assign) >= 0)
-    g_system_circle_enter = (assign == 0);
   SceUID thid;
+
+  lockskip_init(); /* its mutex exists before any thread can need it */
 
   g_status_text = status_text;
   g_perf_since = prof_now();
