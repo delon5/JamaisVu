@@ -37,7 +37,9 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 #define EVF_RESUMED 2
 
 enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY,
-       OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY, OP_TEST_WRITE };
+       OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY, OP_TEST_WRITE,
+       OP_TEST_OVERLAY };
+static void do_overlay_test(void);
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
 #define PENDING  JV_NUM_SLOTS /* thumbnail index of the live capture */
@@ -2083,6 +2085,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_DISPLAY, sel);
       } else if (pressed & SCE_CTRL_RIGHT) {
         start_op(OP_TEST_WRITE, sel);
+      } else if (pressed & SCE_CTRL_LEFT) {
+        start_op(OP_TEST_OVERLAY, sel);
       }
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
@@ -3718,6 +3722,112 @@ static void do_test(int kind, int slot, int variant) {
                dry ? JV_TEST_DRYRUN : JV_TEST_RESET, variant);
 }
 
+/* Diagnostics: the menu through the display's second layer. The display
+ * hardware blends a second plane (index 1, the system's own overlays)
+ * over the game's frame; the menu there would need no compose into the
+ * game's frames at all (no per-frame CPU, nothing the game can draw
+ * over) and only one 960x544 ARGB buffer, in VRAM. This test draws the
+ * menu as it is into such a buffer, closes the ordinary menu, shows the
+ * buffer on layer 1 for 5 s, makes it transparent, switches the layer
+ * off and gives the buffer back; every answer goes to log.txt. */
+static void do_overlay_test(void) {
+  static char line[320];
+  static MenuModel local;
+  const uint32_t W = JV_SCREEN_W, H = JV_SCREEN_H;
+  const uint32_t bytes = W * H * 4, size = (bytes + 0xfffff) & ~0xfffffu;
+  static const SceKernelMemBlockType types[3] = {
+    0x40404006, /* KERNEL_CDRAM_L1WBWA_RW: VRAM, cached */
+    0x1080D006, /* KERNEL_ROOT_PHYCONT_RW */
+    0x40408006, /* KERNEL_CDRAM_RW: VRAM, uncached */
+  };
+  static const char *const names[3] = { "VRAM (cached)", "root contiguous",
+                                        "VRAM (uncached)" };
+  SceUID uid = -1;
+  void *buf = NULL;
+  int ti = -1, head = ksceDisplayGetPrimaryHead();
+
+  set_message(MV_BUSY, "Overlay test: the menu on the display's second "
+              "layer for 5 s", -1, 0);
+  for (int i = 0; i < 3 && uid < 0; i++) {
+    uid = ksceKernelAllocMemBlock("JamaisVuLayer", types[i], size, NULL);
+    if (uid >= 0 && (ksceKernelGetMemBlockBase(uid, &buf) < 0 || !buf)) {
+      ksceKernelFreeMemBlock(uid);
+      uid = -1;
+    }
+    if (uid >= 0)
+      ti = i;
+  }
+  if (uid < 0) {
+    snprintf(line, sizeof(line), "overlay test: no %u KB block for the "
+             "layer buffer (VRAM cached 0x%08X)\r\n", (unsigned)(size >> 10),
+             (unsigned)uid);
+    log_append(line);
+    set_message(MV_MESSAGE, "Overlay test: no 2 MB block for the layer",
+                -1, 1);
+    return;
+  }
+  uint32_t *px = buf;
+  memset(px, 0, bytes); /* transparent everywhere but the menu */
+
+  /* the menu as it is now, band by band (the scratch band lives in the
+   * buffer's own bottom rows, cleared afterwards: the render thread owns
+   * the usual band buffer) */
+  for (int tries = 0; tries < 200; tries++) {
+    uint32_t s1 = g_model_seq;
+    if (s1 & 1) {
+      ksceKernelDelayThread(1000);
+      continue;
+    }
+    __sync_synchronize();
+    memcpy(&local, &g_model, sizeof(local));
+    __sync_synchronize();
+    if (g_model_seq == s1)
+      break;
+  }
+  uint32_t *band = px + (H - BAND_ROWS) * W;
+  for (int y0 = 0; y0 < MENU_H; y0 += BAND_ROWS) {
+    int rows = MENU_H - y0 < BAND_ROWS ? MENU_H - y0 : BAND_ROWS;
+    Canvas b = { band, MENU_W, rows, y0 };
+    menu_view_render(&b, &local);
+    for (int r = 0; r < rows; r++)
+      memcpy(px + (MENU_Y + y0 + r) * W + MENU_X, band + r * MENU_W,
+             MENU_W * 4);
+  }
+  memset(band, 0, BAND_ROWS * W * 4);
+  for (uint32_t off = 0; off < bytes; off += 0x8000)
+    fb_cache_sync((uint8_t *)px + off, bytes - off > 0x8000 ? 0x8000
+                                                              : bytes - off);
+
+  close_menu(); /* from here on layer 0 is the game alone */
+  ksceKernelDelayThread(200 * 1000);
+
+  SceDisplayFrameBuf fb;
+  memset(&fb, 0, sizeof(fb));
+  fb.size = sizeof(fb);
+  fb.base = px;
+  fb.pitch = W;
+  fb.pixelformat = 0; /* SCE_DISPLAY_PIXELFORMAT_A8B8G8R8 */
+  fb.width = W;
+  fb.height = H;
+  int r1 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
+  ksceKernelDelayThread(5 * 1000 * 1000);
+  memset(px, 0, bytes);
+  for (uint32_t off = 0; off < bytes; off += 0x8000)
+    fb_cache_sync((uint8_t *)px + off, bytes - off > 0x8000 ? 0x8000
+                                                              : bytes - off);
+  int r2 = ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
+  ksceKernelDelayThread(1000 * 1000);
+  int r3 = ksceDisplaySetFrameBufInternal(head, 1, NULL, 1);
+  ksceKernelDelayThread(200 * 1000);
+  ksceKernelFreeMemBlock(uid);
+  snprintf(line, sizeof(line), "overlay test: head %d layer 1, %ux%u ARGB "
+           "buffer (%u KB) in %s: shown -> 0x%08X (held 5 s), made "
+           "transparent -> 0x%08X, layer off (NULL) -> 0x%08X\r\n", head,
+           (unsigned)W, (unsigned)H, (unsigned)(size >> 10), names[ti],
+           (unsigned)r1, (unsigned)r2, (unsigned)r3);
+  log_append(line);
+}
+
 /* Creates slot files ahead of time (from the LiveArea), so that a save
  * later in a game does not have to. Only the OS writes here, exactly as
  * when a save prepares its slot, and the free-space safeguard is checked
@@ -3862,6 +3972,9 @@ static int worker_thread(SceSize args, void *argp) {
         break;
       case OP_TEST_WRITE:
         do_test(3, g_op_slot, JV_PAYLOAD_DEFAULT);
+        break;
+      case OP_TEST_OVERLAY:
+        do_overlay_test();
         break;
       case OP_PREPARE:
         do_prepare(0, g_op_slot);
