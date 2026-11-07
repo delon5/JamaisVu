@@ -69,7 +69,12 @@ typedef enum {
 } MenuMode;
 
 typedef struct {
+  /* the five slots on screen: slots[i] is slot first + i; total is how
+   * many slots can exist (0: none, slots[0] is a locked placeholder and
+   * the counter reads 00/00); selected counts from 0 over all of them */
   MenuSlot slots[JV_NUM_SLOTS];
+  int first;
+  int total;
   int selected;
   MenuMode mode;
   char message[128];  /* BUSY / MESSAGE text */

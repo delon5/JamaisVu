@@ -45,9 +45,28 @@ void slots_sync(void) {
     ksceIoSync(r, 0);
 }
 
+/* the file in a slot's folder for each of the old extensions */
+static const char *slot_file_name(const char *ext) {
+  if (!strcmp(ext, "bin"))
+    return "state.bin";
+  if (!strcmp(ext, "jvi"))
+    return "info.jvi";
+  if (!strcmp(ext, "jvt"))
+    return "info.tmp";
+  if (!strcmp(ext, "jvf"))
+    return "frame.jvf";
+  if (!strcmp(ext, "jve"))
+    return "env.jve";
+  return ext;
+}
+
+void slot_dir_path(char *out, int len, int slot) {
+  snprintf(out, len, "%s" SLOT_SUBDIR "/Slot%d", mc_root(), slot + 1);
+}
+
 void slot_path(char *out, int len, int slot, const char *ext) {
-  snprintf(out, len, "%s" SLOT_SUBDIR "/slot%d.%s", mc_root(), slot + 1,
-           ext);
+  snprintf(out, len, "%s" SLOT_SUBDIR "/Slot%d/%s", mc_root(), slot + 1,
+           slot_file_name(ext));
 }
 
 void jv_file_path(char *out, int len, const char *name) {
@@ -56,7 +75,7 @@ void jv_file_path(char *out, int len, const char *name) {
 
 void slot_payload_path(char *out, int len, int slot) {
   /* "ux0:" is just the payload FatFs' name for the Memory Card */
-  snprintf(out, len, "ux0:" SLOT_SUBDIR "/slot%d.bin", slot + 1);
+  snprintf(out, len, "ux0:" SLOT_SUBDIR "/Slot%d/state.bin", slot + 1);
 }
 
 #define path_for slot_path
@@ -75,6 +94,78 @@ int slots_mkdirs(void) {
   mkdir_ok(path);
   snprintf(path, sizeof(path), "%s" SLOT_SUBDIR, root);
   return mkdir_ok(path);
+}
+
+/* the slot's own folder (data/JamaisVu must exist) */
+static int slot_mkdir(int slot) {
+  char path[48];
+  slot_dir_path(path, sizeof(path), slot);
+  return mkdir_ok(path);
+}
+
+static int file_exists(const char *path) {
+  SceIoStat st;
+  memset(&st, 0, sizeof(st));
+  return ksceIoGetstat(path, &st) >= 0;
+}
+
+/* data/JamaisVu/slotN.<ext> -> data/JamaisVu/SlotN/<file>; 0 if moved or
+ * absent, -1 if it is there and could not be moved */
+static int migrate_file(int slot, const char *ext) {
+  static char old[80], new_[80];
+  snprintf(old, sizeof(old), "%s" SLOT_SUBDIR "/slot%d.%s", mc_root(),
+           slot + 1, ext);
+  if (!file_exists(old))
+    return 0;
+  slot_path(new_, sizeof(new_), slot, ext);
+  if (file_exists(new_)) /* both: the folder's wins, the old one goes */
+    return ksceIoRemove(old) < 0 ? -1 : 0;
+  return ksceIoRename(old, new_) < 0 ? -1 : 0;
+}
+
+int slots_migrate(int *failed) {
+  static const char *const exts[] = { "bin", "jvi", "jvf", "jve" };
+  static char old[80];
+  int moved = 0;
+  *failed = 0;
+  if (!storage_mc_root())
+    return 0;
+  for (int i = 0; i < JV_MAX_SLOTS; i++) {
+    snprintf(old, sizeof(old), "%s" SLOT_SUBDIR "/slot%d.bin", mc_root(),
+             i + 1);
+    int any = file_exists(old);
+    if (!any) { /* a stray info file without its state file: move it too */
+      snprintf(old, sizeof(old), "%s" SLOT_SUBDIR "/slot%d.jvi", mc_root(),
+               i + 1);
+      any = file_exists(old);
+    }
+    if (!any)
+      continue;
+    if (slot_mkdir(i) < 0) {
+      (*failed)++;
+      continue;
+    }
+    int bad = 0;
+    for (unsigned e = 0; e < sizeof(exts) / sizeof(exts[0]); e++)
+      if (migrate_file(i, exts[e]) < 0)
+        bad = 1;
+    snprintf(old, sizeof(old), "%s" SLOT_SUBDIR "/slot%d.jvt", mc_root(),
+             i + 1);
+    if (file_exists(old)) /* a half-written info file of the old layout */
+      ksceIoRemove(old);
+    if (bad)
+      (*failed)++;
+    else
+      moved++;
+  }
+  if (moved || *failed)
+    slots_sync();
+  return moved;
+}
+
+void slots_scan(int *exists, int n) {
+  for (int i = 0; i < n; i++)
+    exists[i] = slot_file_exists(i);
 }
 
 int64_t slot_file_size(const char *path) {
@@ -115,6 +206,9 @@ int slot_prepare(int slot, int (*progress)(int pct)) {
 
   if (slot_file_size(path) == JV_SLOT_SIZE)
     return 0;
+
+  if (slot_mkdir(slot) < 0)
+    return JV_ERR_SLOT_IO;
 
   /* wrong size (or old format): recreate */
   ksceIoRemove(path);
@@ -367,6 +461,54 @@ int slot_info_read(int slot, SlotInfo *info, uint16_t *thumb) {
     info->title[sizeof(info->title) - 1] = '\0';
   }
 
+  return res;
+}
+
+int slot_info_peek(int slot, SlotInfo *info) {
+  static char path[80];
+  static SlotInfoV2 v2;
+  int res = 0;
+
+  path_for(path, sizeof(path), slot, "jvi");
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  if (fd < 0)
+    return JV_ERR_SLOT_IO;
+  if (ksceIoRead(fd, info, 8) != 8 || info->magic != SLOT_INFO_MAGIC) {
+    res = JV_ERR_SLOT_IO;
+  } else if (info->version == 2) {
+    if (ksceIoLseek(fd, 0, SCE_SEEK_SET) != 0 ||
+        ksceIoRead(fd, &v2, sizeof(v2)) != sizeof(v2)) {
+      res = JV_ERR_SLOT_IO;
+    } else {
+      memset(info, 0, sizeof(*info));
+      info->magic = v2.magic;
+      info->version = v2.version;
+      memcpy(info->titleid, v2.titleid, sizeof(info->titleid));
+      memcpy(info->title, v2.title, sizeof(info->title));
+      info->year = v2.year;
+      info->month = v2.month;
+      info->day = v2.day;
+      info->hour = v2.hour;
+      info->minute = v2.minute;
+      info->second = v2.second;
+      info->thumb_w = v2.thumb_w;
+      info->thumb_h = v2.thumb_h;
+      info->has_thumb = v2.has_thumb;
+      memcpy(info->app_ver, v2.app_ver, sizeof(info->app_ver));
+      info->crc = v2.crc;
+      for (int i = 0; i < JV_CFG_FILES; i++)
+        info->cfg_state[i] = JV_CFG_UNKNOWN;
+    }
+  } else if ((info->version != 3 && info->version != 4) ||
+             ksceIoRead(fd, (uint8_t *)info + 8, sizeof(*info) - 8) !=
+                 (int)(sizeof(*info) - 8)) {
+    res = JV_ERR_SLOT_IO;
+  }
+  ksceIoClose(fd);
+  if (res >= 0) {
+    info->titleid[sizeof(info->titleid) - 1] = '\0';
+    info->title[sizeof(info->title) - 1] = '\0';
+  }
   return res;
 }
 

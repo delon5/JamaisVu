@@ -312,6 +312,7 @@ int main(int argc, char **argv) {
   memset(&m, 0, sizeof(m));
   m.can_load = m.can_save = 1;
   m.progress = -1;
+  m.total = JV_NUM_SLOTS;
   for (int i = 0; i < JV_NUM_SLOTS; i++) {
     m.slots[i].used = i < 3;
     m.slots[i].prepared = i == 3;
@@ -351,6 +352,28 @@ int main(int argc, char **argv) {
       full.slots[i].locked = 1;
     }
     rc |= check_compressed("browse, five locked slots", &full);
+  }
+  {
+    /* a window into a long list: slots 8..12 of 20 on screen, 10 selected;
+     * a short list of two; and no slot at all (one locked placeholder) */
+    MenuModel w = m;
+    w.first = 7;
+    w.total = 20;
+    w.selected = 9;
+    rc |= check("browse, slots 08-12 of 20", &w);
+    rc |= check_compressed("browse, slots 08-12 of 20", &w);
+    w.first = 0;
+    w.total = 2;
+    w.selected = 1;
+    rc |= check("browse, two slots", &w);
+    w.total = 0;
+    w.selected = 0;
+    for (int i = 0; i < JV_NUM_SLOTS; i++) {
+      w.slots[i].used = 0;
+      w.slots[i].thumb = NULL;
+    }
+    w.slots[0].locked = 1;
+    rc |= check("browse, no slot can exist", &w);
   }
   m.selected = 1;
   m.swap_ox = 1;

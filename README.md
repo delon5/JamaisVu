@@ -25,8 +25,8 @@ On any firmware without a verified offset table, the plugin installs no filesyst
 
 - **An official Sony Memory Card.** JamaisVu writes **only** to the official Memory Card: slot files, slot info, thumbnails and `status.txt`. It never writes to an SD2Vita, PSVSD, USB stick or the internal storage. Ideally use a card dedicated to savestates, so the worst a failure can cost is savestates. The card may be mounted as ux0, or as uma0/xmc0 when a storage plugin (StorageMgr, YAMT, gamesd, usbmc) put an SD2Vita/PSVSD/USB stick on ux0. JamaisVu reads the system's mount table to find which mount is the card (device `sdstor0:xmc-…`); finding it writes nothing.
   - Savedata is only rolled back by a load when it lives on the Memory Card, i.e. when the card is ux0. With an SD2Vita/PSVSD as ux0, a load restores the game but **not** its savedata (the load prompt says so).
-- **704 MB of free space on the Memory Card per slot.** Each slot is a fixed-size file that is created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free. To avoid the wait in a game, open the menu from the **LiveArea** and prepare slots ahead of time: ✕ prepares the selected slot, △ all slots that fit. Prepared but unused slots show **READY**.
-- **Slots unlock with free space** on the Memory Card. Slots you have already used stay available. Each new slot needs 704 MB: about 1 GB free unlocks one slot, 1.5 GB two, and so on. Locked slots show a padlock.
+- **704 MB of free space on the Memory Card per slot.** Each slot is a fixed-size file in its own folder, `data/JamaisVu/SlotN/state.bin`, created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free. To avoid the wait in a game, open the menu from the **LiveArea** and prepare slots ahead of time: ✕ prepares the selected slot, △ all slots that fit. Prepared but unused slots show **READY**.
+- **The menu shows as many slots as can exist**, up to 99: every slot that already has a file, plus as many new ones as the free space allows (704 MB each). With room for two, the counter reads 02/02; with room for twenty, 01/20 and the row of five scrolls. With no slot and no room, one locked slot and 00/00. The log says the count whenever it changes (`slot list: N slots can exist …`). Slots saved with an older JamaisVu (`slotN.bin` beside the folders) are moved into their folders the first time the list is read; the saved states stay as they are.
 
 ## Installation
 
@@ -49,7 +49,8 @@ Press **START + UP** to open the slot menu; **START + UP** or **START + DOWN** c
 
 | Button | Action |
 | --- | --- |
-| ◀ ▶ | Choose one of the 5 slots |
+| ◀ ▶ | Choose a slot (the row of five scrolls) |
+| L R | Five slots back / forward |
 | ✕ | Save to the selected slot (asks before overwriting) |
 | □ | Load the selected slot (asks first) |
 | ○ | Close |
@@ -69,7 +70,7 @@ Each slot shows a thumbnail of the game screen at the moment you saved, the game
 
 **A snapshot only loads into the exact game version it was taken with.** The version (`APP_VER` from the game's `param.sfo`, or from its installed update) is stored with the slot. If the game has been updated (e.g. 01.01 → 01.02) or downgraded since, the slot is marked and cannot be loaded.
 
-- **Saving** takes about a minute while memory is written to `data/JamaisVu/slotN.bin` on the Memory Card. On a PCH-2000 a progress screen shows how far it is (saves and loads). On a PCH-1000 (OLED) and a PS TV (HDMI, shown at 720p) it is switched on once **Diagnostics → Display test** has run through on that console (recorded in `data/JamaisVu/display_ok.txt`); until then the screen stays black. Tested on a PCH-1000 (OLED) and a PS TV (HDMI, with pstv1080p and sharpscale installed). Afterwards the game continues, and a message confirms the save or explains why it failed.
+- **Saving** takes about a minute while memory is written to `data/JamaisVu/SlotN/state.bin` on the Memory Card. On a PCH-2000 a progress screen shows how far it is (saves and loads). On a PCH-1000 (OLED) and a PS TV (HDMI, shown at 720p) it is switched on once **Diagnostics → Display test** has run through on that console (recorded in `data/JamaisVu/display_ok.txt`); until then the screen stays black. Tested on a PCH-1000 (OLED) and a PS TV (HDMI, with pstv1080p and sharpscale installed). Afterwards the game continues, and a message confirms the save or explains why it failed.
 - **PSP and PS1 games are left alone** (from the LiveArea or in Adrenaline): they run in the Vita's PSP emulator, and while it is in the foreground START + UP does nothing. No menu opens, no buttons are taken and nothing can be saved. JamaisVu checks this only when START + UP is pressed, with the system's own `ksceSblACMgrIsPspEmu` on the app that is reading the controller. It hooks no system function for it (an earlier hook on app start/exit events, the one PSV-Shell-Plus also uses, crashed the PS TV when apps started).
 - **Loading** works from inside a game and from the **LiveArea**. Saving does not: Save only appears when a running game is on screen, and this is checked again right before the save starts. A game suspended in the background doesn't count, so the LiveArea/shell can never be snapshotted.
 - **No lock screen after a save or load** (handhelds and PS TV, no NoLockScreen plugin needed). JamaisVu patches SceShell in memory just for that wake-up and removes the patch about 10 s later, so ordinary sleep still locks. Retail 3.60 and 3.65–3.74 only; on other SceShell builds the lock screen appears as usual. `log.txt` says whether it was applied.

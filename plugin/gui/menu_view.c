@@ -57,22 +57,43 @@ static void u_to_dec(char *out, unsigned v, int digits) {
 static void draw_counter(Canvas *c, const MenuModel *m) {
   char buf[32] = "SLOT ";
   char num[8];
-  u_to_dec(num, m->selected + 1, 2); /* "SLOT 01/05" */
+  u_to_dec(num, m->total ? m->selected + 1 : 0, 2); /* "SLOT 07/20" */
   sappend(buf, sizeof(buf), num);
   sappend(buf, sizeof(buf), "/");
-  u_to_dec(num, JV_NUM_SLOTS, 2);
+  u_to_dec(num, m->total, 2);
   sappend(buf, sizeof(buf), num);
   int w = cv_text_width(&font_medium, buf);
   cv_text(c, &font_medium, MENU_W - 24 - w,
           (HEADER_H - font_medium.height) / 2 + 1, buf, C_TEXT);
 }
 
+/* the slot shown at position i (0..4) of the row: its number */
+static int slot_at(const MenuModel *m, int i) {
+  return m->first + i;
+}
+
+/* the position of the selected slot in the row */
+static int sel_pos(const MenuModel *m) {
+  int p = m->selected - m->first;
+  return p < 0 ? 0 : p >= JV_NUM_SLOTS ? JV_NUM_SLOTS - 1 : p;
+}
+
+/* slots in the row: five, fewer at the end of the list, the placeholder
+ * alone when no slot can exist */
+static int row_count(const MenuModel *m) {
+  int n = m->total - m->first;
+  if (m->total <= 0)
+    return 1;
+  return n < 1 ? 1 : n > JV_NUM_SLOTS ? JV_NUM_SLOTS : n;
+}
+
 static void draw_slot(Canvas *c, const MenuModel *m, int i) {
   const MenuSlot *s = &m->slots[i];
   int x = THUMBS_X + i * (JV_THUMB_W + THUMB_GAP);
   int y = THUMB_Y;
-  int sel = (i == m->selected);
-  char num[2] = { (char)('1' + i), '\0' };
+  int sel = (i == sel_pos(m));
+  char num[8];
+  u_to_dec(num, m->total ? (unsigned)(slot_at(m, i) + 1) : 0, 2);
 
   if (sel) {
     cv_round_rect(c, x - 9, y - 9, JV_THUMB_W + 18, JV_THUMB_H + 18, 10,
@@ -152,7 +173,7 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
   IconType icons[6];
   int two[6] = { 0, 0, 0, 0, 0, 0 };
   int n = 0;
-  const MenuSlot *cur = &m->slots[m->selected];
+  const MenuSlot *cur = &m->slots[sel_pos(m)];
 
   switch (m->mode) {
     case MV_BROWSE:
@@ -162,9 +183,8 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
       } else if (!m->can_save && !cur->locked && !cur->prepared) {
         labels[n] = "Prepare"; icons[n] = ok_icon(m); n++;
       }
-      if (m->can_load && m->slots[m->selected].used &&
-          !m->slots[m->selected].outdated &&
-          !m->slots[m->selected].config_changed) {
+      if (m->can_load && cur->used && !cur->outdated &&
+          !cur->config_changed) {
         labels[n] = "Load"; icons[n] = ICON_SQUARE; n++;
       }
       if (!m->can_save && m->prepare_count > 1) {
@@ -205,9 +225,10 @@ static void draw_footer(Canvas *c, const MenuModel *m) {
 }
 
 static void draw_details(Canvas *c, const MenuModel *m) {
-  const MenuSlot *s = &m->slots[m->selected];
+  const MenuSlot *s = &m->slots[sel_pos(m)];
   char prompt[96];
-  char num[2] = { (char)('1' + m->selected), '\0' };
+  char num[8];
+  u_to_dec(num, m->total ? (unsigned)(m->selected + 1) : 0, 2);
 
   switch (m->mode) {
     case MV_BROWSE:
@@ -379,7 +400,7 @@ void menu_view_render(Canvas *c, const MenuModel *m) {
   logo_draw(c, 24, 13, 1); /* letters + rising particles centred in the header */
   draw_counter(c, m);
 
-  for (int i = 0; i < JV_NUM_SLOTS; i++)
+  for (int i = 0; i < row_count(m); i++)
     draw_slot(c, m, i);
 
   cv_fill(c, 24, RULE_Y, MENU_W - 48, 1, C_RULE);

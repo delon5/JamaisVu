@@ -1,11 +1,16 @@
 /* JamaisVu savestate plugin
  *
- * Slot files on ux0:
- *   ux0:data/JamaisVu/slotN.bin  savestate (pre-allocated, fixed size)
- *   ux0:data/JamaisVu/slotN.jvi  slot info: game, date, thumbnail.
- *                                Written only after a successful save, so
- *                                it doubles as the "this slot is valid"
- *                                marker.
+ * Slot files on the Memory Card, one folder per slot:
+ *   data/JamaisVu/SlotN/state.bin  savestate (pre-allocated, fixed size)
+ *   data/JamaisVu/SlotN/info.jvi   slot info: game, date, thumbnail.
+ *                                  Written only after a successful save, so
+ *                                  it doubles as the "this slot is valid"
+ *                                  marker.
+ *   data/JamaisVu/SlotN/frame.jvf  where the game's frame was (progress
+ *   data/JamaisVu/SlotN/env.jve    screen); the plugin environment
+ * Slots from before the folders (data/JamaisVu/slotN.bin and its side
+ * files) are moved into their folder the first time the list is read:
+ * renames on the card, the state file keeps its place.
  *
  * This software may be modified and distributed under the terms
  * of the MIT license.  See the LICENSE file for details.
@@ -21,9 +26,21 @@
 /* All files live on the official Memory Card (storage.h). */
 void slots_sync(void);
 
-/* <Memory Card>data/JamaisVu/slotN.<ext> and <Memory Card>data/JamaisVu/<name> */
+/* <Memory Card>data/JamaisVu/SlotN/<file for ext> ("bin" -> state.bin,
+ * "jvi" -> info.jvi, "jvf" -> frame.jvf, "jve" -> env.jve), the slot's
+ * folder, and <Memory Card>data/JamaisVu/<name> */
 void slot_path(char *out, int len, int slot, const char *ext);
+void slot_dir_path(char *out, int len, int slot);
 void jv_file_path(char *out, int len, const char *name);
+
+/* Moves slots laid out the old way (slotN.bin ... in data/JamaisVu) into
+ * their folders. Returns the number of slots moved; *failed counts those
+ * whose files could not all be moved (left where they were, logged by the
+ * caller). Nothing to do: 0. */
+int slots_migrate(int *failed);
+
+/* exists[i] = slot i has a full-size state file, for i < n */
+void slots_scan(int *exists, int n);
 
 int64_t slot_file_size(const char *path); /* -1 if missing */
 
@@ -102,6 +119,10 @@ int slot_stamp(int slot, uint8_t nonce[16]);
 /* thumb: JV_THUMB_W * JV_THUMB_H RGB565 pixels (as stored in v4 files) */
 int slot_info_write(int slot, SlotInfo *info, const uint16_t *thumb);
 int slot_info_read(int slot, SlotInfo *info, uint16_t *thumb);
+/* the same without the thumbnail and without the CRC check, for the slot
+ * list (the full read verifies the CRC over the whole file: 99 of those
+ * would be 3 MB per list; the five on screen get the full read) */
+int slot_info_peek(int slot, SlotInfo *info);
 
 /* slotN.jvf: physical address of the game's frame when the snapshot was
  * taken, for the progress screen during a load (drawn there once the

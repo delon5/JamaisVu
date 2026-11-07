@@ -140,10 +140,47 @@ static void exercise_writes(int slot) {
   }
   slots_sync(); /* must not recurse */
 
-  snprintf(want, sizeof(want), "ux0:data/JamaisVu/slot%d.bin", slot + 1);
-  CHECK(card_has(want), "slot file is on the Memory Card");
-  snprintf(want, sizeof(want), "ux0:data/JamaisVu/slot%d.jvi", slot + 1);
-  CHECK(card_has(want), "slot info is on the Memory Card");
+  snprintf(want, sizeof(want), "ux0:data/JamaisVu/Slot%d/state.bin", slot + 1);
+  CHECK(card_has(want), "slot file is on the Memory Card, in its folder");
+  snprintf(want, sizeof(want), "ux0:data/JamaisVu/Slot%d/info.jvi", slot + 1);
+  CHECK(card_has(want), "slot info is on the Memory Card, in its folder");
+  {
+    int exists[JV_MAX_SLOTS], others = 0;
+    slots_scan(exists, JV_MAX_SLOTS);
+    for (int i = 0; i < JV_MAX_SLOTS; i++)
+      if (i != slot && exists[i])
+        others++;
+    CHECK(exists[slot] && !others, "scan finds exactly this slot");
+    SlotInfo peek;
+    CHECK(slot_info_peek(slot, &peek) == 0 && !strcmp(peek.titleid, "PCSE00123") &&
+          !strcmp(peek.app_ver, "01.02"), "info read without thumbnail");
+  }
+  /* an old-layout slot (slotN.* beside the folders) is moved into its
+   * folder: here the fresh slot is put back the old way first */
+  {
+    static char old_[96], new_[96], oldname[32];
+    const char *ext[] = { "bin", "jvi" };
+    int ok = 1;
+    for (int k = 0; k < 2; k++) {
+      slot_path(new_, sizeof(new_), slot, ext[k]);
+      snprintf(oldname, sizeof(oldname), "slot%d.%s", slot + 1, ext[k]);
+      jv_file_path(old_, sizeof(old_), oldname);
+      ok &= ksceIoRename(new_, old_) == 0;
+    }
+    CHECK(ok, "old layout set up");
+    CHECK(!slot_file_exists(slot), "not seen in the old layout");
+    int failed = -1;
+    int moved = slots_migrate(&failed);
+    CHECK(moved == 1 && failed == 0, "migration moved 1 slot (%d, failed %d)",
+          moved, failed);
+    CHECK(slot_file_exists(slot) && slot_is_loadable(slot),
+          "the moved slot is whole and loadable");
+    snprintf(old_, sizeof(old_), "ux0:data/JamaisVu/slot%d.bin", slot + 1);
+    CHECK(!card_has(old_), "old state file gone");
+    snprintf(old_, sizeof(old_), "ux0:data/JamaisVu/slot%d.jvi", slot + 1);
+    CHECK(!card_has(old_), "old info file gone");
+    CHECK(slots_migrate(&failed) == 0 && failed == 0, "nothing left to move");
+  }
   CHECK(count_entries(d_ux0) == 0, "something was written to ux0 storage (SD card)");
   CHECK(count_entries(d_uma0) == 0, "something was written to uma0 storage (USB)");
 
@@ -605,7 +642,7 @@ int main(int argc, char **argv) {
   root = detect_readonly();
   CHECK(root && !strcmp(root, "ux0:"), "root %s", root ? root : "(null)");
   slot_payload_path(path, sizeof(path), 2);
-  CHECK(!strcmp(path, "ux0:data/JamaisVu/slot3.bin"), "payload path %s", path);
+  CHECK(!strcmp(path, "ux0:data/JamaisVu/Slot3/state.bin"), "payload path %s", path);
   exercise_writes(2);
 
   scenario("Memory Card as ux0, USB stick/SD2Vita as uma0", "ux0:", 0, 1);
@@ -617,7 +654,7 @@ int main(int argc, char **argv) {
   root = detect_readonly();
   CHECK(root && !strcmp(root, "uma0:"), "root %s", root ? root : "(null)");
   slot_payload_path(path, sizeof(path), 0);
-  CHECK(!strcmp(path, "ux0:data/JamaisVu/slot1.bin"), "payload path %s", path);
+  CHECK(!strcmp(path, "ux0:data/JamaisVu/Slot1/state.bin"), "payload path %s", path);
   exercise_writes(1);
 
   scenario("Memory Card as xmc0, SD2Vita as ux0, USB as uma0", "xmc0:", 1, 1);

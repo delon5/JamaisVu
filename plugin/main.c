@@ -517,7 +517,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
                int payload_variant) {
   uint32_t flag_pa;
 
-  if (!g_armed || slot < 0 || slot >= JV_NUM_SLOTS)
+  if (!g_armed || slot < 0 || slot >= JV_MAX_SLOTS)
     return -1;
 
   flag_pa = va2pa(fs_write_mode_addr());

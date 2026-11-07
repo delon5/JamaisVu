@@ -45,6 +45,33 @@ int main(void) {
   expect("free space unknown, slots 1+4 exist", -1, s14, 2, ".LL.L");
   expect("0 free, all exist", 0, all, 5, ".....");
 
+  printf("slots that can exist (total shown)\n");
+  {
+    struct { const char *name; long long free; int ex[6]; int n; int want; } t[] = {
+      { "nothing, 500 MB free", 500 * MB, { 0 }, 6, 0 },
+      { "nothing, 768 MB free", 768 * MB, { 0 }, 6, 1 },
+      { "nothing, 3 GB free", 3 * GB, { 0 }, 6, 4 },
+      { "slots 1-2 exist, no room", 0, { 1, 1, 0, 0, 0, 0 }, 6, 2 },
+      { "slots 1-2 exist, 1 GB free", 1 * GB, { 1, 1, 0, 0, 0, 0 }, 6, 3 },
+      { "slots 1 and 3 exist, no room", 0, { 1, 0, 1, 0, 0, 0 }, 6, 3 },
+      { "slots 1 and 3 exist, 1 GB free", 1 * GB, { 1, 0, 1, 0, 0, 0 }, 6, 3 },
+      { "slots 1 and 3 exist, 2 GB free", 2 * GB, { 1, 0, 1, 0, 0, 0 }, 6, 4 },
+      { "slot 6 exists, free unknown", -1, { 0, 0, 0, 0, 0, 1 }, 6, 6 },
+      { "capped by n", 100 * GB, { 0 }, 6, 6 },
+    };
+    for (unsigned i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+      int got = slot_total(t[i].free, t[i].ex, t[i].n);
+      printf("  %-44s total=%d %s\n", t[i].name, got,
+             got == t[i].want ? "ok" : "FAIL");
+      failures += got != t[i].want;
+    }
+    int ex99[JV_MAX_SLOTS] = { 0 };
+    int got = slot_total(1000 * GB, ex99, JV_MAX_SLOTS);
+    printf("  %-44s total=%d %s\n", "1 TB free: at most 99", got,
+           got == 99 ? "ok" : "FAIL");
+    failures += got != 99;
+  }
+
   printf("%s\n", failures ? "SLOT POLICY TESTS FAILED" : "slot policy tests passed");
   return failures != 0;
 }

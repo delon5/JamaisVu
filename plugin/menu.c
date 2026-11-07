@@ -41,7 +41,8 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 #define EVF_RESUMED 2
 
 enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY,
-       OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY, OP_TEST_WRITE };
+       OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY, OP_TEST_WRITE,
+       OP_WINDOW /* thumbnails and names for the five slots on screen */ };
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
 #define PENDING  JV_NUM_SLOTS /* thumbnail index of the live capture */
@@ -308,6 +309,17 @@ static int g_render_thread_ok;
 static volatile uint32_t g_panel_seq = 1, g_panel_gen;
 static uint16_t *g_thumbs[JV_NUM_SLOTS + 1]; /* RGB565 */
 static void model_clear_thumbs(void);
+
+/* The slot list: every slot that can exist (slot_total), read by the
+ * worker; the model holds the five on screen (MenuModel.first). The
+ * thumbnails in memory are those five: g_thumb_slot[pos] says which slot's
+ * picture g_thumbs[pos] holds (-1: none), the worker loads the missing
+ * ones (OP_WINDOW). All under g_mtx. */
+static MenuSlot g_slot_list[JV_MAX_SLOTS];
+static uint8_t g_list_has_thumb[JV_MAX_SLOTS];
+static int g_total;
+static int g_thumb_slot[JV_NUM_SLOTS] = { -1, -1, -1, -1, -1 };
+static void window_fill_locked(void);
 
 /* Glyphs for Japanese (non-ASCII) game names, read from jpfont.bin on
  * the Memory Card when the slot list is read, into a set sized to the
@@ -937,8 +949,10 @@ static void model_end(void) {
 static void model_clear_thumbs(void) {
   model_begin();
   g_model.ext = NULL;
-  for (int i = 0; i < JV_NUM_SLOTS; i++)
+  for (int i = 0; i < JV_NUM_SLOTS; i++) {
     g_model.slots[i].thumb = NULL;
+    g_thumb_slot[i] = -1;
+  }
   model_end();
 }
 
@@ -1202,6 +1216,8 @@ static int overlay_acquire(void) {
       for (int i = 0; i <= JV_NUM_SLOTS; i++)
         g_thumbs[i] = (uint16_t *)base[OVL_P_THUMBS + i / THUMB_PER_BLOCK] +
                       (i % THUMB_PER_BLOCK) * THUMB_PX;
+      for (int i = 0; i < JV_NUM_SLOTS; i++)
+        g_thumb_slot[i] = -1;
       g_band_px = base[OVL_P_BAND];
       g_panel_img.corner = g_band_px + MENU_W * BAND_ROWS;
       g_toast_img.corner = g_panel_img.corner + CORNER_PX;
@@ -2547,12 +2563,15 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   ksceKernelLockMutex(g_mtx, 1, NULL);
   MenuMode mode = g_model.mode;
   int sel = g_model.selected;
-  int used = g_model.slots[sel].used;
-  int locked = g_model.slots[sel].locked;
-  int outdated = g_model.slots[sel].outdated;
-  int cfg_changed = g_model.slots[sel].config_changed;
-  int prepared = g_model.slots[sel].prepared;
+  if (sel < 0 || sel >= JV_MAX_SLOTS)
+    sel = 0;
+  int used = g_slot_list[sel].used;
+  int locked = g_slot_list[sel].locked;
+  int outdated = g_slot_list[sel].outdated;
+  int cfg_changed = g_slot_list[sel].config_changed;
+  int prepared = g_slot_list[sel].prepared;
   int prepare_count = g_model.prepare_count;
+  int total = g_total;
   ksceKernelUnlockMutex(g_mtx, 1);
 
   if ((combo || close_combo) && mode != MV_BUSY) {
@@ -2562,13 +2581,28 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
 
   switch (mode) {
     case MV_BROWSE:
-      if (pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) {
-        model_begin();
+      if (pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE_CTRL_LTRIGGER |
+                     SCE_CTRL_RTRIGGER)) {
+        /* over every slot that can exist, wrapping at the ends; L and R
+         * move by a row of five. The row on screen follows the selection
+         * (window_fill_locked); its thumbnails come from the worker. */
+        int n = total ? total : 1, s = sel, moved;
         if (pressed & SCE_CTRL_LEFT)
-          g_model.selected = (sel + JV_NUM_SLOTS - 1) % JV_NUM_SLOTS;
+          s = (s + n - 1) % n;
+        else if (pressed & SCE_CTRL_RIGHT)
+          s = (s + 1) % n;
+        else if (pressed & SCE_CTRL_LTRIGGER)
+          s = s >= JV_NUM_SLOTS ? s - JV_NUM_SLOTS : 0;
         else
-          g_model.selected = (sel + 1) % JV_NUM_SLOTS;
+          s = s + JV_NUM_SLOTS < n ? s + JV_NUM_SLOTS : n - 1;
+        model_begin();
+        g_model.selected = s;
+        int first = g_model.first;
+        window_fill_locked();
+        moved = g_model.first != first;
         model_end();
+        if (moved)
+          start_op(OP_WINDOW, 0);
       } else if ((pressed & (SCE_CTRL_CROSS | SCE_CTRL_SQUARE |
                              SCE_CTRL_TRIANGLE)) && !jv_armed()) {
         static char msg[128];
@@ -3013,9 +3047,144 @@ static const ExtGlyphs *resolve_names(MenuSlot *fresh) {
   return ext;
 }
 
+/* g_mtx held: the five slots on screen from the list, around the
+ * selection; thumbnails where g_thumbs already holds the right picture,
+ * none (LOADING) where the worker has to read it. No slot at all: one
+ * locked placeholder (list[0]) and the counter reads 00/00. */
+static void window_fill_locked(void) {
+  int n = g_total ? g_total : 1;
+  int maxfirst = n > JV_NUM_SLOTS ? n - JV_NUM_SLOTS : 0;
+  int loading = 0;
+  if (g_model.selected >= n)
+    g_model.selected = n - 1;
+  if (g_model.selected < 0)
+    g_model.selected = 0;
+  if (g_model.first > maxfirst)
+    g_model.first = maxfirst;
+  if (g_model.first < 0)
+    g_model.first = 0;
+  if (g_model.selected < g_model.first)
+    g_model.first = g_model.selected;
+  if (g_model.selected >= g_model.first + JV_NUM_SLOTS)
+    g_model.first = g_model.selected - JV_NUM_SLOTS + 1;
+  g_model.total = g_total;
+  for (int pos = 0; pos < JV_NUM_SLOTS; pos++) {
+    int at = g_model.first + pos;
+    if (at >= n) {
+      memset(&g_model.slots[pos], 0, sizeof(g_model.slots[pos]));
+      continue;
+    }
+    g_model.slots[pos] = g_slot_list[at];
+    g_model.slots[pos].thumb = NULL;
+    if (g_slot_list[at].used && g_list_has_thumb[at]) {
+      if (g_thumb_slot[pos] == at && g_thumbs[pos])
+        g_model.slots[pos].thumb = g_thumbs[pos];
+      else
+        loading = 1;
+    }
+  }
+  if (loading)
+    g_model.refreshing = 1;
+}
+
+/* Worker: the thumbnails and the names of the five slots on screen. The
+ * pictures already in memory move to their new positions (the row slid by
+ * one: four copies, one read), the rest are read from the card; then the
+ * names (LiveArea names, Japanese glyphs) for exactly these five. Done
+ * again if the row moved meanwhile. */
+static void window_load(void) {
+  static SlotInfo info;
+  static MenuSlot win[JV_NUM_SLOTS];
+  for (;;) {
+    int first, n;
+    model_begin();
+    first = g_model.first;
+    n = g_total ? g_total : 1;
+    /* pictures in memory, to their new places: one shift for all */
+    {
+      int d = 0;
+      for (int pos = 0; pos < JV_NUM_SLOTS && !d; pos++)
+        for (int src = 0; src < JV_NUM_SLOTS; src++)
+          if (src != pos && g_thumb_slot[src] == first + pos &&
+              g_thumbs[src] && g_thumbs[pos]) {
+            d = src - pos;
+            break;
+          }
+      if (d > 0)
+        for (int pos = 0; pos < JV_NUM_SLOTS; pos++) {
+          int src = pos + d;
+          if (src < JV_NUM_SLOTS && g_thumb_slot[src] == first + pos) {
+            memcpy(g_thumbs[pos], g_thumbs[src], THUMB_PX * 2);
+            g_thumb_slot[pos] = first + pos;
+          } else if (g_thumb_slot[pos] != first + pos) {
+            g_thumb_slot[pos] = -1;
+          }
+        }
+      else if (d < 0)
+        for (int pos = JV_NUM_SLOTS - 1; pos >= 0; pos--) {
+          int src = pos + d;
+          if (src >= 0 && g_thumb_slot[src] == first + pos) {
+            memcpy(g_thumbs[pos], g_thumbs[src], THUMB_PX * 2);
+            g_thumb_slot[pos] = first + pos;
+          } else if (g_thumb_slot[pos] != first + pos) {
+            g_thumb_slot[pos] = -1;
+          }
+        }
+      window_fill_locked();
+    }
+    model_end();
+
+    /* the pictures still missing, from the card */
+    for (int pos = 0; pos < JV_NUM_SLOTS; pos++) {
+      int at = first + pos, need;
+      ksceKernelLockMutex(g_mtx, 1, NULL);
+      need = at < n && g_slot_list[at].used && g_list_has_thumb[at] &&
+             g_thumb_slot[pos] != at && g_thumbs[pos] != NULL;
+      ksceKernelUnlockMutex(g_mtx, 1);
+      if (!need)
+        continue;
+      int ok = slot_info_read(at, &info, g_thumbs[pos]) == 0 && info.has_thumb;
+      model_begin();
+      g_thumb_slot[pos] = ok ? at : -1;
+      if (!ok)
+        g_list_has_thumb[at] = 0; /* not read again and again */
+      if (g_model.first == first)
+        g_model.slots[pos].thumb = ok ? g_thumbs[pos] : NULL;
+      model_end();
+    }
+
+    /* the names for these five */
+    ksceKernelLockMutex(g_mtx, 1, NULL);
+    for (int pos = 0; pos < JV_NUM_SLOTS; pos++)
+      win[pos] = first + pos < n ? g_slot_list[first + pos] : g_slot_list[0];
+    for (int pos = 0; pos < JV_NUM_SLOTS; pos++)
+      if (first + pos >= n)
+        win[pos].used = 0;
+    ksceKernelUnlockMutex(g_mtx, 1);
+    const ExtGlyphs *ext = resolve_names(win);
+
+    model_begin();
+    int moved = g_model.first != first;
+    if (!moved) {
+      for (int pos = 0; pos < JV_NUM_SLOTS; pos++)
+        if (first + pos < n)
+          memcpy(g_model.slots[pos].title, win[pos].title,
+                 sizeof(win[pos].title));
+      g_model.ext = ext;
+      g_model.refreshing = 0;
+    }
+    model_end();
+    ext_free_unused();
+    if (!moved)
+      break;
+  }
+}
+
 static void refresh_slots(void) {
   static SlotInfo info;
-  int exists[JV_NUM_SLOTS], locked[JV_NUM_SLOTS];
+  static int exists[JV_MAX_SLOTS], locked[JV_MAX_SLOTS];
+  static MenuSlot list[JV_MAX_SLOTS];
+  static uint8_t has_thumb[JV_MAX_SLOTS];
   /* how long each step took (log.txt when the whole read is slow: the
    * thumbnails showed LOADING for ~30 s in GTA: San Andreas on the PS TV) */
   uint64_t t0 = ksceKernelGetSystemTimeWide(), t;
@@ -3030,19 +3199,43 @@ static void refresh_slots(void) {
   const char *mc = storage_detect(); /* read-only */
   JV_LAP(ms_detect);
 
+  /* slots laid out the old way (slotN.bin in data/JamaisVu): into their
+   * folders, once per start */
+  static int migrated;
+  if (mc && !migrated) {
+    int failed = 0;
+    int moved = slots_migrate(&failed);
+    migrated = 1;
+    if (moved || failed) {
+      static char line[160];
+      snprintf(line, sizeof(line), "slots moved into their folders "
+               "(data/JamaisVu/SlotN): %d moved, %d could not be moved "
+               "(left as they were, not shown)\r\n", moved, failed);
+      log_queue(line);
+    }
+  }
+
   model_begin();
   g_model.savedata_rolls_back = mc && strcmp(mc, "ux0:") == 0;
   g_model.refreshing = 1; /* thumbnails still loading */
   model_end();
 
-  /* free-space safeguard: only as many new slots as fit (slot_policy.h) */
-  for (int i = 0; i < JV_NUM_SLOTS; i++)
-    exists[i] = mc && slot_file_exists(i);
+  /* which slots can exist: those with a file, plus as many new ones as
+   * the free space allows (slot_policy.h) */
+  int total = 0;
+  int64_t free_b = -1;
+  memset(exists, 0, sizeof(exists));
+  if (mc) {
+    slots_scan(exists, JV_MAX_SLOTS);
+    free_b = slot_free_space();
+    total = slot_total(free_b, exists, JV_MAX_SLOTS);
+  }
+  int n = total ? total : 1; /* one locked placeholder when none */
   if (!mc) {
-    for (int i = 0; i < JV_NUM_SLOTS; i++)
+    for (int i = 0; i < n; i++)
       locked[i] = 1;
   } else {
-    slot_policy(slot_free_space(), exists, locked, JV_NUM_SLOTS);
+    slot_policy(free_b, exists, locked, n);
   }
   JV_LAP(ms_space);
 
@@ -3056,33 +3249,37 @@ static void refresh_slots(void) {
   tai_fingerprint_quick(tai_now);
   JV_LAP(ms_tai);
 
-  int prepare_count = 0;
-  for (int i = 0; i < JV_NUM_SLOTS; i++)
+  int prepare_count = 0, with_file = 0;
+  for (int i = 0; i < total; i++) {
     if (!exists[i] && !locked[i])
       prepare_count++;
+    with_file += exists[i] != 0;
+  }
   model_begin();
   g_model.prepare_count = prepare_count;
   model_end();
 
   /* All file reading happens here, without the model lock: the input
    * thread takes that lock for every press, and in heavy games (Trails)
-   * a param.sfo read could take seconds - the menu stopped responding. */
-  static MenuSlot fresh[JV_NUM_SLOTS];
-  for (int i = 0; i < JV_NUM_SLOTS; i++) {
-    MenuSlot *s = &fresh[i];
-    int ok = exists[i] && slot_info_read(i, &info, g_thumbs[i]) == 0;
+   * a param.sfo read could take seconds - the menu stopped responding.
+   * The slot info is read without its thumbnail and CRC here (the five
+   * on screen get the full read in window_load). */
+  for (int i = 0; i < n; i++) {
+    MenuSlot *s = &list[i];
+    int ok = exists[i] && slot_info_peek(i, &info) == 0;
     JV_ADD(ms_info);
 
     memset(s, 0, sizeof(*s));
+    has_thumb[i] = 0;
     s->locked = locked[i];
     s->prepared = exists[i];
     if (ok) {
       s->used = 1;
+      has_thumb[i] = info.has_thumb != 0;
       strncpy(s->titleid, info.titleid, sizeof(s->titleid) - 1);
       strncpy(s->title, info.title, sizeof(s->title) - 1);
       snprintf(s->date, sizeof(s->date), "%04d-%02d-%02d  %02d:%02d",
                info.year, info.month, info.day, info.hour, info.minute);
-      s->thumb = info.has_thumb ? g_thumbs[i] : NULL;
       memcpy(s->app_ver, info.app_ver, sizeof(s->app_ver));
       s->app_ver[sizeof(s->app_ver) - 1] = '\0';
       if (lookup_app_ver(info.titleid, s->installed_ver,
@@ -3097,29 +3294,41 @@ static void refresh_slots(void) {
     }
   }
 
-  const ExtGlyphs *ext = resolve_names(fresh);
+  /* the list, then the five on screen (thumbnails follow) */
+  model_begin();
+  memcpy(g_slot_list, list, sizeof(list));
+  memcpy(g_list_has_thumb, has_thumb, sizeof(has_thumb));
+  g_total = total;
+  window_fill_locked();
+  model_end();
+
+  static int last_total = -1;
+  if (total != last_total) {
+    static char line[200];
+    last_total = total;
+    snprintf(line, sizeof(line), "slot list: %d slot%s can exist - %d with "
+             "a file, room for %d more (%lld MB free, 704 MB each)\r\n",
+             total, total == 1 ? "" : "s", with_file, total - with_file,
+             free_b < 0 ? -1LL : (long long)(free_b >> 20));
+    log_queue(line);
+  }
+
+  window_load(); /* thumbnails and names for the five on screen */
   JV_LAP(ms_names);
 
-  /* then one short update under the lock */
-  model_begin();
-  memcpy(g_model.slots, fresh, sizeof(fresh));
-  g_model.ext = ext;
-  g_model.refreshing = 0;
-  model_end();
-  ext_free_unused();
-
-  uint32_t total = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
-  if (total >= 2000) {
+  uint32_t total_ms = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
+  if (total_ms >= 2000) {
     static char line[300];
     char tid[16];
     fg_title(tid, sizeof(tid));
     snprintf(line, sizeof(line), "slot list read slowly in %s: %u ms - "
-             "card check %u, free space %u, config files %u, tai folders "
-             "%u, slot info + thumbnails %u, game versions (param.sfo) %u, "
-             "slot environment %u, names (app.db, jpfont.bin) %u\r\n", tid,
-             (unsigned)total, (unsigned)ms_detect, (unsigned)ms_space,
-             (unsigned)ms_cfg, (unsigned)ms_tai, (unsigned)ms_info,
-             (unsigned)ms_ver, (unsigned)ms_env, (unsigned)ms_names);
+             "card check %u, free space + %d slot files %u, config files "
+             "%u, tai folders %u, slot info %u, game versions (param.sfo) "
+             "%u, slot environment %u, thumbnails + names (app.db, "
+             "jpfont.bin) %u\r\n", tid, (unsigned)total_ms,
+             (unsigned)ms_detect, n, (unsigned)ms_space, (unsigned)ms_cfg,
+             (unsigned)ms_tai, (unsigned)ms_info, (unsigned)ms_ver,
+             (unsigned)ms_env, (unsigned)ms_names);
     log_queue(line);
   }
 #undef JV_LAP
@@ -4293,12 +4502,15 @@ static void do_prepare(int all, int slot) {
   slots_mkdirs();
   g_progress_note = "";
 
-  for (int i = all ? 0 : slot; i < (all ? JV_NUM_SLOTS : slot + 1); i++) {
+  for (int i = all ? 0 : slot; i < (all ? JV_MAX_SLOTS : slot + 1); i++) {
     refresh_slots(); /* current free space -> which slots may be created */
     ksceKernelLockMutex(g_mtx, 1, NULL);
-    int prepared = g_model.slots[i].prepared;
-    int locked = g_model.slots[i].locked;
+    int total = g_total;
+    int prepared = g_slot_list[i].prepared;
+    int locked = g_slot_list[i].locked;
     ksceKernelUnlockMutex(g_mtx, 1);
+    if (i >= total)
+      break;
     if (prepared)
       continue;
     if (locked) {
@@ -4428,10 +4640,13 @@ static int worker_thread(SceSize args, void *argp) {
       case OP_PREPARE_ALL:
         do_prepare(1, g_op_slot);
         break;
+      case OP_WINDOW:
+        window_load();
+        break;
     }
 
     /* after a job that changed slots (not after a refresh itself) */
-    if (g_menu_open && g_op != OP_REFRESH)
+    if (g_menu_open && g_op != OP_REFRESH && g_op != OP_WINDOW)
       refresh_slots();
 
     ksceKernelLockMutex(g_mtx, 1, NULL);

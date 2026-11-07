@@ -16,6 +16,9 @@
 #define JV_SLOT_SIZE 0x2C000000u /* 704 MiB per slot file */
 #endif
 
+/* The most slots there can be: two digits in the menu's counter. */
+#define JV_MAX_SLOTS 99
+
 /* Free space that must remain on ux0 after creating a slot file. */
 #ifndef JV_FREE_SPACE_MARGIN
 #define JV_FREE_SPACE_MARGIN (64ull * 1024 * 1024)
@@ -37,6 +40,16 @@
  * Writes locked[i] and returns the number of usable slots.
  */
 int slot_policy(int64_t free_bytes, const int *exists, int *locked, int n);
+
+/*
+ * How many slots the menu shows: every slot up to the highest-numbered one
+ * that has a file (a deleted slot in between stays, it can be created
+ * again), plus as many new ones as the free space allows beyond the ones
+ * that exist, at most JV_MAX_SLOTS. 0 when no slot exists and none fits:
+ * the menu then shows one locked placeholder, counter 00/00. exists[] has
+ * n entries (n <= JV_MAX_SLOTS).
+ */
+int slot_total(int64_t free_bytes, const int *exists, int n);
 
 /*
  * A snapshot may only be loaded into exactly the game version it was taken
