@@ -459,11 +459,51 @@ static int update_vnodes(uint32_t only) {
       continue;
     }
 
+    /* An entry nothing holds open is the kernel's name cache for a file
+     * the game opened earlier; looking it up again costs ~20 ms of card
+     * reads (f44f095 log: 1024 entries, 852 folders, 17 s). The kernel's
+     * own reclaim throws such entries away whenever it needs one (the
+     * table runs at 1021 of 1024 in GTA): the same conditions here -
+     * unreferenced, active, an ordinary file or folder, not a folder with
+     * cached entries under it, its parent folder locked for the moment -
+     * then the entry is given back as a gone file would be. The next open
+     * of the file reads it from the drive, as after a cold start. */
+    {
+      uint32_t refs0 = *(uint32_t *)(vp + 0x58);
+      uint32_t state0 = *(uint32_t *)(vp + 0x74);
+      uint32_t type0 = *(uint32_t *)(vp + 0x78);
+      void *nc = *(uintptr_t **)(vp + 0x70);
+      void *parent = *(uintptr_t **)(vp + 0x50);
+      if (refs0 == 0 &&
+          fs_vnode_action(-1, 1, 0, state0, type0) == JV_VN_FREE) {
+        if ((type0 & JV_VNODE_TYPE_DIR) && nc &&
+            *(uintptr_t **)((uintptr_t)nc + 0xc)) {
+          g_fs_notes.kept_children++; /* looked up below instead */
+        } else if (!parent || vnode_try_lock(parent) < 0) {
+          g_fs_notes.kept_parent++;
+        } else {
+          if (nc)
+            clear_ncache(nc, 0);
+          ksceVopInactive(vp);
+          vfs_free_vnode(vp); /* unlinks it from the mount, releases our
+                                 lock on it (see vnode_try_lock) */
+          vfs_unlock_vnode(parent);
+          if (type0 & JV_VNODE_TYPE_DIR)
+            g_fs_notes.dropped_dirs++;
+          else
+            g_fs_notes.dropped++;
+          continue;
+        }
+      }
+    }
+
     int looked_up;
     int res = update_fnode(fnode, &looked_up);
     int idx = fnode_index(fnode);
     if (looked_up && idx >= 0)
       g_fnode_done[idx / 32] |= 1u << (idx % 32);
+    if (looked_up)
+      g_fs_notes.looked_up++;
 
     uint32_t refCount = *(uint32_t *)(vp + 0x58);
     uint32_t state = *(uint32_t *)(vp + 0x74);

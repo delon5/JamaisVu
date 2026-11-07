@@ -2929,6 +2929,14 @@ static void fs_notes_log(void) {
                (unsigned long long)e->size_now, (unsigned)e->refs);
     log_append(line);
   }
+  snprintf(line, sizeof(line), "    entries nothing held open: %u files "
+           "and %u folders given back without a lookup (as the kernel's "
+           "reclaim does); kept and looked up: %u folders with cached "
+           "entries, %u without a parent lock; %u entries looked up in "
+           "all\r\n", (unsigned)f->dropped, (unsigned)f->dropped_dirs,
+           (unsigned)f->kept_children, (unsigned)f->kept_parent,
+           (unsigned)f->looked_up);
+  log_append(line);
   /* where the lookup time went: the slowest folders first */
   snprintf(line, sizeof(line), "    lookup time: finding the folders %u ms, "
            "searching the files in them %u ms; %u folders\r\n",

@@ -117,6 +117,12 @@ typedef struct {
                     failed): left to the kernel */
   uint32_t n;
   FsNote note[FS_NOTE_MAX];
+  /* unreferenced entries given back instead of looked up (the kernel's own
+   * reclaim conditions), and why some were looked up after all */
+  uint32_t dropped, dropped_dirs;
+  uint32_t kept_children; /* folder with cached entries under it */
+  uint32_t kept_parent;   /* no parent, or its lock was taken */
+  uint32_t looked_up;     /* entries looked up on their drive */
   uint32_t dirs;             /* distinct folders seen (table may be full) */
   uint32_t parent_us, search_us; /* all lookups: folder part, file part */
   FsDirStat dir[FS_DIR_MAX];
