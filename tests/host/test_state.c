@@ -77,6 +77,9 @@ JV_PIN(icache_on, 2128);
 JV_PIN(delay_unit_ns, 2132);
 JV_PIN(disp_type, 2136);
 JV_PIN(appdb_changed, 2140);
+JV_PIN(ttbcr_n, 2144);
+JV_PIN(cpu_mhz, 2148);
+JV_PIN(refuse, 2152);
 _Static_assert(sizeof(PayloadArguments) >= 2084,
                "PayloadArguments shrank: old snapshots would break");
 

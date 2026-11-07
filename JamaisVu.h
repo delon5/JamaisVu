@@ -124,7 +124,22 @@ typedef struct {
    * restored image): the LiveArea's app database compared with the one
    * recorded at save time - 0 unknown (no record), 1 same, 2 changed. */
   uint32_t appdb_changed;
+  /* TTBCR.N of the running kernel: the payload walks only the entries
+   * each translation table really has (0 = unknown: whole tables, as
+   * before). */
+  uint32_t ttbcr_n;
+  /* The ARM clock at the request, in MHz: the payload's time base (its
+   * cycle counter runs at that rate). 0 = unknown: 444 assumed. */
+  uint32_t cpu_mhz;
+  /* Set by the plugin at suspend when the snapshot could not be complete
+   * (JV_REFUSE_*): the payload then does nothing and returns JV_ERR_ARGS
+   * with this as detail. */
+  uint32_t refuse;
 } PayloadArguments;
+
+#define JV_REFUSE_PROCESSES 1 /* more processes than the snapshot holds */
+#define JV_REFUSE_CONTEXT   2 /* a process's translation table not found */
+#define JV_REFUSE_PROCLIST  3 /* the process list not available */
 
 /* Register snapshot (REGSNAP_PADDR in shared.h): the PS TV's HDMI display
  * registers, read in these ranges in this order - by the payload while

@@ -119,6 +119,10 @@ void jv_clocks_restore(char *out, int len) {
            a, c);
 }
 
+uint32_t jv_last_process_num(void) {
+  return pargs.process_num;
+}
+
 const char *jv_build_id(void) {
 #if defined(JAMAISVU_TESTING)
   return JV_BUILD_ID "-testing";
@@ -252,17 +256,21 @@ static int get_ttbs_and_titleids(void) {
 
   res = _ksceKernelFindClassByName("SceUIDProcessClass", &cls);
   if (res < 0)
-    return res;
+    return JV_REFUSE_PROCLIST;
 
   res = _ksceGUIDGetUIDVectorByClass(cls, 8, vector,
                                      sizeof(vector) / sizeof(SceUID),
                                      (int *)&pargs.process_num);
   if (res < 0) {
     pargs.process_num = 0;
-    return res;
+    return JV_REFUSE_PROCLIST;
   }
-  if (pargs.process_num > JV_MAX_PROCESSES)
+  /* a process the snapshot would not hold: its memory would be garbage
+   * after a load - refused rather than clamped (JV_REFUSE_*) */
+  if (pargs.process_num > JV_MAX_PROCESSES) {
     pargs.process_num = JV_MAX_PROCESSES;
+    return JV_REFUSE_PROCESSES;
+  }
 
   __asm__ volatile ("mrc p15, 0, %0, c2, c0, 2\n\t"
                     "mrc p15, 0, %1, c2, c0, 0\n\t"
@@ -272,8 +280,9 @@ static int get_ttbs_and_titleids(void) {
   ttbr_mask[1] = 0xffffffff << 14;
 
   for (i = 0; i < pargs.process_num; i++) {
-    SceKernelProcessContext *ctx;
-    ksceKernelGetPidContext(vector[i], &ctx);
+    SceKernelProcessContext *ctx = NULL;
+    if (ksceKernelGetPidContext(vector[i], &ctx) < 0 || !ctx)
+      return JV_REFUSE_CONTEXT;
     pargs.ttbs[i] = ctx->TTBR1 & ttbr_mask[1];
 
     ksceKernelGetProcessTitleId(vector[i], pargs.titleid[i], 32);
@@ -386,7 +395,7 @@ ev_done:
         get_fattime();
 
         if (pargs.mode == JAMAISVU_MODE_SAVE)
-          get_ttbs_and_titleids();
+          pargs.refuse = (uint32_t)get_ttbs_and_titleids();
 
         /* NOTE: writes are deliberately NOT blocked here any more. This
          * image is about to be discarded (load) or kept (save); either way
@@ -557,6 +566,14 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   }
   if (!(debug_mode == JV_TEST_NONE && mode == JAMAISVU_MODE_LOAD))
     pargs.disp_fb2_paddr = 0; /* the snapshot's frame: loads only */
+  pargs.refuse = 0;
+  {
+    uint32_t ttbcr = 0;
+    __asm__ volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
+    pargs.ttbcr_n = ttbcr & 7;
+    int mhz = kscePowerGetArmClockFrequency();
+    pargs.cpu_mhz = mhz > 0 ? (uint32_t)mhz : 0;
+  }
   pargs.trace_rel_lba = trace_nonce ? trace_rel_lba : 0;
   if (trace_nonce)
     memcpy(pargs.trace_nonce, trace_nonce, sizeof(pargs.trace_nonce));

@@ -2552,6 +2552,25 @@ static int card_wait(int ms) {
   return 0;
 }
 
+/* Memory canary: 64 KB of this plugin's own memory, filled with pattern
+ * A before a save (so the snapshot holds A) and with pattern B just before
+ * a load is requested. After the load the restored image must see A in
+ * every word: a B word is memory the restore did not put back, or a stale
+ * cache line (the payload restores RAM by DMA with the caches off). */
+#define CANARY_WORDS 16384
+static uint32_t g_canary[CANARY_WORDS];
+static void canary_fill(uint32_t tag) {
+  for (uint32_t i = 0; i < CANARY_WORDS; i++)
+    g_canary[i] = tag | i;
+}
+static uint32_t canary_bad(void) {
+  uint32_t bad = 0;
+  for (uint32_t i = 0; i < CANARY_WORDS; i++)
+    if (g_canary[i] != (0x5A000000u | i))
+      bad++;
+  return bad;
+}
+
 static int g_card_remount_ret = 1;
 static const char *g_card_remount_root;
 static int g_card_open_files;
@@ -2610,6 +2629,20 @@ static void after_resume(void) {
     snprintf(line, sizeof(line), "    %s\r\n", clk);
     g_log_trace_once = 1;
     log_append(line);
+    if (g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_LOAD &&
+        g_res_result == JV_OK) {
+      uint32_t bad = canary_bad();
+      snprintf(line, sizeof(line), "    memory canary after the load: %u "
+               "of %u words %s\r\n", (unsigned)bad, (unsigned)CANARY_WORDS,
+               bad ? "NOT the snapshot's (memory not restored, or a stale "
+                     "cache line)" : "as saved");
+      log_append(line);
+    }
+    if (g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_SAVE) {
+      snprintf(line, sizeof(line), "    processes in the snapshot: %u\r\n",
+               (unsigned)jv_last_process_num());
+      log_append(line);
+    }
     if (g_card_remount_root) {
       if (g_card_open_files > 0)
         snprintf(line, sizeof(line), "    after the load: Memory Card on %s "
@@ -2694,6 +2727,16 @@ static void after_resume(void) {
         snprintf(msg, sizeof(msg), "Saved, but the slot info could not be "
                  "written - slot %u stays empty", (unsigned)g_res_slot + 1);
       report(msg, r != 0);
+    } else if (g_res_result == JV_ERR_ARGS && g_res_detail >= 1 &&
+               g_res_detail <= 3) {
+      /* refused by the plugin at suspend: the snapshot would be incomplete */
+      snprintf(msg, sizeof(msg), "Not saved: %s",
+               g_res_detail == JV_REFUSE_PROCESSES
+                   ? "too many apps running - close some and try again"
+               : g_res_detail == JV_REFUSE_CONTEXT
+                   ? "an app's memory map could not be read"
+                   : "the list of running apps is not available");
+      report(msg, 1);
     } else {
       snprintf(msg, sizeof(msg), "Save failed: %s",
                result_text(g_res_result));
@@ -2862,6 +2905,8 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     log_append(line);
   }
 
+  if (debug_mode == JV_TEST_NONE)
+    canary_fill(mode == JAMAISVU_MODE_LOAD ? 0xB5000000u : 0x5A000000u);
   if (jv_request(mode, slot, nonce, debug_mode, trel,
                  tok ? tnonce : NULL, variant) < 0) {
     lockskip_release();
