@@ -222,6 +222,7 @@ static volatile int g_plane_yield;  /* the input thread closes the menu */
 static volatile SceUID g_l0_pid;
 static volatile int64_t g_l0_us, g_l1_other_us;
 static const char *g_plane_why; /* why the plane was not used (log) */
+static volatile int64_t g_plane_hide_us; /* when the menu left the plane */
 static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
 static volatile int g_plane_toast;  /* the message box is drawn in it */
 static volatile int g_render_active;
@@ -555,9 +556,10 @@ static int plane_alloc(void) {
       g_plane_px = base;
       g_plane_pool = names[i];
       plane_clear(0, PLANE_H);
-      snprintf(line, sizeof(line), "overlay plane: %u KB in %s, kept from "
-               "now on - in games the menu is shown on the display's second "
-               "layer\r\n", (unsigned)(size >> 10), names[i]);
+      snprintf(line, sizeof(line), "overlay plane: %u KB in %s - the menu "
+               "is shown on the display's second layer; given back once the "
+               "system sets the plane again\r\n", (unsigned)(size >> 10),
+               names[i]);
       log_queue(line);
       return 0;
     }
@@ -610,6 +612,24 @@ static void plane_hide(void) {
   if (shell > 0)
     g_set_owner(ksceDisplayGetPrimaryHead(), 1, shell);
   g_plane_shown = 0;
+  g_plane_hide_us = now_us();
+}
+
+/* The plane keeps scanning the buffer after the menu is gone (a NULL or
+ * transparent layer blacked the screen for good in the tests), so it is
+ * given back only once something else has been put on the plane: the
+ * system does that on its own overlays and at every app switch. Not held
+ * across games: a game that uses all its video memory (Trails 3rd with
+ * VitaGrafix crashed with 2 MB of it held from boot) gets it all. */
+static void plane_free_if_unused(void) {
+  if (!g_plane_px || g_plane_mode || g_plane_shown || g_plane_uid < 0 ||
+      g_l1_other_us <= g_plane_hide_us)
+    return;
+  ksceKernelFreeMemBlock(g_plane_uid);
+  g_plane_uid = -1;
+  g_plane_px = NULL;
+  log_queue("overlay plane: buffer given back (the system set the plane)"
+            "\r\n");
 }
 
 /* Display test: where the frame on screen is in physical memory. The
@@ -2466,6 +2486,7 @@ static int input_thread(SceSize args, void *argp) {
                   "- the menu closed\r\n");
       }
     }
+    plane_free_if_unused();
     /* on the plane the panel is drawn by the render thread; asked from
      * here too, not only from the display hook, which a screen that is
      * not being redrawn never calls (a static picture: nothing rendered) */
@@ -4596,12 +4617,6 @@ int menu_init(const char *status_text) {
     }
   }
   g_render_thread_ok = g_render_sema >= 0;
-
-  /* The plane's 2 MB buffer is taken now, with the pools still untouched:
-   * a game can leave no 2 MB block (Chinatown Wars left none in VRAM nor
-   * in root contiguous), and the buffer is kept for good either way. */
-  if (g_render_thread_ok)
-    plane_alloc();
 
   return 0;
 }
