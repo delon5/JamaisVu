@@ -293,6 +293,8 @@ static volatile int g_plane_yield;  /* the input thread closes the menu */
  * loading screen, the PS button menu, notifications) */
 static volatile SceUID g_l0_pid;
 static volatile int64_t g_l0_us, g_l1_other_us;
+static volatile int64_t g_l1_vis_us; /* ... with something visible in it */
+static uint32_t g_vis_row[1920];     /* one row of it, sampled (hook) */
 static const char *g_plane_why; /* why the plane was not used (log) */
 static volatile int64_t g_plane_hide_us; /* when the menu left the plane */
 static int64_t now_us(void); /* defined below, used by plane_hide */
@@ -557,6 +559,7 @@ static struct {
    * menu is open in a game: could the menu live there instead? */
   uint32_t chk_was, chk_now; /* the last changed pixel: ours -> the game's */
   uint32_t l0_calls, l1_calls, l1_set;
+  uint32_t l1_clear, l1_kept_off; /* fully transparent; swallowed */
   uintptr_t l1_base;
   uint32_t l1_fmt, l1_w, l1_h, l1_pitch;
   /* the frames the menu was drawn into: which layer, set by whom, with a
@@ -1176,7 +1179,7 @@ static int overlay_acquire(void) {
       int64_t tn = now_us();
       if (!fg || g_l0_pid != fg || tn - g_l0_us > 200000)
         g_plane_why = "the game's own frames are not on the screen";
-      else if (tn - g_l1_other_us < 2000000)
+      else if (tn - g_l1_vis_us < 2000000)
         g_plane_why = "the system has a picture on the plane";
       else if (plane_switched_off())
         g_plane_why = "switched off by the noplane file";
@@ -2118,6 +2121,25 @@ static void drawn_over_check(uintptr_t next_base) {
   g_chk.n = 0;
 }
 
+/* Does a frame someone else puts on the overlay plane show anything?
+ * Every 16th row is read and its alpha looked at (the system refreshes an
+ * all-transparent overlay buffer a few times a second in some games: GTA
+ * San Andreas, 65 times in 24 s). Anything unreadable or in another
+ * format counts as visible. Runs in the caller's thread (the system's). */
+static int frame_visible(const SceDisplayFrameBuf *p) {
+  if (p->pixelformat != 0 || p->width > 1920 || p->pitch < p->width)
+    return 1;
+  for (uint32_t y = 0; y < p->height; y += 16) {
+    const uint32_t *row = (const uint32_t *)p->base + y * p->pitch;
+    if (jv_copy_from_user(g_vis_row, row, p->width * 4) < 0)
+      return 1;
+    for (uint32_t x = 0; x < p->width; x++)
+      if (g_vis_row[x] & 0xff000000u)
+        return 1;
+  }
+  return 0;
+}
+
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
@@ -2126,11 +2148,26 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
       g_l0_pid = ksceKernelGetProcessId();
       g_l0_us = now_us();
     } else if (index == 1 && p->base != (void *)g_plane_px) {
+      /* the plane set by someone else: the system's own overlays. With
+       * something visible in it (PS button menu, a notification) the menu
+       * yields, see the input thread. Its all-transparent refreshes are
+       * kept off the plane while the menu is on it: nothing to see in
+       * them, and the menu would blink out at every one. */
+      int vis = frame_visible(p);
       g_l1_other_us = now_us();
-      /* the plane set by someone else (the system's own overlays: PS
-       * button menu, notifications): the menu yields, see the input thread */
-      if (g_plane_shown)
-        g_plane_lost = 1;
+      if (vis)
+        g_l1_vis_us = g_l1_other_us;
+      else
+        g_fbd.l1_clear++;
+      if (g_plane_shown) {
+        if (vis) {
+          g_plane_lost = 1;
+        } else {
+          g_fbd.l1_kept_off++;
+          prof_add(PROF_DISPLAY, t0);
+          return 0;
+        }
+      }
     }
   }
   if (g_menu_open && head == ksceDisplayGetPrimaryHead() &&
@@ -2337,7 +2374,8 @@ static void perf_report(void) {
              "frames (%u of %u pixels changed, checked up to %u ms after "
              "drawing; last changed pixel %08X -> %08X); system layer 1 "
              "while in the game: %u calls (%u with "
-             "a frame, last %08X fmt %X %ux%u pitch %u), game layer 0: %u "
+             "a frame, last %08X fmt %X %ux%u pitch %u; %u all-transparent, "
+             "%u of them kept off the plane), game layer 0: %u "
              "calls; cache flush pieces %u: returned 0 x%u, 1 x%u, other x%u "
              "(last other 0x%08X)\r\n",
              (unsigned)g_fbd.chk_hit, (unsigned)g_fbd.chk_frames,
@@ -2347,6 +2385,7 @@ static void perf_report(void) {
              (unsigned)g_fbd.l1_set, (unsigned)g_fbd.l1_base,
              (unsigned)g_fbd.l1_fmt, (unsigned)g_fbd.l1_w,
              (unsigned)g_fbd.l1_h, (unsigned)g_fbd.l1_pitch,
+             (unsigned)g_fbd.l1_clear, (unsigned)g_fbd.l1_kept_off,
              (unsigned)g_fbd.l0_calls, (unsigned)g_fbd.fl_pieces,
              (unsigned)g_fbd.fl_ret0, (unsigned)g_fbd.fl_ret1,
              (unsigned)g_fbd.fl_other, (unsigned)g_fbd.fl_other_val);
