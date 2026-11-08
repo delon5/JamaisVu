@@ -186,7 +186,7 @@ The plugin hooks the soft reset (`kscePowerRequestSoftReset`) so that, while eve
 
 - Original plugin (déjàvu) by [TheFloW](https://github.com/TheOfficialFloW). If you enjoy his work you can support him on [patreon](https://www.patreon.com/TheOfficialFloW).
 - Thanks to [xerpi](https://github.com/xerpi) and [motoharu](https://github.com/motoharu-gosuto) for their Memory Card research.
-- Thanks to [xerpi](https://github.com/xerpi) for [vita-libbaremetal](https://github.com/xerpi/vita-libbaremetal), which showed how the display is driven while the system sleeps (the payload's display code is JamaisVu's own, written from the Vita developer wiki's register pages).
+- Thanks to [xerpi](https://github.com/xerpi) for [vita-libbaremetal](https://github.com/xerpi/vita-libbaremetal) (MIT) and the Vita developer wiki pages that came out of it: the progress screen's display code (display link, display controller, clocks, I2C, the OLED and LCD panels, the HDMI bridge) was first built on his code and is now JamaisVu's own, written from those register pages and the system's own setup, with the register values his work established.
 - Thanks to [Team Molecule](https://github.com/TeamMolecule) for their prior research.
 - Lock screen skip uses the SceShell locations found by TheFloW for NoLockScreen ([VitaTweaks](https://github.com/TheOfficialFloW/VitaTweaks)).
 - Thanks to Dark_AleX for pspstates, which inspired the original project.
