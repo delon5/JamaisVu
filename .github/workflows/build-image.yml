@@ -1,12 +1,14 @@
 # Fallback build inside the vitasdk project's ready-made toolchain image
 # (Docker Hub), for when the usual bootstrap cannot download the SDK from
 # GitHub releases (an outage of those downloads blocked every build on
-# 2026-11-08). The image carries the same toolchain and packages; the
-# build steps are the ones of build.yml.
+# 2026-11-08). The image carries the toolchain and packages; the build
+# steps are the ones of build.yml. Run by hand only: the image's newer
+# compiler calls jv_recover differently (the interworking check found no
+# BLX, run 42472903293), which must be looked at before a build from it
+# goes on hardware (a plain BL into that ARM code crashed, build ee965f0).
 name: Build (toolchain image)
 
 on:
-  push:
   workflow_dispatch:
 
 jobs:
@@ -44,7 +46,8 @@ jobs:
               echo "$d: plain BL into ARM code"; exit 1
             fi
             echo "$dis" | grep -E $'\tblx\t[0-9a-f]+ <jv_recover>' \
-              || { echo "$d: no BLX to jv_recover"; exit 1; }
+              || { echo "$d: no BLX to jv_recover; the calls:";
+                   echo "$dis" | grep -nE 'jv_recover' | head -20; exit 1; }
             "$VITASDK/bin/arm-vita-eabi-nm" "$d/payload/JamaisVu_payload" \
               | grep -q '^1c000000 T _start$' || { echo "$d: _start not at 0x1c000000"; exit 1; }
           done
