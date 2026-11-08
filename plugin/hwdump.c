@@ -3,7 +3,7 @@
  * PS TV progress screen: our HDMI picture comes out as four squashed
  * copies in the top half with every other line dark and the colours
  * shifted (user's photos, display test and a real save, 720p and 1080p).
- * The setup is xerpi's libbaremetal unchanged. To see what the system
+ * The setup was then xerpi's libbaremetal unchanged. To see what the system
  * itself sets that we do not, this reads - never writes - the system's
  * live HDMI configuration while its picture is on screen: the display
  * controller (IFTU bus 1), the display link (DSI bus 1) and the HDMI

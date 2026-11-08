@@ -102,8 +102,8 @@ typedef struct {
   uint32_t disp_fb_paddr;
   uint32_t disp_fb_pitch, disp_fb_width, disp_fb_height;
   uint32_t disp_hw_info, disp_hw_flags0;
-  /* display timing (DSI "vic"): 0 = A (libbaremetal's choice for the
-   * LCD), 0x20 = B (the other 960x544 timing) - A/B test of the edges */
+  /* display timing: 0 = A (the OLED timing, which the LCD was first
+   * driven with), 0x20 = B (the other 960x544 timing; clean on the LCD) */
   uint32_t disp_vic;
   /* Loads: the snapshot's own frame (recorded when it was saved), where
    * the progress screen continues once memory is being restored. 0 = none:
@@ -113,11 +113,11 @@ typedef struct {
    * bytes, and the ms the memory part took - for comparing speeds. */
   uint32_t mem_bytes, mem_ms;
   /* Filled in by the payload: 1 if it ran with the instruction cache on,
-   * and the measured length of one xerpi delay() unit (ns, cache off). */
+   * and the measured length of one payload delay() unit (ns, cache off). */
   uint32_t icache_on;
   uint32_t delay_unit_ns;
   /* Which display the progress screen drives (JV_DISP_* in
-   * payload/xerpi/display_test.h): 1 LCD (PCH-2000), 2 OLED (PCH-1000),
+   * payload/display/display_test.h): 1 LCD (PCH-2000), 2 OLED (PCH-1000),
    * 3 HDMI (PS TV); 0 = none, the screen stays dark. */
   uint32_t disp_type;
   /* Loads (set by the plugin before the request, read after it by the

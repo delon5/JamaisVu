@@ -48,19 +48,18 @@ set(JamaisVu_payload_sources
   FatFs/ffsystem.c
   FatFs/ffunicode.c
   # The display (progress screen, Diagnostics "Display test"): JamaisVu's
-  # own code for the display path, the OLED panel and the HDMI bridge
+  # own code for the display path, the panels and the HDMI bridge
   display/display_test.c
   display/vd_util.c
   display/vd_clocks.c
   display/vd_link.c
   display/vd_ctrl.c
   display/i2c.c
+  display/panel_spi.c
   display/oled.c
+  display/lcd.c
   display/hdmi.c
   display/font_data.c
-  # the PCH-2000 LCD panel only: still from xerpi's vita-libbaremetal (no
-  # licence: private builds only, see xerpi/NOTICE.md)
-  xerpi/lcd.c
   # the menu's renderer, logo and fonts (large, small), for the progress
   # screen; gui_stubs.c stands in for jpfont.c (no room for it)
   ../plugin/gui/render.c
@@ -77,8 +76,8 @@ set_source_files_properties(../plugin/gui/font_data.c PROPERTIES
 # (log, builds 23145bf vs 5830ae3: display-showing -> filesystem).
 set_source_files_properties(
   display/display_test.c display/vd_util.c display/vd_clocks.c
-  display/vd_link.c display/vd_ctrl.c display/i2c.c display/oled.c
-  display/hdmi.c xerpi/lcd.c
+  display/vd_link.c display/vd_ctrl.c display/i2c.c display/panel_spi.c
+  display/oled.c display/lcd.c display/hdmi.c
   PROPERTIES COMPILE_OPTIONS "-Os")
 
 # Not -mgeneral-regs-only: on 3.60 hardware that build never reached the

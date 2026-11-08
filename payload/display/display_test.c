@@ -3,9 +3,8 @@
  * Diagnostics "Display test": the first step towards showing save/load
  * progress on screen. The payload runs while Vita OS is suspended, with
  * the display switched off; this switches the console's display on (the
- * OLED, the HDMI bridge: JamaisVu's own code in this folder; the PCH-2000
- * LCD: xerpi's panel file in payload/xerpi, see its NOTICE.md), shows a
- * test screen for a few seconds, and switches it off again.
+ * OLED, the LCD or the HDMI bridge: JamaisVu's own code in this folder),
+ * shows a test screen for a few seconds, and switches it off again.
  *
  * It draws only into the frame the game was showing (its address comes
  * from the plugin): display memory the game redraws anyway. No other
@@ -19,11 +18,8 @@
 #include "display_test.h"
 #include "vdisp.h"
 #include "utils.h"
-#include "../xerpi/lcd.h"
 #include "../../JamaisVu.h"
 #include "../../shared.h"
-
-uint32_t g_disp_hw_info, g_disp_hw_flags0; /* read by sysroot.h */
 
 extern unsigned char msx_font[]; /* 8x8, font_data.c */
 
@@ -157,8 +153,6 @@ static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
 	                  frame may be larger; only its first 2 MB are used) */
 	g_w = 960;
 	g_h = 544;
-	g_disp_hw_info = a->hw_info;
-	g_disp_hw_flags0 = a->hw_flags0;
 
 	/* I2C bus 1: the LCD backlight controller / the PS TV's HDMI bridge
 	 * (the OLED panel needs none) */
@@ -179,7 +173,9 @@ static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
 	mark(JV_DISP_STEP_DRAWN);
 
 	if (g_type == JV_DISP_LCD) {
-		lcd_init();
+		/* the backlight setup depends on the hardware revision and on
+		 * whether the audio codec is the Conexant one (flags bits 0..1) */
+		lcd_init(a->hw_info, (a->hw_flags0 & 3) == 1);
 	} else if (g_type == JV_DISP_OLED) {
 		oled_init();
 	} else {

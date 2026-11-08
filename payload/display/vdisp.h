@@ -4,9 +4,7 @@
  * PCH-1000's OLED panel and the PS TV's HDMI bridge, written for JamaisVu
  * from the hardware's register maps (the Vita developer wiki: Pervasive,
  * DSI, IFTU, I2C, SceOled, SceHdmi, and the system's own register setup
- * read back on hardware). The PCH-2000 LCD still uses the panel file in
- * payload/xerpi (see its NOTICE.md); it drives the same link and
- * controller through this API.
+ * read back on hardware), and of the PCH-2000's LCD panel.
  *
  * Only two things are ever shown: the console's own 960x544 picture on
  * its panel, or that picture scaled to 1280x720 over HDMI. Everything is
@@ -78,6 +76,10 @@ void i2c_transfer_write_read(int bus, uint8_t waddr, const uint8_t *wbuf,
 /* --- the PCH-1000 OLED panel (SPI bus 2) ------------------------------- */
 int oled_init(void);
 void oled_off(void);
+
+/* --- the PCH-2000 LCD panel (SPI bus 2) and its backlight (I2C bus 1) -- */
+int lcd_init(uint32_t hw_info, int codec_conexant); /* the kernel's hardware info */
+void lcd_off(void);
 
 /* --- the PS TV's HDMI bridge (ADV7533 on I2C bus 1) -------------------- */
 int hdmi_init(void);           /* bridge powered, addresses set */
