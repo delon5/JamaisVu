@@ -59,6 +59,12 @@ void storage_set_mount_lookup(MountLookupFn fn);
 const char *storage_detect(void);
 
 const char *storage_mc_root(void);  /* result of the last detection */
+/* Which savedata folders on the Memory Card a save backs up and a load
+ * puts back (JV_SAVEDATA_* bits for the payload): the system's
+ * user/00/savedata when the card is ux0, reSavedata's data/resavedata
+ * when that folder exists on the card (wherever the card is mounted).
+ * 0: the games' savedata is on another drive and is left alone. */
+uint32_t storage_savedata_flags(void);
 const char *storage_reason(void);   /* why there is no usable card */
 /* raw block device of the Memory Card's partition, e.g.
  * "sdstor0:xmc-lp-ign-userext" (read-only use only) */

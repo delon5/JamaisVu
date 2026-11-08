@@ -426,7 +426,7 @@ static void reset_args(int mode, const char *path, uint32_t slot_size) {
   strcpy(args.path, path);
   args.slot_size = slot_size;
   args.ignore_flag_paddr = FLAG_PA;
-  args.backup_savedata = 1;
+  args.backup_savedata = JV_SAVEDATA_SYSTEM | JV_SAVEDATA_RESAVEDATA;
 }
 
 static uint8_t *ram_copy(void) {
@@ -604,6 +604,11 @@ int main(int argc, char **argv) {
   write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_a, sizeof(sav_a));
   write_file("ux0:user/00/savedata/PCSE00123/sce_sys/param.sfo", sub_a, sizeof(sub_a));
   write_file("ux0:user/00/savedata/PCSE00999/other.bin", sav_b, sizeof(sav_b));
+  /* reSavedata's folder (the plugin redirects games there) */
+  f_mkdir("ux0:data");
+  f_mkdir("ux0:data/resavedata");
+  f_mkdir("ux0:data/resavedata/PCSE00123");
+  write_file("ux0:data/resavedata/PCSE00123/save.dat", sav_b, sizeof(sav_b));
   write_file("ux0:other.txt", "untouched", 9);
   create_slot(slot, slot_size, 1);
   get_file_extents(slot, &ext);
@@ -648,6 +653,8 @@ int main(int argc, char **argv) {
   write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_b, sizeof(sav_b));
   write_file("ux0:user/00/savedata/PCSE00123/new_since_save.bin", sav_a, 1000);
   f_unlink("ux0:user/00/savedata/PCSE00123/sce_sys/param.sfo");
+  write_file("ux0:data/resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
+  write_file("ux0:data/resavedata/PCSE00123/newer.dat", sav_a, 500);
   write_file("ux0:other.txt", "changed after save", 18);
   unmount();
   card[MEDIAID_SEC * 512 + 3] ^= 0xff;
@@ -682,6 +689,10 @@ int main(int argc, char **argv) {
         "file created after save should be gone");
   CHECK(read_file("ux0:user/00/savedata/PCSE00999/other.bin", buf, sizeof(buf), &len) == 0 &&
         len == sizeof(sav_b) && memcmp(buf, sav_b, len) == 0, "other title's savedata touched");
+  CHECK(read_file("ux0:data/resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&
+        len == sizeof(sav_b) && memcmp(buf, sav_b, len) == 0, "reSavedata savedata not restored");
+  CHECK(read_file("ux0:data/resavedata/PCSE00123/newer.dat", buf, sizeof(buf), &len) != 0,
+        "reSavedata file created after save should be gone");
   CHECK(read_file("ux0:other.txt", buf, sizeof(buf), &len) == 0 && len == 18 &&
         memcmp(buf, "changed after save", 18) == 0, "unrelated file touched");
   unmount();
@@ -881,6 +892,7 @@ int main(int argc, char **argv) {
     allow_everything();
     mount();
     write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_b, sizeof(sav_b));
+    write_file("ux0:data/resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
     unmount();
     guard_deny_all();
     fill_pattern(0xeeee);
@@ -899,9 +911,60 @@ int main(int argc, char **argv) {
     CHECK(read_file("ux0:user/00/savedata/PCSE00123/data.bin", buf, sizeof(buf), &len) == 0 &&
           len == sizeof(sav_b) && memcmp(buf, sav_b, len) == 0,
           "savedata must not be touched when the card is uma0");
+    CHECK(read_file("ux0:data/resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&
+          len == sizeof(sav_a) && memcmp(buf, sav_a, len) == 0,
+          "reSavedata folder must not be touched when the card is uma0");
     unmount();
     guard_deny_all();
     free(ram_d);
+  }
+
+  /* --- Only one of the two savedata folders is the games' on this card:
+   *     the first slot state (both folders backed up) loaded with the
+   *     system folder selected alone puts that one back and reads past
+   *     reSavedata's records without touching its folder ------------- */
+  printf("load with the system savedata folder only\n");
+  {
+    fill_pattern(0xcccc);
+    uint8_t *ram_e = ram_copy();
+    allow_everything();
+    mount();
+    write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_b, sizeof(sav_b));
+    write_file("ux0:data/resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
+    unmount();
+    guard_deny_all();
+    /* the slot holds the uma0 save by now: put the first state back */
+    allow_everything();
+    mount();
+    {
+      FIL f;
+      UINT bw;
+      CHECK(f_open(&f, slot, FA_WRITE) == FR_OK, "slot reopen");
+      CHECK(f_write(&f, state_copy, slot_size, &bw) == FR_OK && bw == slot_size,
+            "slot rewrite");
+      f_close(&f);
+    }
+    unmount();
+    guard_deny_all();
+    fill_pattern(0xeeee);
+    reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+    args.backup_savedata = JV_SAVEDATA_SYSTEM;
+    mount();
+    res = load_state(&fs, slot);
+    unmount();
+    printf("  %-44s -> %d\n", "load, system folder only", res);
+    CHECK(res == JV_OK, "load (system folder only) failed: %d", res);
+    allow_everything();
+    mount();
+    CHECK(read_file("ux0:user/00/savedata/PCSE00123/data.bin", buf, sizeof(buf), &len) == 0 &&
+          len == sizeof(sav_a) && memcmp(buf, sav_a, len) == 0,
+          "system savedata not restored (system folder only)");
+    CHECK(read_file("ux0:data/resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&
+          len == sizeof(sav_a) && memcmp(buf, sav_a, len) == 0,
+          "reSavedata folder touched although not selected");
+    unmount();
+    guard_deny_all();
+    free(ram_e);
   }
 
   snprintf(out, sizeof(out), "%s/04_final.img", outdir);

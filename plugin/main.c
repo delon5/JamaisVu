@@ -532,11 +532,11 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
 
   pargs.slot = slot;
   slot_payload_path(pargs.path, sizeof(pargs.path), slot);
-  /* savedata lives on ux0: only back it up if ux0 is the Memory Card
-   * (JamaisVu never writes to any other storage) */
+  /* the savedata folders on the Memory Card (JamaisVu never writes to
+   * any other storage; savedata elsewhere is left alone) */
   if (!storage_mc_root())
     return -1;
-  pargs.backup_savedata = strcmp(storage_mc_root(), "ux0:") == 0;
+  pargs.backup_savedata = storage_savedata_flags();
   pargs.slot_size = JV_SLOT_SIZE;
   if (nonce)
     memcpy(pargs.slot_nonce, nonce, sizeof(pargs.slot_nonce));

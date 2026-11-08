@@ -23,7 +23,9 @@
  *  - The whole file is validated (header CRC, body CRC, every path, every
  *    segment, card identity) before a single byte is written anywhere.
  *  - Savedata restore is limited to paths under ux0:user/00/savedata/<TITLE>
- *    and to the exFAT data area of ux0 (no partition table, no boot sector).
+ *    and ux0:data/resavedata/<TITLE> (the folders the save was told to
+ *    back up), and to the exFAT data area of ux0 (no partition table, no
+ *    boot sector).
  *  - The mediaid sector is written only to the sector it was read from, and
  *    only if the card's partition table is identical to the one at save time.
  *  - The plugin's write-blocking flag is armed inside the restored memory
@@ -53,7 +55,9 @@
 #define CLMT_SIZE       (2 * MAX_EXTENTS + 2)
 #define SECTOR_SIZE     512u
 
-#define SAVEDATA_PREFIX_LEN (sizeof(SAVEDATA_PREFIX) - 1)
+/* the savedata folders, indexed by the bit of pargs->backup_savedata */
+static const char *const k_savedata_roots[2] = { SAVEDATA_PREFIX,
+                                                 RESAVEDATA_PREFIX };
 
 static Segment segments[N_SEGMENTS];
 static int n_segments = 0;
@@ -279,16 +283,25 @@ static int is_valid_titleid(const char *s, uint32_t len) {
   return 1;
 }
 
-/* Accepts only ux0:user/00/savedata/<TITLEID>[/<name>...] with no empty,
- * "." or ".." components and no control characters, ':' or '\'. */
+/* which savedata folder a path is under: 0 or 1 (k_savedata_roots), -1 */
+static int savedata_root_of(const char *path) {
+  for (int i = 0; i < 2; i++)
+    if (strncmp(path, k_savedata_roots[i], strlen(k_savedata_roots[i])) == 0)
+      return i;
+  return -1;
+}
+
+/* Accepts only <savedata folder>/<TITLEID>[/<name>...] with no empty, "."
+ * or ".." components and no control characters, ':' or '\'. */
 static int is_valid_savedata_path(const char *path, int is_root) {
   const char *p;
   int comps = 0;
+  int root = savedata_root_of(path);
 
-  if (strncmp(path, SAVEDATA_PREFIX, SAVEDATA_PREFIX_LEN) != 0)
+  if (root < 0)
     return 0;
 
-  p = path + SAVEDATA_PREFIX_LEN;
+  p = path + strlen(k_savedata_roots[root]);
   while (*p) {
     const char *s = p;
     uint32_t len;
@@ -792,7 +805,8 @@ int save_state(FATFS *fs, const char *path) {
   if (res < 0)
     goto out;
 
-  /* 4. Savedata of the running titles. */
+  /* 4. Savedata of the running titles, from each folder the plugin
+   *    found on this card (JV_SAVEDATA_* bits). */
   header.files_offset = g_slot.pos;
 
   for (uint32_t i = 0;
@@ -810,19 +824,25 @@ int save_state(FATFS *fs, const char *path) {
     if (!is_valid_titleid(titleid, tlen))
       continue;
 
-    memcpy(savedata_path, SAVEDATA_PREFIX, SAVEDATA_PREFIX_LEN);
-    memcpy(savedata_path + SAVEDATA_PREFIX_LEN, titleid, tlen + 1);
+    for (int r = 0; r < 2; r++) {
+      uint32_t plen = strlen(k_savedata_roots[r]);
 
-    if (f_stat(savedata_path, NULL) != FR_OK)
-      continue; /* this title has no savedata */
+      if (!(pargs->backup_savedata & (1u << r)))
+        continue;
+      memcpy(savedata_path, k_savedata_roots[r], plen);
+      memcpy(savedata_path + plen, titleid, tlen + 1);
 
-    res = backup_dir(savedata_path, 0, &header.file_num);
-    if (res < 0)
-      goto out;
+      if (f_stat(savedata_path, NULL) != FR_OK)
+        continue; /* this title has no savedata here */
 
-    if (header.file_num > MAX_FILE_NUM) {
-      res = JV_ERR_SAVEDATA;
-      goto out;
+      res = backup_dir(savedata_path, 0, &header.file_num);
+      if (res < 0)
+        goto out;
+
+      if (header.file_num > MAX_FILE_NUM) {
+        res = JV_ERR_SAVEDATA;
+        goto out;
+      }
     }
   }
 
@@ -1038,12 +1058,17 @@ static int remove_dir(const char *path, int level) {
   return fres;
 }
 
-static int restore_files(FIL *fpsrc, uint32_t file_num) {
+/* Puts the savedata records back, those under the folders selected by
+ * the JV_SAVEDATA_* bits in folders; the others are read past and left
+ * alone (a state saved with reSavedata's folder on the card, loaded on a
+ * console where it is not). */
+static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders) {
   static SaveStateFile file;
   static char path[MAX_PATH_LEN];
   static char root_path[MAX_PATH_LEN];
   static FILINFO fno;
   uint32_t consumed = 0;
+  int skipping = 0;
   FRESULT fres;
   FIL fpdst;
   UINT bw;
@@ -1055,6 +1080,19 @@ static int restore_files(FIL *fpsrc, uint32_t file_num) {
     res = read_file_record(fpsrc, &file, path, root_path, &consumed);
     if (res < 0)
       return res;
+
+    if (file.is_root) {
+      int root = savedata_root_of(path); /* valid: read_file_record checked */
+      skipping = root < 0 || !(folders & (1u << root));
+    }
+    if (skipping) {
+      if (!(file.fattrib & AM_DIR)) {
+        res = state_skip(fpsrc, ALIGN(file.data_len, 4));
+        if (res < 0)
+          return res;
+      }
+      continue;
+    }
 
     if (file.is_root) {
       fres = remove_dir(path, 0);
@@ -1267,13 +1305,12 @@ int load_state(FATFS *fs, const char *path) {
     goto out;
   }
   stage_mark(JV_STAGE_LOAD_SAVEDATA);
-  /* savedata lives on ux0: it is only put back when this card is ux0 (the
-   * same rule the save applied), never onto a card that is mounted
-   * elsewhere now */
+  /* only into the savedata folders the games use on this card now (the
+   * plugin's JV_SAVEDATA_* bits), never into a folder that is not theirs */
   if (pargs->backup_savedata) {
     guard_deny_all();
     guard_allow(vol_start, vol_end - vol_start);
-    res = restore_files(&fp, header.file_num);
+    res = restore_files(&fp, header.file_num, pargs->backup_savedata);
     guard_deny_all();
     if (res < 0)
       goto out;

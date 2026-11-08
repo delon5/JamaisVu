@@ -58,11 +58,14 @@ typedef struct {
   char rtc_ctx[SCE_RTC_CTX_SIZE];
   char path[256];
   uint32_t slot; /* 0-based slot index, informational for the plugin */
-  /* 1 if the Memory Card holding the slot files is the system's ux0, i.e.
-   * the running games' savedata lives on it and can be backed up/restored.
-   * 0 when the Memory Card is mounted as uma0 (ux0 = SD2Vita/PSVSD/USB):
-   * the payload cannot reach that savedata, and must not touch the
-   * Memory Card's own (unused) savedata folder either. */
+  /* Which savedata folders on the Memory Card holding the slot files are
+   * backed up by a save and put back by a load (JV_SAVEDATA_* bits):
+   * the system's user/00/savedata when that card is the system's ux0,
+   * and reSavedata's data/resavedata when that folder is on the card.
+   * 0 when the games' savedata is on another drive (an SD2Vita, PSVSD or
+   * USB stick as ux0): the payload cannot reach it, and must not touch
+   * the Memory Card's own (unused) folders either. The old value 1 keeps
+   * its meaning. */
   uint32_t backup_savedata;
   /* Exact size the plugin pre-allocated for the slot file. The payload
    * refuses to save into a file of any other size. */
@@ -364,7 +367,14 @@ typedef struct {
 #define SAVESTATE_MEDIAID_OFFSET 0x200
 #define SAVESTATE_FILES_OFFSET   0x400
 
-#define SAVEDATA_PREFIX "ux0:user/00/savedata/"
+/* the two places a game's savedata can live, as the payload sees the
+ * Memory Card (always "ux0:" to it, whatever the system mounts it as):
+ * the system's own folder, and reSavedata's (Princess-of-Sleeping's
+ * plugin, which redirects games there, unencrypted) */
+#define SAVEDATA_PREFIX   "ux0:user/00/savedata/"
+#define RESAVEDATA_PREFIX "ux0:data/resavedata/"
+#define JV_SAVEDATA_SYSTEM     1u /* backup_savedata: user/00/savedata */
+#define JV_SAVEDATA_RESAVEDATA 2u /* backup_savedata: data/resavedata */
 
 #define DRAM_VRAM_START 0x20000000u
 #define DRAM_VRAM_END   0x60000000u

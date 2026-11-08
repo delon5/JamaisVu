@@ -3256,7 +3256,7 @@ static void refresh_slots(void) {
   }
 
   model_begin();
-  g_model.savedata_rolls_back = mc && strcmp(mc, "ux0:") == 0;
+  g_model.savedata_rolls_back = storage_savedata_flags() != 0;
   g_model.refreshing = 1; /* thumbnails still loading */
   model_end();
 

@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "storage.h"
+#include "../JamaisVu.h"
 
 /* Mounts the Memory Card can have. If several of them are the Memory Card
  * and mounted, the first one wins. */
@@ -38,6 +39,23 @@ void storage_set_mount_lookup(MountLookupFn fn) {
 
 const char *storage_mc_root(void) {
   return g_mc_root;
+}
+
+uint32_t storage_savedata_flags(void) {
+  const char *mc = g_mc_root;
+  char path[64];
+  SceIoStat st;
+  uint32_t flags = 0;
+
+  if (!mc)
+    return 0;
+  if (strcmp(mc, "ux0:") == 0)
+    flags |= JV_SAVEDATA_SYSTEM;
+  snprintf(path, sizeof(path), "%sdata/resavedata", mc);
+  memset(&st, 0, sizeof(st));
+  if (ksceIoGetstat(path, &st) >= 0)
+    flags |= JV_SAVEDATA_RESAVEDATA;
+  return flags;
 }
 
 const char *storage_mc_blkdev(void) {
