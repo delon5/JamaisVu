@@ -13,12 +13,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The installed SDK is kept between runs: the bootstrap downloads its
+      # seed from GitHub releases, which has been unreachable for hours at a
+      # time (2026-11-08), and with the cache a build needs no download.
+      # Bump the key to pick up a newer SDK.
+      - name: Cached VitaSDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VITASDK }}
+          key: vitasdk-${{ runner.os }}-seed-0.1.6-channel-2026.08-taihen
+
       - name: Install VitaSDK (official vdpm bootstrap) and taiHEN
         env:
           VDPM_NONINTERACTIVE: "1"
         run: |
-          git clone --depth 1 https://github.com/vitasdk/vdpm
-          ./vdpm/bootstrap-vitasdk.sh
+          if [ ! -x "$VITASDK/bin/arm-vita-eabi-gcc" ]; then
+            rm -rf "$VITASDK"
+            git clone --depth 1 https://github.com/vitasdk/vdpm
+            # the seed download fails outright while GitHub's release
+            # downloads are down: a few attempts, a minute apart
+            for attempt in 1 2 3 4 5; do
+              ./vdpm/bootstrap-vitasdk.sh && break
+              echo "bootstrap attempt $attempt failed"
+              rm -rf "$VITASDK"
+              [ "$attempt" = 5 ] && exit 1
+              sleep 60
+            done
+          fi
           export PATH="$VITASDK/bin:$PATH"
           echo "$VITASDK/bin" >> "$GITHUB_PATH"
           # use the vdpm installed into the SDK (the repo's helper scripts
