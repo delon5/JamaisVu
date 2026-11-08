@@ -61,7 +61,7 @@ typedef struct {
   /* Which savedata folders on the Memory Card holding the slot files are
    * backed up by a save and put back by a load (JV_SAVEDATA_* bits):
    * the system's user/00/savedata when that card is the system's ux0,
-   * and reSavedata's data/resavedata when that folder is on the card.
+   * and reSavedata's resavedata when that folder is on the card.
    * 0 when the games' savedata is on another drive (an SD2Vita, PSVSD or
    * USB stick as ux0): the payload cannot reach it, and must not touch
    * the Memory Card's own (unused) folders either. The old value 1 keeps
@@ -372,9 +372,9 @@ typedef struct {
  * the system's own folder, and reSavedata's (Princess-of-Sleeping's
  * plugin, which redirects games there, unencrypted) */
 #define SAVEDATA_PREFIX   "ux0:user/00/savedata/"
-#define RESAVEDATA_PREFIX "ux0:data/resavedata/"
+#define RESAVEDATA_PREFIX "ux0:resavedata/"
 #define JV_SAVEDATA_SYSTEM     1u /* backup_savedata: user/00/savedata */
-#define JV_SAVEDATA_RESAVEDATA 2u /* backup_savedata: data/resavedata */
+#define JV_SAVEDATA_RESAVEDATA 2u /* backup_savedata: resavedata */
 
 #define DRAM_VRAM_START 0x20000000u
 #define DRAM_VRAM_END   0x60000000u

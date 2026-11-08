@@ -61,7 +61,7 @@ const char *storage_detect(void);
 const char *storage_mc_root(void);  /* result of the last detection */
 /* Which savedata folders on the Memory Card a save backs up and a load
  * puts back (JV_SAVEDATA_* bits for the payload): the system's
- * user/00/savedata when the card is ux0, reSavedata's data/resavedata
+ * user/00/savedata when the card is ux0, reSavedata's resavedata
  * when that folder exists on the card (wherever the card is mounted).
  * 0: the games' savedata is on another drive and is left alone. */
 uint32_t storage_savedata_flags(void);

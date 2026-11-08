@@ -24,7 +24,7 @@ On any firmware without a verified offset table, the plugin installs no filesyst
 ## Requirements
 
 - **An official Sony Memory Card.** JamaisVu writes **only** to the official Memory Card: slot files, slot info, thumbnails and `status.txt`. It never writes to an SD2Vita, PSVSD, USB stick or the internal storage. Ideally use a card dedicated to savestates, so the worst a failure can cost is savestates. The card may be mounted as ux0, or as uma0/xmc0 when a storage plugin (StorageMgr, YAMT, gamesd, usbmc) put an SD2Vita/PSVSD/USB stick on ux0. JamaisVu reads the system's mount table to find which mount is the card (device `sdstor0:xmc-…`); finding it writes nothing.
-  - Savedata is only rolled back by a load when it lives on the Memory Card: the system's `user/00/savedata` when the card is ux0, and [reSavedata](https://github.com/Princess-of-Sleeping/reSavedata)'s `data/resavedata` whenever that folder is on the card. With an SD2Vita/PSVSD/USB stick as ux0 and the savedata there, a load restores the game but **not** its savedata (the load prompt says so). Pointing reSavedata at the card (uma0) puts the savedata where JamaisVu can roll it back without ever writing to the other drive.
+  - Savedata is only rolled back by a load when it lives on the Memory Card: the system's `user/00/savedata` when the card is ux0, and [reSavedata](https://github.com/Princess-of-Sleeping/reSavedata)'s `resavedata` whenever that folder is on the card. With an SD2Vita/PSVSD/USB stick as ux0 and the savedata there, a load restores the game but **not** its savedata (the load prompt says so). Pointing reSavedata at the card (uma0) puts the savedata where JamaisVu can roll it back without ever writing to the other drive.
 - **704 MB of free space on the Memory Card per slot.** Each slot is a fixed-size file in its own folder, `data/JamaisVu/SlotN/state.bin`, created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free. To avoid the wait in a game, open the menu from the **LiveArea** and prepare slots ahead of time: ✕ prepares the selected slot, △ all slots that fit. Prepared but unused slots show **READY**.
 - **The menu shows as many slots as can exist**, up to 99: every slot that already has a file, plus as many new ones as the free space allows (704 MB each). The row always shows five: with room for two, the counter reads 02/02 and slots 3 to 5 are drawn locked; with room for twenty, 01/20 and the row scrolls. With no slot and no room, five locked slots and 00/00. The log says the count whenever it changes (`slot list: N slots can exist …`). Slots saved with an older JamaisVu (`slotN.bin` beside the folders) are moved into their folders the first time the list is read; the saved states stay as they are.
 
@@ -109,7 +109,7 @@ The original README warned that *"your SD Card and/or Memory Card may be corrupt
 
 **Nothing is written until the whole file has been checked.** Before a load touches the card, it verifies:
 - the header CRC and body CRC
-- every savedata path (only `ux0:user/00/savedata/<TITLEID>/…` or `ux0:data/resavedata/<TITLEID>/…`; no `..`)
+- every savedata path (only `ux0:user/00/savedata/<TITLEID>/…` or `ux0:resavedata/<TITLEID>/…`; no `..`)
 - every memory segment (only DRAM/VRAM and the two known system regions)
 - that the state was made on the same Memory Card
 

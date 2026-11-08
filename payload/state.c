@@ -23,7 +23,7 @@
  *  - The whole file is validated (header CRC, body CRC, every path, every
  *    segment, card identity) before a single byte is written anywhere.
  *  - Savedata restore is limited to paths under ux0:user/00/savedata/<TITLE>
- *    and ux0:data/resavedata/<TITLE> (the folders the save was told to
+ *    and ux0:resavedata/<TITLE> (the folders the save was told to
  *    back up), and to the exFAT data area of ux0 (no partition table, no
  *    boot sector).
  *  - The mediaid sector is written only to the sector it was read from, and

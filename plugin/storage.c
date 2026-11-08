@@ -51,7 +51,7 @@ uint32_t storage_savedata_flags(void) {
     return 0;
   if (strcmp(mc, "ux0:") == 0)
     flags |= JV_SAVEDATA_SYSTEM;
-  snprintf(path, sizeof(path), "%sdata/resavedata", mc);
+  snprintf(path, sizeof(path), "%sresavedata", mc);
   memset(&st, 0, sizeof(st));
   if (ksceIoGetstat(path, &st) >= 0)
     flags |= JV_SAVEDATA_RESAVEDATA;

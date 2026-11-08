@@ -606,9 +606,9 @@ int main(int argc, char **argv) {
   write_file("ux0:user/00/savedata/PCSE00999/other.bin", sav_b, sizeof(sav_b));
   /* reSavedata's folder (the plugin redirects games there) */
   f_mkdir("ux0:data");
-  f_mkdir("ux0:data/resavedata");
-  f_mkdir("ux0:data/resavedata/PCSE00123");
-  write_file("ux0:data/resavedata/PCSE00123/save.dat", sav_b, sizeof(sav_b));
+  f_mkdir("ux0:resavedata");
+  f_mkdir("ux0:resavedata/PCSE00123");
+  write_file("ux0:resavedata/PCSE00123/save.dat", sav_b, sizeof(sav_b));
   write_file("ux0:other.txt", "untouched", 9);
   create_slot(slot, slot_size, 1);
   get_file_extents(slot, &ext);
@@ -653,8 +653,8 @@ int main(int argc, char **argv) {
   write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_b, sizeof(sav_b));
   write_file("ux0:user/00/savedata/PCSE00123/new_since_save.bin", sav_a, 1000);
   f_unlink("ux0:user/00/savedata/PCSE00123/sce_sys/param.sfo");
-  write_file("ux0:data/resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
-  write_file("ux0:data/resavedata/PCSE00123/newer.dat", sav_a, 500);
+  write_file("ux0:resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
+  write_file("ux0:resavedata/PCSE00123/newer.dat", sav_a, 500);
   write_file("ux0:other.txt", "changed after save", 18);
   unmount();
   card[MEDIAID_SEC * 512 + 3] ^= 0xff;
@@ -689,9 +689,9 @@ int main(int argc, char **argv) {
         "file created after save should be gone");
   CHECK(read_file("ux0:user/00/savedata/PCSE00999/other.bin", buf, sizeof(buf), &len) == 0 &&
         len == sizeof(sav_b) && memcmp(buf, sav_b, len) == 0, "other title's savedata touched");
-  CHECK(read_file("ux0:data/resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&
+  CHECK(read_file("ux0:resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&
         len == sizeof(sav_b) && memcmp(buf, sav_b, len) == 0, "reSavedata savedata not restored");
-  CHECK(read_file("ux0:data/resavedata/PCSE00123/newer.dat", buf, sizeof(buf), &len) != 0,
+  CHECK(read_file("ux0:resavedata/PCSE00123/newer.dat", buf, sizeof(buf), &len) != 0,
         "reSavedata file created after save should be gone");
   CHECK(read_file("ux0:other.txt", buf, sizeof(buf), &len) == 0 && len == 18 &&
         memcmp(buf, "changed after save", 18) == 0, "unrelated file touched");
@@ -892,7 +892,7 @@ int main(int argc, char **argv) {
     allow_everything();
     mount();
     write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_b, sizeof(sav_b));
-    write_file("ux0:data/resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
+    write_file("ux0:resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
     unmount();
     guard_deny_all();
     fill_pattern(0xeeee);
@@ -911,7 +911,7 @@ int main(int argc, char **argv) {
     CHECK(read_file("ux0:user/00/savedata/PCSE00123/data.bin", buf, sizeof(buf), &len) == 0 &&
           len == sizeof(sav_b) && memcmp(buf, sav_b, len) == 0,
           "savedata must not be touched when the card is uma0");
-    CHECK(read_file("ux0:data/resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&
+    CHECK(read_file("ux0:resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&
           len == sizeof(sav_a) && memcmp(buf, sav_a, len) == 0,
           "reSavedata folder must not be touched when the card is uma0");
     unmount();
@@ -930,7 +930,7 @@ int main(int argc, char **argv) {
     allow_everything();
     mount();
     write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_b, sizeof(sav_b));
-    write_file("ux0:data/resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
+    write_file("ux0:resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
     unmount();
     guard_deny_all();
     /* the slot holds the uma0 save by now: put the first state back */
@@ -959,7 +959,7 @@ int main(int argc, char **argv) {
     CHECK(read_file("ux0:user/00/savedata/PCSE00123/data.bin", buf, sizeof(buf), &len) == 0 &&
           len == sizeof(sav_a) && memcmp(buf, sav_a, len) == 0,
           "system savedata not restored (system folder only)");
-    CHECK(read_file("ux0:data/resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&
+    CHECK(read_file("ux0:resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&
           len == sizeof(sav_a) && memcmp(buf, sav_a, len) == 0,
           "reSavedata folder touched although not selected");
     unmount();
