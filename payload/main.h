@@ -36,7 +36,7 @@ extern PayloadArguments *pargs;
 
 void kscePervasiveMsifSetClock(int clock);
 uint32_t jv_time_us(void);
-uint32_t jv_delay_calibrate(void); /* xerpi/utils.c */
+uint32_t jv_delay_calibrate(void); /* display/vd_util.c */
 
 /* records step n (JV_STAGE_*) in the diagnostics trace */
 void stage_mark(int n);

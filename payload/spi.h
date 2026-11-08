@@ -9,6 +9,8 @@
 #ifndef __SPI_H__
 #define __SPI_H__
 
+#include <stdint.h>
+
 int spi_init(int bus);
 void spi_write_start(int bus);
 void spi_write_end(int bus);

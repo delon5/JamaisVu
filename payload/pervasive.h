@@ -9,6 +9,8 @@
 #ifndef __PERVASIVE_H__
 #define __PERVASIVE_H__
 
+#include <stdint.h>
+
 uint32_t pervasive_read_misc(uint32_t offset);
 
 void pervasive_clock_enable_gpio(void);

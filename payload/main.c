@@ -20,7 +20,7 @@
 #include "msif/ms.h"
 #include "msif/msif.h"
 #include "msif/msif_auth.h"
-#include "xerpi/display_test.h"
+#include "display/display_test.h"
 
 #include "ff.h"
 

@@ -22,6 +22,7 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -T ${CMAKE_CURRENT_SOURCE_
 
 include_directories(
   ./
+  display
   msif
   FatFs
   ../plugin/gui
@@ -46,18 +47,20 @@ set(JamaisVu_payload_sources
   FatFs/ff.c
   FatFs/ffsystem.c
   FatFs/ffunicode.c
-  # Diagnostics "Display test" only; from xerpi's vita-libbaremetal (no
+  # The display (progress screen, Diagnostics "Display test"): JamaisVu's
+  # own code for the display path, the OLED panel and the HDMI bridge
+  display/display_test.c
+  display/vd_util.c
+  display/vd_clocks.c
+  display/vd_link.c
+  display/vd_ctrl.c
+  display/i2c.c
+  display/oled.c
+  display/hdmi.c
+  display/font_data.c
+  # the PCH-2000 LCD panel only: still from xerpi's vita-libbaremetal (no
   # licence: private builds only, see xerpi/NOTICE.md)
-  xerpi/display_test.c
-  xerpi/pervasive_display.c
-  xerpi/dsi.c
-  xerpi/iftu.c
   xerpi/lcd.c
-  xerpi/oled.c
-  xerpi/hdmi.c
-  xerpi/i2c.c
-  xerpi/utils.c
-  xerpi/font_data.c
   # the menu's renderer, logo and fonts (large, small), for the progress
   # screen; gui_stubs.c stands in for jpfont.c (no room for it)
   ../plugin/gui/render.c
@@ -73,8 +76,9 @@ set_source_files_properties(../plugin/gui/font_data.c PROPERTIES
 # comes from RAM and -Os made the logo take 1.9 s instead of 0.86 s
 # (log, builds 23145bf vs 5830ae3: display-showing -> filesystem).
 set_source_files_properties(
-  xerpi/display_test.c xerpi/pervasive_display.c xerpi/dsi.c xerpi/iftu.c
-  xerpi/lcd.c xerpi/oled.c xerpi/hdmi.c xerpi/i2c.c xerpi/utils.c
+  display/display_test.c display/vd_util.c display/vd_clocks.c
+  display/vd_link.c display/vd_ctrl.c display/i2c.c display/oled.c
+  display/hdmi.c xerpi/lcd.c
   PROPERTIES COMPILE_OPTIONS "-Os")
 
 # Not -mgeneral-regs-only: on 3.60 hardware that build never reached the

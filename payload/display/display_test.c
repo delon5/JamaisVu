@@ -2,9 +2,10 @@
  *
  * Diagnostics "Display test": the first step towards showing save/load
  * progress on screen. The payload runs while Vita OS is suspended, with
- * the display switched off; this switches the PCH-2000's LCD on with
- * xerpi's libbaremetal code (this folder, see NOTICE.md), shows a test
- * screen for a few seconds, and switches it off again.
+ * the display switched off; this switches the console's display on (the
+ * OLED, the HDMI bridge: JamaisVu's own code in this folder; the PCH-2000
+ * LCD: xerpi's panel file in payload/xerpi, see its NOTICE.md), shows a
+ * test screen for a few seconds, and switches it off again.
  *
  * It draws only into the frame the game was showing (its address comes
  * from the plugin): display memory the game redraws anyway. No other
@@ -16,14 +17,9 @@
 
 #include <stdint.h>
 #include "display_test.h"
-#include "pervasive.h"
-#include "dsi.h"
-#include "iftu.h"
-#include "lcd.h"
-#include "oled.h"
-#include "hdmi.h"
-#include "i2c.h"
+#include "vdisp.h"
 #include "utils.h"
+#include "../xerpi/lcd.h"
 #include "../../JamaisVu.h"
 #include "../../shared.h"
 
@@ -31,37 +27,14 @@ uint32_t g_disp_hw_info, g_disp_hw_flags0; /* read by sysroot.h */
 
 extern unsigned char msx_font[]; /* 8x8, font_data.c */
 
-/* colour conversion matrices as in libbaremetal's display.c */
-static const struct iftu_csc_params csc0 = {
-	0x40, 0x202, 0x3FF,
-	   0,     0,     0,
-	{
-		{0x254,     0, 0x395},
-		{0x254, 0xF93, 0xEF0},
-		{0x254, 0x439,     0}
-	}
-};
-
-static const struct iftu_csc_params csc1 = {
-	0x40,  0x40, 0x3AC,
-	0x40, 0x3AC,  0x40,
-	{
-		{0x1B7,     0,     0},
-		{    0, 0x1B7,     0},
-		{    0,     0, 0x1B7}
-	}
-};
-
 #define RGB(r, g, b) (0xFF000000u | ((b) << 16) | ((g) << 8) | (r))
 
 static volatile uint32_t *g_fb;
 static uint32_t g_vic, g_type;
 static int g_pitch, g_w, g_h;
-/* where the picture goes: display controller and link of the console's
- * display, and the picture's place on the output (HDMI: 960x544 centred
- * in 1280x720, unscaled) */
-static enum iftu_bus g_bus = IFTU_BUS_0;
-static enum dsi_bus g_dsi = DSI_BUS_OLED_LCD;
+/* where the picture goes: the display path (link and controller) of the
+ * console's display, and the picture's place on the output */
+static int g_path = VD_PANEL;
 static uint32_t g_dst_x, g_dst_y;
 static uint32_t g_out_w, g_out_h; /* plane output: 960x544, HDMI 1280x720 */
 static int g_hdmi_tv; /* PS TV: a TV answered (hot-plug detect) */
@@ -103,36 +76,23 @@ static void mark(int step) {
 		g_mark(step);
 }
 
-static void plane_setup(uint32_t paddr) {
-	static const enum iftu_plane planes[2] = { IFTU_PLANE_A, IFTU_PLANE_B };
-	static const enum iftu_plane_config cfgs[2] = { IFTU_PLANE_CONFIG_0,
-	                                                IFTU_PLANE_CONFIG_1 };
-	struct iftu_plane_fb_config fb;
+/* the source step the system programs when it scales 960x544 up to
+ * 1280x720 (16.16; 66481a6 readout), 0 = unscaled */
+static uint32_t scale_step(void) {
+	return g_type == JV_DISP_HDMI ? 0xC16C : 0;
+}
 
-	fb.paddr = paddr;
-	fb.pixelformat = IFTU_FB_PIXELFORMAT_A8B8G8R8;
-	fb.width = g_w;
-	fb.height = g_h;
-	for (int p = 0; p < 2; p++)
-		for (int c = 0; c < 2; c++) {
-			if (g_type == JV_DISP_HDMI && c == 0)
-				iftu_plane_set_hdmi_scaler(g_bus, planes[p]);
-			iftu_plane_set_alpha(g_bus, planes[p], 256);
-			iftu_plane_set_csc0(g_bus, planes[p], &csc0);
-			iftu_plane_set_csc1(g_bus, planes[p], &csc1);
-			iftu_plane_set_csc_enabled(g_bus, planes[p], true);
-			iftu_plane_config_set_config(g_bus, planes[p], cfgs[c], &fb,
-			                             g_dst_x, g_dst_y, g_out_w,
-			                             g_out_h);
-			if (g_type == JV_DISP_HDMI)
-				iftu_plane_config_set_scale(g_bus, planes[p],
-				                            cfgs[c], 0xC16C, 0);
-		}
-	iftu_bus_plane_config_select(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0);
-	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_B, IFTU_PLANE_CONFIG_0, false);
-	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_B, IFTU_PLANE_CONFIG_1, false);
-	iftu_bus_alpha_blending_control(g_bus, 0);
-	iftu_bus_enable(g_bus);
+static void plane_setup(uint32_t paddr) {
+	for (int p = 0; p < 2; p++) {
+		vd_plane_colour(g_path, p, g_type == JV_DISP_HDMI);
+		for (int c = 0; c < 2; c++)
+			vd_plane_picture(g_path, p, c, paddr, g_dst_x, g_dst_y,
+			                 g_out_w, g_out_h, scale_step());
+	}
+	vd_plane_select(g_path, VD_PLANE_A, VD_CFG_0);
+	vd_plane_enable(g_path, VD_PLANE_B, VD_CFG_0, 0);
+	vd_plane_enable(g_path, VD_PLANE_B, VD_CFG_1, 0);
+	vd_bus_enable(g_path);
 }
 
 /* Only what this was written for. The screen is always laid out as
@@ -161,17 +121,15 @@ static int args_ok(const JvDisplayArgs *a) {
 
 /* Switches the display on showing whatever draw() put into the frame. */
 static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
-	uint32_t pixelclock = 0;
-	uint32_t vic;
+	const VdTiming *t;
 
 	g_type = a->disp_type;
 	if (g_type == JV_DISP_HDMI) {
-		/* 1280x720p 60 Hz, as libbaremetal's display_init_hdmi; the
-		 * system's own HDMI setting (480p/720p/1080i) comes back when it
-		 * wakes */
-		vic = 0x8600;
-		g_bus = IFTU_BUS_HDMI;
-		g_dsi = DSI_BUS_HDMI;
+		/* 1280x720p 60 Hz; the system's own HDMI setting (480p/720p/
+		 * 1080i) comes back when it wakes */
+		g_vic = 0;
+		t = &vd_timing_hdmi_720p;
+		g_path = VD_HDMI;
 		/* the whole 1280x720 output, the picture scaled up as the
 		 * system does (from 4 px in; 66481a6 readout) */
 		g_dst_x = 4;
@@ -179,49 +137,42 @@ static void hw_on(const JvDisplayArgs *a, void (*draw)(void)) {
 		g_out_w = 1280;
 		g_out_h = 720;
 	} else {
-		/* LCD: 0x20 (clean on the PCH-2000; 0 = libbaremetal's timing,
-		 * garbage along the edges there). OLED: 0, as libbaremetal's
-		 * display_init_oled */
-		vic = g_type == JV_DISP_LCD && a->vic == 0x20 ? 0x20 : 0;
-		g_bus = IFTU_BUS_OLED_LCD;
-		g_dsi = DSI_BUS_OLED_LCD;
+		/* LCD: timing B (clean on the PCH-2000; with timing A, garbage
+		 * along the edges there). OLED: timing A */
+		g_vic = g_type == JV_DISP_LCD && a->vic == 0x20 ? 0x20 : 0;
+		t = g_vic ? &vd_timing_panel_b : &vd_timing_panel;
+		g_path = VD_PANEL;
 		g_dst_x = g_dst_y = 0;
 		g_out_w = 960;
 		g_out_h = 544;
 	}
 
 	g_fb = (volatile uint32_t *)(uintptr_t)a->fb_paddr;
-	/* The display controller reads rows exactly as wide as the picture
-	 * (libbaremetal's iftu.c: "TODO: Properly use pitch instead of
-	 * width"), but games may use a wider pitch (1001 Spikes: 1024 -
-	 * diagonal stripes on hardware). The screen covers the whole frame
-	 * anyway, so lay it out with rows of 960; the frame is big enough
-	 * (pitch >= width). */
+	/* The display controller is programmed for rows exactly as wide as
+	 * the picture, but games may use a wider pitch (1001 Spikes: 1024 -
+	 * diagonal stripes on hardware when the rows were read as 960). The
+	 * screen covers the whole frame anyway, so lay it out with rows of
+	 * 960; the frame is big enough (pitch >= width). */
 	g_pitch = 960; /* the screen is always 960x544, rows of 960 (HDMI: the
 	                  frame may be larger; only its first 2 MB are used) */
 	g_w = 960;
 	g_h = 544;
-	g_vic = vic;
 	g_disp_hw_info = a->hw_info;
 	g_disp_hw_flags0 = a->hw_flags0;
 
 	/* I2C bus 1: the LCD backlight controller / the PS TV's HDMI bridge
 	 * (the OLED panel needs none) */
 	if (g_type != JV_DISP_OLED) {
-		pervasive_clock_enable_i2c(1);
-		pervasive_reset_exit_i2c(1);
+		vd_clk_i2c_on(1);
 		i2c_init_bus(1);
 	}
 	mark(JV_DISP_STEP_I2C);
 
-	/* display link (as libbaremetal's display_init_lcd/_oled/_hdmi) */
-	dsi_get_pixelclock_for_vic(vic, 24, &pixelclock);
-	pervasive_dsi_set_pixelclock(g_dsi, pixelclock);
-	pervasive_clock_enable_dsi(g_dsi, 0xF);
-	pervasive_reset_exit_dsi(g_dsi, 7);
-	dsi_init();
-	dsi_start_master(g_dsi, vic);
-	dsi_start_display(g_dsi, vic, g_type == JV_DISP_HDMI ? 0 : 1);
+	/* the display link: its pixel clock, clocks and resets, then the
+	 * link itself sending the timing */
+	vd_clk_link_pll(g_path, t->pixelclock);
+	vd_clk_link_on(g_path);
+	vd_link_start(g_path, t);
 	mark(JV_DISP_STEP_DSI);
 
 	draw(); /* before the panel lights up: no stale picture */
@@ -272,12 +223,11 @@ static void hw_off(void) {
 	else
 		hdmi_off();
 	mark(JV_DISP_STEP_LCD_OFF);
-	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_0, false);
-	iftu_plane_config_set_enabled(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1, false);
+	vd_plane_enable(g_path, VD_PLANE_A, VD_CFG_0, 0);
+	vd_plane_enable(g_path, VD_PLANE_A, VD_CFG_1, 0);
 	mark(JV_DISP_STEP_PLANE_OFF);
-	dsi_stop_master(g_dsi);
-	pervasive_reset_enter_dsi(g_dsi, 7);
-	pervasive_clock_disable_dsi(g_dsi, 0xF);
+	vd_link_stop(g_path);
+	vd_clk_link_off(g_path);
 	mark(JV_DISP_STEP_OFF);
 }
 
@@ -467,17 +417,9 @@ int jv_screen_switch(uint32_t paddr, uint32_t pitch) {
 	g_fb = (volatile uint32_t *)(uintptr_t)paddr;
 	draw_progress();
 
-	struct iftu_plane_fb_config fb;
-	fb.paddr = paddr;
-	fb.pixelformat = IFTU_FB_PIXELFORMAT_A8B8G8R8;
-	fb.width = g_w;
-	fb.height = g_h;
-	iftu_plane_config_set_config(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1,
-	                             &fb, g_dst_x, g_dst_y, g_out_w, g_out_h);
-	if (g_type == JV_DISP_HDMI)
-		iftu_plane_config_set_scale(g_bus, IFTU_PLANE_A,
-		                            IFTU_PLANE_CONFIG_1, 0xC16C, 0);
-	iftu_bus_plane_config_select(g_bus, IFTU_PLANE_A, IFTU_PLANE_CONFIG_1);
+	vd_plane_picture(g_path, VD_PLANE_A, VD_CFG_1, paddr, g_dst_x, g_dst_y,
+	                 g_out_w, g_out_h, scale_step());
+	vd_plane_select(g_path, VD_PLANE_A, VD_CFG_1);
 	g_args = b;
 	return 0;
 }

@@ -1,21 +1,26 @@
 # Code from xerpi's vita-libbaremetal
 
-The files in this folder (except `display_test.c`, `sysroot.h` and the
-parts marked "JamaisVu") come from
+`lcd.c` (except the parts marked "JamaisVu") comes from
 [xerpi/vita-libbaremetal](https://github.com/xerpi/vita-libbaremetal):
-display link (DSI), display controller (IFTU), PCH-2000 LCD, PCH-1000
-OLED (`oled.c`), PS TV HDMI bridge (`hdmi.c`), I2C, and the
-8x8 debug font (which itself is from PSPSDK, BSD licence).
+the PCH-2000 LCD panel's set-up (its SPI command lists and I2C backlight
+controller). `lcd.h`, `sysroot.h`, `utils.h` and `i2c.h` are JamaisVu's
+own shims around it.
 
-**vita-libbaremetal has no licence file.** This folder is used with the
+**vita-libbaremetal has no licence file.** This file is used with the
 repository owner's decision to keep it in private builds only. It must be
 removed (or permission obtained from xerpi) before this repository or its
 builds are made public.
 
-It drives the progress screen shown during saves and loads (PCH-2000)
-and the Diagnostics "Display test". Without it the screen stays black
-while the payload runs; saving and loading themselves do not depend on it.
+Everything else the display needs (the display link, the display
+controller, the clocks, I2C, the PCH-1000 OLED panel and the PS TV's
+HDMI bridge) is JamaisVu's own code in `payload/display/`, written from
+the Vita developer wiki's register pages and the system's own register
+setup read back on hardware. The 8x8 debug font there (`font_data.c`) is
+from PSPSDK (BSD licence).
 
-Status (2026-11-01): the repository still has no licence (GitHub reports
+Without `lcd.c` the PCH-2000's screen would stay black while the payload
+runs; saving and loading themselves do not depend on it.
+
+Status (2026-11-08): the repository still has no licence (GitHub reports
 none). Asking xerpi for one (e.g. MIT, like JamaisVu) is the clean way to
-make public builds possible.
+make public builds possible; a JamaisVu-own LCD file is the alternative.
