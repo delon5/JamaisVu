@@ -2363,6 +2363,63 @@ static uint32_t thread_user_pc(SceUID thid) {
   return r.entry[0].pc;
 }
 
+/* a copy out of another process's memory (SceSysmem's
+ * ksceKernelMemcpyUserToKernelForPid, by NID so every SDK builds it) */
+static int (*g_copy_pid)(SceUID pid, void *dst, uintptr_t src, SceSize len);
+
+/* Diagnostics: the return addresses on a thread's user stack that fall in
+ * a module's code (a rough backtrace: the game's own functions show as
+ * xrd...+offset, library frames by name), and the code around its pc as
+ * hex, so a loop a thread spins in can be read offline. */
+static void thread_stack_scan(SceUID pid, const char *name, uint32_t sp,
+                              uint32_t pc) {
+  static uint32_t words[256];
+  static char line[520];
+  static uint8_t code[128];
+  int len, hits = 0;
+  if (!g_copy_pid || !sp)
+    return;
+  memset(words, 0, sizeof(words));
+  if (g_copy_pid(pid, words, sp & ~3u, sizeof(words)) < 0 &&
+      g_copy_pid(pid, words, sp & ~3u, 256) < 0)
+    return;
+  len = snprintf(line, sizeof(line), "      %s stack (sp 0x%08X):", name,
+                 (unsigned)sp);
+  for (int i = 0; i < 256 && hits < 14 && len < (int)sizeof(line) - 48;
+       i++) {
+    char where[48];
+    const void *text = NULL;
+    char mod[0x1C + 4];
+    uint32_t w = words[i];
+    if (w < 0x80000000u || !g_mod_by_addr)
+      continue; /* user code lives above 0x80000000 */
+    memset(mod, 0, sizeof(mod));
+    if (g_mod_by_addr(pid, (const void *)w, NULL, &text, mod) < 0 || !text)
+      continue;
+    snprintf(where, sizeof(where), " [%d]%s+0x%X", i * 4, mod,
+             (unsigned)(w - (uintptr_t)text));
+    len += snprintf(line + len, sizeof(line) - len, "%s", where);
+    hits++;
+  }
+  snprintf(line + len, sizeof(line) - len, "%s\r\n",
+           hits ? "" : " nothing recognised");
+  log_queue(line);
+  log_queue_drain();
+  if (!pc)
+    return;
+  memset(code, 0, sizeof(code));
+  if (g_copy_pid(pid, code, (pc & ~1u) - 64, sizeof(code)) < 0)
+    return;
+  len = snprintf(line, sizeof(line), "      %s code at pc-64 (0x%08X, "
+                 "%s): ", name, (unsigned)((pc & ~1u) - 64),
+                 (pc & 1) ? "thumb" : "arm");
+  for (int i = 0; i < 128 && len < (int)sizeof(line) - 4; i++)
+    len += snprintf(line + len, sizeof(line) - len, "%02X", code[i]);
+  snprintf(line + len, sizeof(line) - len, "\r\n");
+  log_queue(line);
+  log_queue_drain();
+}
+
 /* Diagnostics: every thread of a process, with what it is waiting on
  * (status: 1 running, 2 ready, 4 standby, 8 waiting, 16 dormant, 256
  * suspended; the wait type and id as the kernel reports them) and where it
@@ -2378,6 +2435,7 @@ static void thread_dump(SceUID pid, const char *why) {
   int n_active = 0;
   char tid[16];
   int n = 0;
+  uint32_t main_sp = 0, main_pc = 0;
   if (!looked_up) {
     looked_up = 1;
     if (module_get_export_func(KERNEL_PID, "SceKernelThreadMgr",
@@ -2396,11 +2454,15 @@ static void thread_dump(SceUID pid, const char *why) {
                                TAI_ANY_LIBRARY, 0xEC8343DF,
                                (uintptr_t *)&g_dbg_resume) < 0)
       g_dbg_suspend = g_dbg_resume = NULL;
+    if (module_get_export_func(KERNEL_PID, "SceSysmem", TAI_ANY_LIBRARY,
+                               0x605275F8, (uintptr_t *)&g_copy_pid) < 0)
+      g_copy_pid = NULL;
     snprintf(line, sizeof(line), "    thread registers %s, debug "
-             "suspend %s, module lookup %s\r\n",
+             "suspend %s, module lookup %s, memory of the process %s\r\n",
              g_thread_regs ? "available" : "NOT available",
              g_dbg_suspend ? "available" : "NOT available",
-             g_mod_by_addr ? "available" : "NOT available");
+             g_mod_by_addr ? "available" : "NOT available",
+             g_copy_pid ? "readable" : "NOT readable");
     log_queue(line);
   }
   memset(tid, 0, sizeof(tid));
@@ -2440,6 +2502,10 @@ static void thread_dump(SceUID pid, const char *why) {
       } else {
         for (int e = 0; e < 2; e++) {
           char pc[48], lr[48];
+          if (i == 0 && (r.entry[e].cpsr & 0x1F) == 0x10) {
+            main_sp = r.entry[e].sp; /* the main thread's user stack */
+            main_pc = r.entry[e].pc;
+          }
           where_is(pid, r.entry[e].pc, pc, sizeof(pc));
           where_is(pid, r.entry[e].lr, lr, sizeof(lr));
           snprintf(line, sizeof(line), "        set %d: pc %s lr %s sp "
@@ -2469,7 +2535,17 @@ static void thread_dump(SceUID pid, const char *why) {
     }
     snprintf(line + len, sizeof(line) - len, "\r\n");
     log_queue(line);
+    log_queue_drain();
+    {
+      JvThreadRegs r;
+      if (thread_regs(active[a], &r) >= 0)
+        for (int e = 0; e < 2; e++)
+          if ((r.entry[e].cpsr & 0x1F) == 0x10)
+            thread_stack_scan(pid, info.name, r.entry[e].sp, r.entry[e].pc);
+    }
   }
+  if (main_sp)
+    thread_stack_scan(pid, "main thread", main_sp, main_pc);
   /* the process's modules */
   {
     static SceUID mods[64];
@@ -3104,7 +3180,7 @@ static int input_thread(SceSize args, void *argp) {
       static int dumped;
       int64_t tn = now_us();
       int64_t since = g_t_resume ? tn - g_t_resume : -1;
-      if (since < 0 || since > 125000000) {
+      if (since < 0 || since > 305000000) {
         next_alive = 0;
         dumped = 0;
       } else if (tn >= next_alive) {
@@ -3140,6 +3216,19 @@ static int input_thread(SceSize args, void *argp) {
               log_queue(al);
               memset((void *)g_btn_calls[k], 0, sizeof(g_btn_calls[k]));
               g_btn_or[k] = g_btn_ports[k] = g_btn_blocked[k] = 0;
+              len = snprintf(al, sizeof(al), "      its files:");
+              for (int f = 0; f < FD_HOOK_N; f++)
+                if (g_fd_calls[k][f])
+                  len += snprintf(al + len, sizeof(al) - len, " %s %u",
+                                  g_fd_names[f], (unsigned)g_fd_calls[k][f]);
+              snprintf(al + len, sizeof(al) - len, "; %u KB read; %u "
+                       "errors%s0x%08X\r\n", (unsigned)(g_fd_bytes[k] >> 10),
+                       (unsigned)g_fd_errors[k],
+                       g_fd_errors[k] ? ", last " : ", last ever ",
+                       (unsigned)g_fd_last_err[k]);
+              log_queue(al);
+              memset((void *)g_fd_calls[k], 0, sizeof(g_fd_calls[k]));
+              g_fd_bytes[k] = g_fd_errors[k] = 0;
             }
           }
         }
@@ -5150,12 +5239,38 @@ static volatile uint32_t g_io_ev_w, g_io_ev_r, g_io_ev_dropped;
 static tai_hook_ref_t g_io_refs[7];
 static SceUID g_io_hooks[7] = {-1, -1, -1, -1, -1, -1, -1};
 
+/* the data operations of the two reading processes (by the controller
+ * reader slot): counts for the activity line, errors into the ring */
+#define FD_HOOK_N 7
+static tai_hook_ref_t g_fd_refs[FD_HOOK_N];
+static SceUID g_fd_hooks[FD_HOOK_N];
+static volatile uint32_t g_fd_calls[2][FD_HOOK_N], g_fd_bytes[2],
+    g_fd_errors[2], g_fd_last_err[2];
+static const char *const g_fd_names[FD_HOOK_N] = {
+    "read", "write", "pread", "lseek", "close", "readasync", "preadasync"};
+
+static void fd_note(int idx, int fd, int size, int ret) {
+  SceUID pid = ksceKernelGetProcessId();
+  int k = pid == g_rd_pid[0] ? 0 : pid == g_rd_pid[1] ? 1 : -1;
+  (void)fd;
+  (void)size;
+  if (k < 0)
+    return;
+  g_fd_calls[k][idx]++;
+  if (ret < 0) {
+    g_fd_errors[k]++;
+    g_fd_last_err[k] = (uint32_t)ret;
+  } else if (idx == 0 || idx == 2) {
+    g_fd_bytes[k] += (uint32_t)ret;
+  }
+}
+
 static int io_window(void) {
   int64_t t = g_t_resume;
   if (!t)
     return 0;
   int64_t since = ksceKernelGetSystemTimeWide() - t;
-  return since >= 0 && since < 125000000;
+  return since >= 0 && since < 305000000;
 }
 
 static void io_note(int kind, const char *upath, int flags, int ret,
@@ -5238,13 +5353,34 @@ static int io_kopen_hook(const char *path, int flags, int mode) {
   return ret;
 }
 
+#define FD_HOOK(idx, name)                                                  \
+  static int name(int fd, int a2, int a3, int a4) {                        \
+    int ret = TAI_CONTINUE(int, g_fd_refs[idx], fd, a2, a3, a4);           \
+    fd_note(idx, fd, a3, ret);                                             \
+    if (ret < 0 && io_window()) {                                          \
+      char text[48];                                                       \
+      snprintf(text, sizeof(text), "%s fd 0x%08X size %d", g_fd_names[idx], \
+               (unsigned)fd, a3);                                          \
+      io_note(7, text, 0, ret, 1);                                         \
+    }                                                                      \
+    return ret;                                                            \
+  }
+FD_HOOK(0, fd_read_hook)
+FD_HOOK(1, fd_write_hook)
+FD_HOOK(2, fd_pread_hook)
+FD_HOOK(3, fd_lseek_hook)
+FD_HOOK(4, fd_close_hook)
+FD_HOOK(5, fd_readasync_hook)
+FD_HOOK(6, fd_preadasync_hook)
+
 static void io_events_log(void) {
   static char line[200];
   uint32_t w = g_io_ev_w;
   while (g_io_ev_r != w) {
     int k = g_io_ev_r % IO_EV_N;
-    static const char *const kinds[7] = {"open", "dopen", "getstat", "mkdir",
-                                         "remove", "kernel open", "got"};
+    static const char *const kinds[8] = {"open", "dopen", "getstat", "mkdir",
+                                         "remove", "kernel open", "got",
+                                         "data op"};
     char tid[16];
     if (!g_io_ev[k].ready)
       return;
@@ -5257,7 +5393,7 @@ static void io_events_log(void) {
     tid[sizeof(tid) - 1] = '\0';
     g_io_ev[k].path[IO_PATH_N - 1] = '\0';
     snprintf(line, sizeof(line), "    io +%d ms %s %s %s%s -> 0x%08X%s\r\n",
-             g_io_ev[k].ms, tid, kinds[g_io_ev[k].kind < 7 ? g_io_ev[k].kind
+             g_io_ev[k].ms, tid, kinds[g_io_ev[k].kind < 8 ? g_io_ev[k].kind
                                                              : 0],
              g_io_ev[k].path, g_io_ev[k].kind == 0 || g_io_ev[k].kind == 5
                  ? (g_io_ev[k].flags & 2) ? " (write)" : " (read)" : "",
@@ -5294,6 +5430,24 @@ static void io_watch_install(void) {
   g_io_hooks[6] = taiHookFunctionExportForKernel(
       KERNEL_PID, &g_io_refs[6], "SceAppMgr", 0x8AF17416, 0x7240375B,
       io_sysevent_hook);
+  {
+    static const uint32_t fnids[FD_HOOK_N] = {
+        0xFDB32293, 0x34EFD876, 0x539FD5C4, 0xA604764A, 0xC70B8886,
+        0x773EBD45, 0xBCF5684D};
+    static const void *const ffns[FD_HOOK_N] = {
+        fd_read_hook, fd_write_hook, fd_pread_hook, fd_lseek_hook,
+        fd_close_hook, fd_readasync_hook, fd_preadasync_hook};
+    int fok = 0;
+    for (int i = 0; i < FD_HOOK_N; i++) {
+      g_fd_hooks[i] = taiHookFunctionExportForKernel(
+          KERNEL_PID, &g_fd_refs[i], "SceIofilemgr", 0xF2FF276E, fnids[i],
+          ffns[i]);
+      fok += g_fd_hooks[i] >= 0;
+    }
+    snprintf(line, sizeof(line), "io watch: %d of %d data hooks (read, "
+             "write, pread, lseek, close, async reads)\r\n", fok, FD_HOOK_N);
+    log_queue(line);
+  }
   snprintf(line, sizeof(line), "io watch (the game's file operations after "
            "a load): %d of 5 user hooks, kernel open %s0x%08X, system "
            "events %s0x%08X\r\n", ok,
