@@ -808,6 +808,8 @@ int save_state(FATFS *fs, const char *path) {
   /* 4. Savedata of the running titles, from each folder the plugin
    *    found on this card (JV_SAVEDATA_* bits). */
   header.files_offset = g_slot.pos;
+  pargs->savedata_files = 0;
+  pargs->savedata_folders = 0;
 
   for (uint32_t i = 0;
        pargs->backup_savedata && i < pargs->process_num && i < JV_MAX_PROCESSES;
@@ -838,6 +840,8 @@ int save_state(FATFS *fs, const char *path) {
       res = backup_dir(savedata_path, 0, &header.file_num);
       if (res < 0)
         goto out;
+      pargs->savedata_folders |= 1u << r;
+      pargs->savedata_files = header.file_num;
 
       if (header.file_num > MAX_FILE_NUM) {
         res = JV_ERR_SAVEDATA;
@@ -1062,13 +1066,15 @@ static int remove_dir(const char *path, int level) {
  * the JV_SAVEDATA_* bits in folders; the others are read past and left
  * alone (a state saved with reSavedata's folder on the card, loaded on a
  * console where it is not). */
-static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders) {
+static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
+                         uint32_t *written, uint32_t *used) {
   static SaveStateFile file;
   static char path[MAX_PATH_LEN];
   static char root_path[MAX_PATH_LEN];
   static FILINFO fno;
   uint32_t consumed = 0;
   int skipping = 0;
+  int root = -1;
   FRESULT fres;
   FIL fpdst;
   UINT bw;
@@ -1082,7 +1088,7 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders) {
       return res;
 
     if (file.is_root) {
-      int root = savedata_root_of(path); /* valid: read_file_record checked */
+      root = savedata_root_of(path); /* valid: read_file_record checked */
       skipping = root < 0 || !(folders & (1u << root));
     }
     if (skipping) {
@@ -1093,6 +1099,8 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders) {
       }
       continue;
     }
+    (*written)++;
+    *used |= 1u << root;
 
     if (file.is_root) {
       fres = remove_dir(path, 0);
@@ -1307,10 +1315,13 @@ int load_state(FATFS *fs, const char *path) {
   stage_mark(JV_STAGE_LOAD_SAVEDATA);
   /* only into the savedata folders the games use on this card now (the
    * plugin's JV_SAVEDATA_* bits), never into a folder that is not theirs */
+  pargs->savedata_files = 0;
+  pargs->savedata_folders = 0;
   if (pargs->backup_savedata) {
     guard_deny_all();
     guard_allow(vol_start, vol_end - vol_start);
-    res = restore_files(&fp, header.file_num, pargs->backup_savedata);
+    res = restore_files(&fp, header.file_num, pargs->backup_savedata,
+                        &pargs->savedata_files, &pargs->savedata_folders);
     guard_deny_all();
     if (res < 0)
       goto out;

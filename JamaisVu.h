@@ -145,6 +145,10 @@ typedef struct {
    * which inside the screen's frame (drawn during the save, so different
    * by design) - the first differing physical address, read-back time */
   uint32_t verify_bad, verify_screen, verify_first, verify_ms;
+  /* Filled in by the payload: savedata records backed up (save) or put
+   * back (load), and the folders they came from / went to (JV_SAVEDATA_*
+   * bits), for the log. */
+  uint32_t savedata_files, savedata_folders;
 } PayloadArguments;
 
 #define JV_REFUSE_PROCESSES 1 /* more processes than the snapshot holds */

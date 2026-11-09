@@ -645,6 +645,10 @@ int main(int argc, char **argv) {
   uint8_t *st = read_state(slot, &len);
   memcpy(state_copy, st, len);
   CHECK(len == slot_size, "state length");
+  CHECK(args.savedata_files == ((SaveStateHeader *)st)->file_num &&
+        args.savedata_files > 0, "savedata count reported to the plugin");
+  CHECK(args.savedata_folders == (JV_SAVEDATA_SYSTEM | JV_SAVEDATA_RESAVEDATA),
+        "savedata folders reported to the plugin");
 
   /* --- Change everything ---------------------------------------------- */
   printf("modify card + memory\n");
@@ -954,6 +958,9 @@ int main(int argc, char **argv) {
     unmount();
     printf("  %-44s -> %d\n", "load, system folder only", res);
     CHECK(res == JV_OK, "load (system folder only) failed: %d", res);
+    CHECK(args.savedata_folders == JV_SAVEDATA_SYSTEM && args.savedata_files > 0 &&
+          args.savedata_files < ((SaveStateHeader *)state_copy)->file_num,
+          "restored savedata count/folders reported to the plugin");
     allow_everything();
     mount();
     CHECK(read_file("ux0:user/00/savedata/PCSE00123/data.bin", buf, sizeof(buf), &len) == 0 &&

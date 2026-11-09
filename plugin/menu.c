@@ -3641,6 +3641,30 @@ static void after_resume(void) {
                (unsigned)jv_last_process_num());
       log_append(line);
     }
+    if (g_res_debug == JV_TEST_NONE) {
+      /* the games' savedata: which folders on the card were selected
+       * and what the payload did with them */
+      uint32_t sel, files, used;
+      const char *verb = g_res_mode == JAMAISVU_MODE_SAVE ? "backed up"
+                                                           : "put back";
+      jv_last_savedata(&sel, &files, &used);
+      if (sel == 0)
+        snprintf(line, sizeof(line), "    savedata: on another drive, "
+                 "left alone (no folder of the games' on this card)\r\n");
+      else if (files == 0)
+        snprintf(line, sizeof(line), "    savedata: nothing %s (looked in%s%s; "
+                 "the games had no savedata there)\r\n", verb,
+                 sel & JV_SAVEDATA_SYSTEM ? " user/00/savedata" : "",
+                 sel & JV_SAVEDATA_RESAVEDATA ? " resavedata" : "");
+      else
+        snprintf(line, sizeof(line), "    savedata: %u files and folders %s "
+                 "(%s%s%s)\r\n", (unsigned)files, verb,
+                 used & JV_SAVEDATA_SYSTEM ? "user/00/savedata" : "",
+                 (used & JV_SAVEDATA_SYSTEM) && (used & JV_SAVEDATA_RESAVEDATA)
+                     ? ", " : "",
+                 used & JV_SAVEDATA_RESAVEDATA ? "resavedata" : "");
+      log_append(line);
+    }
     if (g_card_remount_root) {
       if (g_card_open_files > 0)
         snprintf(line, sizeof(line), "    after the load: Memory Card on %s "

@@ -150,6 +150,11 @@ PayloadArguments pargs;
 uint32_t jv_last_process_num(void) {
   return pargs.process_num;
 }
+void jv_last_savedata(uint32_t *selected, uint32_t *files, uint32_t *folders) {
+  *selected = pargs.backup_savedata;
+  *files = pargs.savedata_files;
+  *folders = pargs.savedata_folders;
+}
 uint32_t pargs_size = sizeof(PayloadArguments);
 
 static int g_armed = 0;
