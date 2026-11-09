@@ -1,36 +1,25 @@
 # JamaisVu: Vita SaveState Plugin
 
-*JamaisVu* is a kernel plugin for the PlayStation Vita that takes a snapshot of the whole system's memory at any point and restores it later, so you can save in games where it is officially not possible. It is based on TheFloW's savestate plugin, with a new on-screen slot menu and a rewritten save/load path designed so that it cannot damage your Memory Card.
+*JamaisVu* is a kernel plugin for the PlayStation Vita and PS TV that saves the whole system's state to the Memory Card at any moment and restores it later, so you can save anywhere, in any game. Open the menu, pick a slot, press save. Later, load the slot and the game continues from that exact moment.
+
+It is based on TheFloW's déjàvu, with an on-screen slot menu, thumbnails and game names, a progress screen on every display, and a save/load path rewritten so that it cannot damage your Memory Card.
 
 ![Slot menu in the LiveArea (screenshot from a PCH-2000)](docs/screenshots/menu-livearea.jpg)
 
-## Status
+## Compatibility
 
-> **Tested on 3.60** on three consoles, save and load passed on hardware:
-> - **PCH-2000** with an official Memory Card as ux0
-> - **PCH-1000 (OLED)** with usbmc: a PSVSD (USB) as ux0, the Memory Card on uma0
-> - **PS TV** with usbmc: a USB stick as ux0, the Memory Card on uma0, pstv1080p + sharpscale (1080p games)
->
-> It is still young software, so back up your Memory Card (at least `ux0:user/00/savedata` and `ux0:data/JamaisVu`) before relying on it.
-
-| Firmware | Status |
+| | |
 | --- | --- |
-| 3.65 | Supported (the only firmware the original plugin was tested on) |
-| 3.67, 3.68, 3.69–3.73 | Offsets present but **unverified**. Disabled unless built with `-DJAMAISVU_ALLOW_UNVERIFIED_FW=ON` |
-| 3.60 | **Supported**: offsets checked against a dump of a retail 3.60 console ([details](docs/porting-3.60.md)); save and load tested on a PCH-2000, a PCH-1000 and a PS TV |
+| Firmware | **3.60**, tested on a PCH-1000 (OLED), a PCH-2000 and a PS TV. 3.65 has its offsets but has not been tested; other firmware is not supported and the plugin stays inactive there. |
+| Storage | An **official Sony Memory Card**, mounted as ux0, or as uma0/xmc0 next to an SD2Vita, PSVSD or USB stick (StorageMgr, YAMT, gamesd, usbmc). |
+| Space | **704 MB** of free space on the Memory Card per slot, up to 99 slots. |
+| Games | Vita games, from inside the game or from the LiveArea. PSP and PS1 games are left alone. |
 
-On any firmware without a verified offset table, the plugin installs no filesystem hooks and changes nothing. START + UP still opens the menu in **preview mode**, so the interface can be tried, but Save and Load explain why they are unavailable. `ux0:data/JamaisVu/status.txt` records the reason and the module NIDs it found. To help add 3.60, run the read-only [jvdump](tools/jvdump/README.md) plugin once and share its output.
-
-## Requirements
-
-- **An official Sony Memory Card.** JamaisVu writes **only** to the official Memory Card: slot files, slot info, thumbnails and `status.txt`. It never writes to an SD2Vita, PSVSD, USB stick or the internal storage. Ideally use a card dedicated to savestates, so the worst a failure can cost is savestates. The card may be mounted as ux0, or as uma0/xmc0 when a storage plugin (StorageMgr, YAMT, gamesd, usbmc) put an SD2Vita/PSVSD/USB stick on ux0. JamaisVu reads the system's mount table to find which mount is the card (device `sdstor0:xmc-…`); finding it writes nothing.
-  - Savedata is only rolled back by a load when it lives on the Memory Card: the system's `user/00/savedata` when the card is ux0, and [reSavedata](https://github.com/Princess-of-Sleeping/reSavedata)'s `resavedata` whenever that folder is on the card. With an SD2Vita/PSVSD/USB stick as ux0 and the savedata there, a load restores the game but **not** its savedata (the load prompt says so). Pointing reSavedata at the card (uma0) puts the savedata where JamaisVu can roll it back without ever writing to the other drive.
-- **704 MB of free space on the Memory Card per slot.** Each slot is a fixed-size file in its own folder, `data/JamaisVu/SlotN/state.bin`, created the first time you save to it. That first save takes a while longer (a progress bar is shown), and 64 MB are always left free. To avoid the wait in a game, open the menu from the **LiveArea** and prepare slots ahead of time: ✕ prepares the selected slot, △ all slots that fit. Prepared but unused slots show **READY**.
-- **The menu shows as many slots as can exist**, up to 99: every slot that already has a file, plus as many new ones as the free space allows (704 MB each). The row always shows five: with room for two, the counter reads 02/02 and slots 3 to 5 are drawn locked; with room for twenty, 01/20 and the row scrolls. With no slot and no room, five locked slots and 00/00. The log says the count whenever it changes (`slot list: N slots can exist …`). Slots saved with an older JamaisVu (`slotN.bin` beside the folders) are moved into their folders the first time the list is read; the saved states stay as they are.
+JamaisVu writes **only to the official Memory Card**: slot files, slot info, thumbnails, its log. It never writes to an SD2Vita, PSVSD, USB stick or the internal storage, so the worst a failure can cost is savestates. A card dedicated to savestates is ideal. Back up your Memory Card before relying on it.
 
 ## Installation
 
-1. Build or download `JamaisVu.skprx` and copy it to `ux0:tai/JamaisVu.skprx`.
+1. Copy `JamaisVu.skprx` to `ux0:tai/JamaisVu.skprx`.
 2. Add it under `*KERNEL` in `ux0:tai/config.txt`:
 
    ```
@@ -38,14 +27,14 @@ On any firmware without a verified offset table, the plugin installs no filesyst
    ux0:tai/JamaisVu.skprx
    ```
 
-3. Optional, for Japanese game names: copy `jpfont.bin` to `ux0:data/JamaisVu/jpfont.bin`.
-4. Reboot.
+3. Optional, for Japanese game names: copy `jpfont.bin` to `ux0:data/JamaisVu/jpfont.bin` (or `uma0:data/JamaisVu/` if the card is uma0).
+4. Reboot. `data/JamaisVu/status.txt` on the Memory Card says `status: armed` when the plugin is active, or why it is not.
 
-**After loading a slot, the JamaisVu that runs is the one that was in memory when the slot was saved** (a snapshot contains the whole system, plugins included). So after updating the plugin, reboot and save new slots to get the new version's fixes in those sessions; loading an older slot brings the older JamaisVu back until the next reboot.
+**Updating:** a snapshot contains the whole system, JamaisVu included. After an update, reboot and save new slots; loading an older slot brings the older JamaisVu back until the next reboot.
 
 ## Usage
 
-Press **START + UP** to open the slot menu; **START + UP** or **START + DOWN** closes it. The game keeps running underneath but no longer receives input. Tip: hold **UP first, then press START**, so the game never sees START on its own (many games pause on START).
+Press **START + UP** to open the menu; **START + UP** or **START + DOWN** closes it. Hold UP first, then press START, so the game never sees START on its own. The game keeps running underneath but no longer receives input.
 
 | Button | Action |
 | --- | --- |
@@ -56,107 +45,51 @@ Press **START + UP** to open the slot menu; **START + UP** or **START + DOWN** c
 | ○ | Close |
 | ✕ (LiveArea, empty slot) | Prepare the selected slot now |
 | △ (LiveArea) | Prepare all empty slots there is space for |
-| SELECT | Diagnostics (reset test / dry run / display test) |
 
-**✕ always confirms and ○ always goes back** in the menu, in every game and in the LiveArea, whatever the game's region or any ✕/○ remap in reVita or PSV-Shell-Plus.
+✕ always confirms and ○ always goes back, whatever the game's region or any ✕/○ remap.
 
-Preparing slots can be cancelled with the back button; slots already finished are kept.
+**Slots.** Each slot shows a thumbnail of the moment you saved, the game's name as your LiveArea shows it, its title ID, version and date. The menu shows as many slots as can exist: every slot that has a file, plus as many new ones as the free space allows; the counter reads `02/02` with room for two, `01/20` with room for twenty. A slot's file is created the first time you save to it, which takes a while longer; to avoid that wait in a game, prepare slots from the LiveArea (prepared slots show **READY**).
 
-Each slot shows a thumbnail of the game screen at the moment you saved, the game's name, its title ID, its version and the date.
+**Saving** takes about a minute. A progress screen shows how far it is, on the OLED, the LCD and over HDMI. Afterwards the game continues and a message confirms the save.
 
-**Game names** are the ones your LiveArea shows (read from `ur0:shell/db/app.db`, only read), so a game you renamed (e.g. Japanese → English) shows its new name; otherwise the name from the game's `param.sfo`.
+**Loading** works from inside a game and from the LiveArea. A snapshot only loads into the exact game version it was taken with; if the game was updated since, the slot is marked and cannot be loaded. Saving only works while a game is on screen; the LiveArea itself is never snapshotted.
 
-**Japanese game names** (kana and kanji, e.g. キャサリン・ＦＢ) need `jpfont.bin` (from the release, ~1.7 MB) in `ux0:data/JamaisVu/`. It stays on the Memory Card: when the menu opens, only the characters the five names need are read (at most ~70 KB, and only while the menu is shown). Without the file, such names show only their Latin letters, or the title ID.
+**No lock screen** appears after a save or load; ordinary sleep still locks as usual.
 
-**A snapshot only loads into the exact game version it was taken with.** The version (`APP_VER` from the game's `param.sfo`, or from its installed update) is stored with the slot. If the game has been updated (e.g. 01.01 → 01.02) or downgraded since, the slot is marked and cannot be loaded.
+During a save or load the **game card LED is on**. If it blinks rapidly, see [If a load fails](#if-a-load-fails).
 
-- **Saving** takes about a minute while memory is written to `data/JamaisVu/SlotN/state.bin` on the Memory Card. On a PCH-2000 a progress screen shows how far it is (saves and loads). On a PCH-1000 (OLED) and a PS TV (HDMI, shown at 720p) it is switched on once **Diagnostics → Display test** has run through on that console (recorded in `data/JamaisVu/display_ok.txt`); until then the screen stays black. Tested on a PCH-1000 (OLED) and a PS TV (HDMI, with pstv1080p and sharpscale installed). Afterwards the game continues, and a message confirms the save or explains why it failed.
-- **PSP and PS1 games are left alone** (from the LiveArea or in Adrenaline): they run in the Vita's PSP emulator, and while it is in the foreground START + UP does nothing. No menu opens, no buttons are taken and nothing can be saved. JamaisVu checks this only when START + UP is pressed, with the system's own `ksceSblACMgrIsPspEmu` on the app that is reading the controller. It hooks no system function for it (an earlier hook on app start/exit events, the one PSV-Shell-Plus also uses, crashed the PS TV when apps started).
-- **Loading** works from inside a game and from the **LiveArea**. Saving does not: Save only appears when a running game is on screen, and this is checked again right before the save starts. A game suspended in the background doesn't count, so the LiveArea/shell can never be snapshotted.
-- **No lock screen after a save or load** (handhelds and PS TV, no NoLockScreen plugin needed). JamaisVu patches SceShell in memory just for that wake-up and removes the patch about 10 s later, so ordinary sleep still locks. Retail 3.60 and 3.65–3.74 only; on other SceShell builds the lock screen appears as usual. `log.txt` says whether it was applied.
-- During save and load **the game card LED is on**. If it **blinks rapidly**, see [If a load fails](#if-a-load-fails).
-- **After a load with a USB drive as ux0** (usbmc), the game comes back a little later than after a save: JamaisVu first waits for the USB drive to be back from the wake-up (about 0.5–0.8 s) before re-reading it. On the PCH-1000 re-checking the files open on the internal storage adds several more seconds; the game picture returns about 10 s after the wake-up there.
-- **After a normal sleep** (power button), usbmc's Memory Card mount (uma0) drops out. JamaisVu mounts the card again within about half a second of the wake-up; a slot pressed before that says the card isn't mounted yet.
+## Savedata
 
-A savestate contains the savedata of the games that were running (from the folders on the Memory Card named above). Loading a slot puts that savedata back, so progress made after the snapshot is lost.
+A snapshot includes the running game's savedata, and loading a slot puts it back, so the game and its saves always agree. Progress made after the snapshot, saves included, is undone by a load, which is what a savestate is for.
 
-Slots from the original dejavu plugin (`ux0:savestate/…`, format v1) cannot be loaded.
+The savedata is included when it lives on the Memory Card:
 
-**Known issue: Dead Nation.** The menu (and reVita's popup) breaks up into blocks in Dead Nation, because the game itself tears: it draws into frames that are already on screen, which damages anything drawn over them. Saving and loading work normally there; only the menu's picture is affected.
+- the system's `user/00/savedata` folder, when the card is ux0;
+- [reSavedata](https://github.com/Princess-of-Sleeping/reSavedata)'s `resavedata` folder, whenever that folder is on the card. The [Memory Card edition](https://github.com/delon5/reSavedata) of reSavedata puts it there automatically, on uma0 when a storage plugin has another drive on ux0.
 
-## How the menu is drawn
+When the savedata is on another drive (an SD2Vita, PSVSD or USB stick as ux0, without reSavedata on the card), a load restores the game but **not** its savedata, and the load prompt says so. A game may then see a save made after the snapshot as corrupt or overwrite it; nothing else is affected.
 
-In a game, while the game's own frames are on the screen and the system has not shown anything on the plane for two seconds (its all-transparent refreshes, which some games trigger a few times a second, do not count and are kept off the plane while the menu is up), the menu lives on the display's second plane - the one the system uses for its own overlays - as a single 960x544 picture in VRAM that the display hardware blends over the game's frames (scaled to the output, 1080p on the PS TV included). Nothing is composed into the game's frames, the game cannot draw over it, and the menu needs only ~250 KB of kernel memory (thumbnails and a drawing band), so it opens in games that leave the kernel almost nothing. The 2 MB VRAM buffer is taken when the menu first opens in a game and given back once the system puts its own picture on the plane again (its overlays, every app switch), so it is never held across games; a game that leaves no 2 MB block gets the composed menu instead; the plane is claimed while the menu or a message is shown and handed back to the system afterwards. If the system puts its own overlay on the plane meanwhile (PS button menu, a notification), the menu closes rather than draw over it. In the LiveArea that plane is the LiveArea's own picture, so there the menu is composed into the frames as before.
+## Good to know
 
-When the menu is composed into the frames (the LiveArea, a game that leaves no 2 MB of video memory, an app that is not a game process), the stored menu image is compressed losslessly: flat areas and text as runs, the thumbnails by reference to the copies already in memory, about 50 KB instead of 516 KB, pixel for pixel the same (checked by the host tests). It grows in 64 KB pieces, two copies alternating so the one on screen is never written while it is read, and the composed menu needs about 300 KB in all instead of about 850 KB. The log says how much each menu took (`menu image: … KB compressed`).
+- **PSP and PS1 games** (LiveArea or Adrenaline) run in the Vita's PSP emulator; JamaisVu stays out of them. No menu opens and nothing is saved.
+- **With a USB drive as ux0** (usbmc), the game comes back a few seconds later after a load than after a save: JamaisVu waits for the drive to return from the wake-up before re-reading it.
+- **After a normal sleep** (power button), usbmc's Memory Card mount drops out. JamaisVu mounts the card again within about half a second of the wake-up.
+- **Japanese game names** (kana and kanji) need `jpfont.bin` on the Memory Card; without it such names show their Latin letters or the title ID.
+- **Dead Nation** tears its own frames, which breaks up the menu's picture there. Saving and loading work normally.
+- **Slots from the original déjàvu** (`ux0:savestate/…`) cannot be loaded.
+- **Every run is recorded** in `data/JamaisVu/log.txt` on the Memory Card (`log.old.txt` keeps the previous 64 KB). If something goes wrong, that file says what happened; please include it in a report.
 
-To force the composed menu on a console - for comparison, or if the plane misbehaves with some setup - create an empty file `data/JamaisVu/noplane` on the Memory Card. The log notes it once (`overlay plane: off`); remove the file to go back.
-
-## How it keeps the Memory Card safe
-
-The original README warned that *"your SD Card and/or Memory Card may be corrupted"*. This version addresses each known cause.
-
-**Saving cannot change the filesystem.**
-- The slot file is created and sized by the Vita's own exFAT driver *before* the snapshot, so all filesystem metadata is written by the OS.
-- The payload looks up exactly which sectors belong to that file.
-- A sector write guard (`payload/guard.c`) blocks every write outside those sectors before it reaches the card driver.
-
-**An interrupted save is never loadable.**
-- The header sector is cleared first and written last, with CRCs over the header and all metadata.
-- A slot only counts as used once its `.jvi` info file is written, which happens after the save succeeds.
-
-**An incomplete snapshot is never taken.** If the list of running processes cannot be read in full at suspend time (more than 32, or a process context the kernel will not give), the payload refuses the save and the menu says so; nothing is written.
-
-**Nothing is written until the whole file has been checked.** Before a load touches the card, it verifies:
-- the header CRC and body CRC
-- every savedata path (only `ux0:user/00/savedata/<TITLEID>/…` or `ux0:resavedata/<TITLEID>/…`; no `..`)
-- every memory segment (only DRAM/VRAM and the two known system regions)
-- that the state was made on the same Memory Card
-
-A corrupted or tampered state is rejected with nothing changed. (The memory contents themselves carry no checksum: the payload runs with the data cache off, and a CPU pass over the whole image would take minutes. The card's own error correction covers the medium.)
-
-**Load writes are fenced.**
-- Savedata restore can only write inside ux0's exFAT area, never the partition table or boot sectors.
-- The mediaid sector is restored only to the sector it came from, and can no longer fall back to sector 0 (the MBR), which the original could.
-
-**The restored OS cannot write with stale caches.** The payload arms a write block *inside the restored memory image*. The plugin re-reads every exFAT drive from its storage before writes are allowed again. If a file that was open at snapshot time no longer exists, **that drive** stays **read-only until restart** rather than risk writing to the wrong clusters. The other drives, including the system's own internal storage, stay writable. (Blocking writes on every drive, as an earlier version did, left the system unable to write anything and made it restart.)
-
-- Each entry of the kernel's open-file table is decided under its own lock, read afresh: an entry the kernel is reclaiming or setting up at that moment, or one that cannot be locked, is left to the kernel. A file that is gone is freed only when nothing holds it open; a drive whose lookup could not be made is never counted as changed.
-- Entries nothing holds open (the kernel's name cache for files the game opened earlier - ~950 of 1024 in GTA: San Andreas) are given back under the kernel reclaim's own conditions instead of being looked up on the drive one by one (~20 ms each, 17 s in all). Only files actually open are looked up again; the next open of a cached file reads it from the drive, as after a cold start.
-- The Memory Card on uma0/xmc0 stays **read-only from the wake-up until it has been mounted afresh** (about 18 s after a load). Before, the restored image's view of the card was writable for that time.
-- After a load, `log.txt` records what the re-read found (`open files after the load: … gone … changed size … busy`), how the card came back (`mounted afresh` or `re-read in place`), and a check of a memory canary written before the load, which catches a restore that left stale cache lines behind.
-
-**Storage that is away during the wake-up is not touched.** With a storage plugin, the drives behind ux0 and uma0 come back from the wake-up at their own pace:
-- **A USB drive as ux0** (usbmc's PSVSD or USB stick) is only re-read once one sector of it can be read again. JamaisVu waits up to 3 s during the wake-up, and up to 20 s more afterwards. Until then it stays exactly as it was and read-only. Re-reading it too early failed and left ux0 unusable: the game went black, VitaShell reported its data as corrupt, and the PS TV restarted.
-- **The Memory Card on uma0/xmc0** is not re-read in place. It is mounted afresh once the wake-up is over. During the first 15 s after JamaisVu's own wake-ups, the **card guard** refuses the system storage driver's attempt to unmount it.
-- **A drive that disappears** while the wake-up checks the drives (its mount is being taken down) is left alone, neither remounted nor read.
-
-**Unsupported firmware is never patched.** The original hooked 3.65 offsets on every firmware. On 3.60 that means patching random instructions inside the filesystem driver.
-
-**Driver fixes.**
-- Card transfers are split into ≤128 sectors (the original could send a wrong sector count for transfers above 255 sectors).
-- The payload clears its `.bss` at startup, and several buffer overflows are fixed.
-
-### What is still not guaranteed
-
-No software can promise "100 %". These are the remaining risks:
-
-- **Hardware coverage.** Tested on 3.60 only: a PCH-2000 (card as ux0), a PCH-1000 and a PS TV (both with usbmc). Other storage plugins and setups are untested. See *Status* above.
-- **Load is inherently invasive.** It replaces the entire OS memory. The ux0 remount (`plugin/fs.c`, inherited from the original) refreshes the exFAT driver's caches, but it is reverse-engineered code. JamaisVu's protections make an inconsistency fail safe (read-only) rather than silently corrupt, but it can't rule out every bug in that path.
-- **A card I/O error in the middle of a load.** The payload stops (the LED blinks) instead of resuming a half-restored system. Savedata of the loaded game may be partially restored, as after a power cut.
-- **A slot brings back the system as it was when it was saved**, plugin settings included. A slot saved while something was wrong will bring it back on every load. Overwrite it with a new save rather than loading it again.
-- **An oversized home screen.** On the PS TV, loads froze while the LiveArea had more apps than it could show and rebuilt its database at every restart. They worked again once the home screen was cleaned up. This is likely but not proven to be the cause. If loads start freezing, check that every installed app has a bubble.
-- **What the log shows.** Every run is recorded in `data/JamaisVu/log.txt`. When it grows past 64 KB it is renamed `log.old.txt` and a new one starts, so the run before a restart is always kept. A load's step record (`trace.bin`) stays open for 60 s after the wake-up, so a later restart still shows how long the system lived.
-
-### If a load fails
+## If a load fails
 
 If the load fails **before** anything was changed (damaged snapshot, other card, …), the game simply continues and a message explains why. If the game card LED **blinks rapidly with a black screen**, the load failed part-way. Hold the power button to switch off, then switch on again.
 
+A load replaces the entire memory of the system. The protections that keep that from corrupting the card, and the risks that remain, are described in [docs/design.md](docs/design.md).
+
 ## Building
 
-Every push is built by GitHub Actions with the official VitaSDK (`.github/workflows/build.yml`). The `.skprx` files are attached to each run as an artifact.
+Every push is built by GitHub Actions with the official VitaSDK (`.github/workflows/build.yml`); the `.skprx` files are attached to each run. A pushed tag `v<version>` builds the release and drafts a GitHub Release with the zip (`.github/workflows/release.yml`).
 
-To build locally you need [VitaSDK](https://vitasdk.org), which includes taiHEN.
+To build locally you need [VitaSDK](https://vitasdk.org) with taiHEN:
 
 ```bash
 mkdir build && cd build
@@ -166,21 +99,21 @@ mkdir build && cd build
 cmake .. && make
 ```
 
+Release builds (`-DJAMAISVU_RELEASE=ON -DJAMAISVU_VERSION=2.0.0`) leave out the Diagnostics screen that development builds open with SELECT in the menu (reset test, dry run, display test, write test).
+
 ### Testing
 
-The payload's save/load code is also built for the PC and run against an in-memory Memory Card holding a real exFAT filesystem (exFAT with 4K, 32K and 128K clusters). Needs `gcc` and `exfatprogs`:
+The payload's save/load code is also built for the PC and run against an in-memory Memory Card holding a real exFAT filesystem (4K, 32K and 128K clusters). Needs `gcc` and `exfatprogs`:
 
 ```bash
 tests/host/run.sh
 ```
 
-It checks that a save changes only the slot file's sectors, that a load restores savedata, memory and the mediaid sector exactly, and that over a dozen kinds of corrupted, malicious, interrupted or foreign states are rejected without writing anything. `fsck.exfat` must report every image clean.
-
-`tests/host/preview.sh <background.png> <outdir>` renders the menu with the plugin's own drawing code (images in `docs/menu-preview`).
+It checks that a save changes only the slot file's sectors, that a load restores savedata, memory and the mediaid sector exactly, and that over a dozen kinds of corrupted, malicious, interrupted or foreign states are rejected without writing anything. `fsck.exfat` must report every image clean. `tests/host/preview.sh` renders the menu with the plugin's own drawing code.
 
 ## Technical details
 
-The plugin hooks the soft reset (`kscePowerRequestSoftReset`) so that, while every resource is suspended, a payload runs at physical address `0x1C000000` with caches and the MMU disabled. Using [FatFs](http://elm-chan.org/fsw/ff/00index_e.html) and a reverse-engineered Memory Card driver, it writes (or restores) every page referenced by the page tables, plus a few hardware states. When the system resumes, the plugin refreshes the filesystem driver's view of ux0.
+The plugin hooks the soft reset (`kscePowerRequestSoftReset`) so that, while every resource is suspended, a payload runs at physical address `0x1C000000` with caches and the MMU disabled. Using [FatFs](http://elm-chan.org/fsw/ff/00index_e.html) and a Memory Card driver of its own, it writes (or restores) every page referenced by the page tables, plus a few hardware states, while showing its progress on the console's display. When the system resumes, the plugin refreshes the filesystem driver's view of the drives. The design notes in [docs/design.md](docs/design.md) cover the menu's drawing and the Memory Card protections; [docs/porting-3.60.md](docs/porting-3.60.md) describes how the 3.60 offsets were established.
 
 ## Credits
 
@@ -189,6 +122,11 @@ The plugin hooks the soft reset (`kscePowerRequestSoftReset`) so that, while eve
 - Thanks to [xerpi](https://github.com/xerpi) for [vita-libbaremetal](https://github.com/xerpi/vita-libbaremetal) (MIT) and the Vita developer wiki pages that came out of it: the progress screen's display code (display link, display controller, clocks, I2C, the OLED and LCD panels, the HDMI bridge) was first built on his code and is now JamaisVu's own, written from those register pages and the system's own setup, with the register values his work established.
 - Thanks to [Team Molecule](https://github.com/TeamMolecule) for their prior research.
 - Lock screen skip uses the SceShell locations found by TheFloW for NoLockScreen ([VitaTweaks](https://github.com/TheOfficialFloW/VitaTweaks)).
+- [reSavedata](https://github.com/Princess-of-Sleeping/reSavedata) by Princess of Sleeping (GPL-3.0).
 - Thanks to Dark_AleX for pspstates, which inspired the original project.
 - Menu font: [Inter](https://github.com/rsms/inter) (SIL Open Font License, see `plugin/gui/FONT_LICENSE.txt`).
 - Japanese glyphs: [Noto Sans JP](https://fonts.google.com/noto/specimen/Noto+Sans+JP) (SIL Open Font License, see `plugin/gui/FONT_LICENSE_JP.txt`), rasterised by `tools/gen_jpfont.py`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -62,6 +62,13 @@ jobs:
             exit 1
           }
 
+      # the release configuration must keep compiling too (no Diagnostics)
+      - name: Release-configured build
+        run: |
+          mkdir -p build-release && cd build-release
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DJAMAISVU_RELEASE=ON -DJAMAISVU_VERSION=0.0.0-ci
+          make -j"$(nproc)" JamaisVu.skprx-self 2>/dev/null || make -j"$(nproc)"
+
       - name: Payload ARM/Thumb interworking
         run: |
           # The C code is Thumb, start.S is ARM. Calls from C into start.S

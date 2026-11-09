@@ -83,6 +83,18 @@ if(JAMAISVU_TESTING)
   target_compile_definitions(JamaisVu PRIVATE JAMAISVU_TESTING)
 endif()
 
+# Release build (-DJAMAISVU_RELEASE=ON -DJAMAISVU_VERSION=2.0.0, as the
+# release workflow passes for a v* tag): the Diagnostics screen (SELECT in
+# the menu: reset test, dry run, display test, write test) is compiled
+# out, and status.txt and the log carry the release version instead of
+# the development one.
+option(JAMAISVU_RELEASE "Release build: no Diagnostics screen" OFF)
+set(JAMAISVU_VERSION "2.0-dev" CACHE STRING "Version shown in status.txt and the log")
+target_compile_definitions(JamaisVu PRIVATE JV_VERSION="${JAMAISVU_VERSION}")
+if(JAMAISVU_RELEASE)
+  target_compile_definitions(JamaisVu PRIVATE JV_RELEASE)
+endif()
+
 add_dependencies(JamaisVu JamaisVu_payload_binary)
 
 # room for vita-elf-create's SCE data between the segments (see the file)

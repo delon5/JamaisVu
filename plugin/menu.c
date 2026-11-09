@@ -430,49 +430,6 @@ static int read_small(const char *path, void *buf, int cap) {
   return n;
 }
 
-/* Progress screen on the PCH-1000 (OLED) and the PS TV (HDMI): only once
- * the Diagnostics display test has run through on this console without a
- * hardware wait giving up. Recorded in data/JamaisVu/display_ok.txt
- * ("type N" per display that passed); delete the file to reset. */
-static int g_disp_ok_mask = -1; /* bit per JV_DISP_*, -1 = not read yet */
-
-static int display_ok(uint32_t type) {
-  if (type == JV_DISP_LCD)
-    return 1; /* PCH-2000: tested on hardware */
-  if (g_disp_ok_mask < 0) {
-    static char path[96], buf[64];
-    g_disp_ok_mask = 0;
-    jv_file_path(path, sizeof(path), "display_ok.txt");
-    int n = read_small(path, buf, sizeof(buf) - 1);
-    if (n > 0) {
-      buf[n] = '\0';
-      for (int t = JV_DISP_OLED; t <= JV_DISP_HDMI; t++) {
-        char key[8] = "type 0";
-        key[5] = (char)('0' + t);
-        if (strstr(buf, key))
-          g_disp_ok_mask |= 1 << t;
-      }
-    }
-  }
-  return (g_disp_ok_mask >> type) & 1;
-}
-
-static void display_ok_record(uint32_t type) {
-  static char path[96], buf[64];
-  if (type != JV_DISP_OLED && type != JV_DISP_HDMI || display_ok(type))
-    return;
-  g_disp_ok_mask |= 1 << type;
-  int n = 0;
-  for (int t = JV_DISP_OLED; t <= JV_DISP_HDMI; t++)
-    if ((g_disp_ok_mask >> t) & 1)
-      n += snprintf(buf + n, sizeof(buf) - n, "type %d\r\n", t);
-  jv_file_path(path, sizeof(path), "display_ok.txt");
-  SceUID fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
-  if (fd >= 0) {
-    ksceIoWrite(fd, buf, n);
-    ksceIoClose(fd);
-  }
-}
 
 static const char *disp_name(uint32_t type) {
   return type == JV_DISP_LCD ? "LCD, PCH-2000" :
@@ -2676,8 +2633,10 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
                     "- it can't be loaded", -1, 1);
       } else if ((pressed & SCE_CTRL_SQUARE) && used) {
         set_message(MV_CONFIRM_LOAD, "", -1, 0);
+#ifndef JV_RELEASE
       } else if (pressed & JV_DIAG_BUTTON) {
-        set_message(MV_DIAG, "", -1, 0);
+        set_message(MV_DIAG, "", -1, 0); /* development builds only */
+#endif
       } else if (pressed & SCE_CTRL_CIRCLE) {
         close_menu();
       }
@@ -3684,12 +3643,6 @@ static void after_resume(void) {
   }
 
   if (g_res_debug != JV_TEST_NONE) {
-    /* display test through all its steps, no hardware wait gave up (the
-     * payload reports their count as detail): from now on saves and loads
-     * show the progress screen on this console (OLED / PS TV) */
-    if (g_res_debug == JV_TEST_DISPLAY && g_res_result == JV_TEST_DONE &&
-        g_res_detail == 0)
-      display_ok_record(g_res_pa.disp_type);
     /* PS TV: our HDMI registers during the test picture (payload copy) */
     if (g_res_debug == JV_TEST_DISPLAY && g_regsnap_ok) {
       g_regsnap_ok = 0;
@@ -4425,10 +4378,11 @@ static void do_load(int slot) {
 /* Display test / progress screen: is the recorded frame usable? Logs the
  * details either way; why = the reason if not. */
 /* for_test: the Diagnostics display test itself (any display); otherwise
- * a save/load/dry run, which shows the progress screen on the OLED or the
- * PS TV only after that test has passed on this console. */
+ * a save/load/dry run (the progress screen: every display is verified on
+ * hardware, so it is on from the start). */
 static int display_frame_check(char *why, int len, int for_test) {
   uint32_t hw = jv_hw_info(), type = jv_disp_type();
+  (void)for_test;
   /* the frame the payload draws into: the game's 960x544 frame; on the
    * PS TV (HDMI) also a larger one (home screen), as long as it holds the
    * 960x544 screen */
@@ -4438,10 +4392,7 @@ static int display_frame_check(char *why, int len, int for_test) {
       : g_fb_w == 960 && g_fb_h == 544 && g_fb_pitch >= 960 &&
         g_fb_pitch <= 1024;
   why[0] = '\0';
-  if (!for_test && !display_ok(type))
-    snprintf(why, len, "Progress screen off until Diagnostics > Display test "
-             "has passed on this console (%s)", disp_name(type));
-  else if (!g_fb_rec)
+  if (!g_fb_rec)
     snprintf(why, len, "Display test: no frame seen yet - try again");
   else if (!size_ok)
     snprintf(why, len, "Display test: frame %ux%u pitch %u is not supported "

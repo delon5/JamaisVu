@@ -1,0 +1,90 @@
+# Release: pushed tag v<version> -> release build (no Diagnostics, the
+# version in status.txt), the same checks as build.yml, a zip with the
+# plugin, the Japanese font and the README, and a draft GitHub Release
+# with generated notes to edit before publishing.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VITASDK: ${{ github.workspace }}/vitasdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cached VitaSDK
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VITASDK }}
+          key: vitasdk-${{ runner.os }}-seed-0.1.6-channel-2026.08-taihen
+
+      - name: Install VitaSDK (official vdpm bootstrap) and taiHEN
+        env:
+          VDPM_NONINTERACTIVE: "1"
+        run: |
+          if [ ! -x "$VITASDK/bin/arm-vita-eabi-gcc" ]; then
+            rm -rf "$VITASDK"
+            git clone --depth 1 https://github.com/vitasdk/vdpm
+            for attempt in 1 2 3 4 5; do
+              ./vdpm/bootstrap-vitasdk.sh && break
+              echo "bootstrap attempt $attempt failed"
+              rm -rf "$VITASDK"
+              [ "$attempt" = 5 ] && exit 1
+              sleep 60
+            done
+          fi
+          export PATH="$VITASDK/bin:$PATH"
+          echo "$VITASDK/bin" >> "$GITHUB_PATH"
+          if [ ! -f "$VITASDK/arm-vita-eabi/lib/libtaihenForKernel_stub.a" ]; then
+            "$VITASDK/bin/vdpm" install taihen || "$VITASDK/bin/vdpm" taihen
+          fi
+          ls "$VITASDK/arm-vita-eabi/include/taihen.h"
+
+      - name: Build the release (plugin + payload)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version $VERSION"
+          mkdir -p build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DJAMAISVU_RELEASE=ON \
+                   -DJAMAISVU_VERSION="$VERSION"
+          make -j"$(nproc)"
+
+      - name: Payload ARM/Thumb interworking
+        run: |
+          dis=$("$VITASDK/bin/arm-vita-eabi-objdump" -d build/payload/JamaisVu_payload)
+          if echo "$dis" | grep -E $'\tbl\t[0-9a-f]+ <jv_recover>'; then
+            echo "plain BL into ARM code"; exit 1
+          fi
+          echo "$dis" | grep -E $'\tblx\t[0-9a-f]+ <jv_recover>' \
+            || { echo "no BLX to jv_recover"; exit 1; }
+          "$VITASDK/bin/arm-vita-eabi-nm" build/payload/JamaisVu_payload \
+            | grep -q '^1c000000 T _start$' || { echo "_start not at 0x1c000000"; exit 1; }
+
+      - name: Host tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq exfatprogs
+          tests/host/run.sh
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p "JamaisVu-$VERSION"
+          cp build/JamaisVu.skprx plugin/gui/jpfont.bin README.md LICENSE "JamaisVu-$VERSION/"
+          (cd "JamaisVu-$VERSION" && sha256sum JamaisVu.skprx jpfont.bin > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          zip -r "JamaisVu-$VERSION.zip" "JamaisVu-$VERSION"
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" "JamaisVu-$VERSION.zip" \
+            --draft --generate-notes --title "JamaisVu $VERSION"

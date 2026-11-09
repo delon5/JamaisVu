@@ -32,7 +32,9 @@
 #include "storage.h"
 #include "trace.h"
 
-#define JV_VERSION "2.0-dev"
+#ifndef JV_VERSION
+#define JV_VERSION "2.0-dev" /* set by CMake (JAMAISVU_VERSION) */
+#endif
 #ifndef JV_BUILD_ID
 #define JV_BUILD_ID "unknown"
 #endif
