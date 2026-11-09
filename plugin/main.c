@@ -543,7 +543,10 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
    * any other storage; savedata elsewhere is left alone) */
   if (!storage_mc_root())
     return -1;
-  pargs.backup_savedata = storage_savedata_flags();
+  /* data/JamaisVu/nosavedata on the card: the games' savedata is left
+   * alone by saves and loads (to tell a savedata problem from the rest) */
+  pargs.backup_savedata =
+      jv_switch_file("nosavedata") ? 0 : storage_savedata_flags();
   pargs.slot_size = JV_SLOT_SIZE;
   if (nonce)
     memcpy(pargs.slot_nonce, nonce, sizeof(pargs.slot_nonce));

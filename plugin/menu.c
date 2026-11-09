@@ -3215,7 +3215,8 @@ static void refresh_slots(void) {
   }
 
   model_begin();
-  g_model.savedata_rolls_back = storage_savedata_flags() != 0;
+  g_model.savedata_rolls_back =
+      storage_savedata_flags() != 0 && !jv_switch_file("nosavedata");
   g_model.refreshing = 1; /* thumbnails still loading */
   model_end();
 
@@ -3526,6 +3527,7 @@ static uint32_t canary_bad(void) {
 static int g_card_remount_ret = 1;
 static const char *g_card_remount_root;
 static int g_card_open_files;
+static int g_card_in_place; /* forced by data/JamaisVu/cardinplace */
 
 static void after_resume(void) {
   static char msg[128];
@@ -3553,7 +3555,10 @@ static void after_resume(void) {
        * drive is re-read in place instead (as a late USB drive is) */
       const char *croot = storage_card_root();
       g_card_open_files = croot ? fs_open_handles(croot) : 0;
-      if (g_card_open_files > 0) {
+      /* data/JamaisVu/cardinplace: re-read in place even with no file
+       * open (to tell the fresh mount from the rest) */
+      g_card_in_place = croot && jv_switch_file("cardinplace");
+      if (g_card_open_files > 0 || g_card_in_place) {
         g_card_remount_ret = fs_card_refresh(croot);
         root = croot;
         if (g_card_remount_ret == 0)
@@ -3607,7 +3612,10 @@ static void after_resume(void) {
       const char *verb = g_res_mode == JAMAISVU_MODE_SAVE ? "backed up"
                                                            : "put back";
       jv_last_savedata(&sel, &files, &used);
-      if (sel == 0)
+      if (sel == 0 && jv_switch_file("nosavedata"))
+        snprintf(line, sizeof(line), "    savedata: left alone "
+                 "(data/JamaisVu/nosavedata is on the card)\r\n");
+      else if (sel == 0)
         snprintf(line, sizeof(line), "    savedata: on another drive, "
                  "left alone (no folder of the games' on this card)\r\n");
       else if (files == 0)
@@ -3625,10 +3633,12 @@ static void after_resume(void) {
       log_append(line);
     }
     if (g_card_remount_root) {
-      if (g_card_open_files > 0)
+      if (g_card_open_files > 0 || g_card_in_place)
         snprintf(line, sizeof(line), "    after the load: Memory Card on %s "
-                 "re-read in place (%d files open on it; stale %d)%s\r\n",
-                 g_card_remount_root, g_card_open_files, g_card_remount_ret,
+                 "re-read in place (%d files open on it%s; stale %d)%s\r\n",
+                 g_card_remount_root, g_card_open_files,
+                 g_card_in_place ? "; data/JamaisVu/cardinplace" : "",
+                 g_card_remount_ret,
                  g_card_remount_ret == 0 ? "" : " - stays read-only");
       else
         snprintf(line, sizeof(line), "    after the load: Memory Card on %s "

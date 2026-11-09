@@ -32,6 +32,9 @@ void slots_sync(void);
 void slot_path(char *out, int len, int slot, const char *ext);
 void slot_dir_path(char *out, int len, int slot);
 void jv_file_path(char *out, int len, const char *name);
+/* 1 if data/JamaisVu/<name> exists on the Memory Card: a switch the user
+ * creates to change a behaviour (noplane, nosavedata, cardinplace) */
+int jv_switch_file(const char *name);
 
 /* Moves slots laid out the old way (slotN.bin ... in data/JamaisVu) into
  * their folders. Returns the number of slots moved; *failed counts those

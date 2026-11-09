@@ -73,6 +73,14 @@ void jv_file_path(char *out, int len, const char *name) {
   snprintf(out, len, "%s" SLOT_SUBDIR "/%s", mc_root(), name);
 }
 
+int jv_switch_file(const char *name) {
+  char path[160];
+  SceIoStat st;
+  jv_file_path(path, sizeof(path), name);
+  memset(&st, 0, sizeof(st));
+  return ksceIoGetstat(path, &st) >= 0;
+}
+
 void slot_payload_path(char *out, int len, int slot) {
   /* "ux0:" is just the payload FatFs' name for the Memory Card */
   snprintf(out, len, "ux0:" SLOT_SUBDIR "/Slot%d/state.bin", slot + 1);
