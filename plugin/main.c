@@ -96,6 +96,30 @@ void jv_clocks_remember(char *out, int len) {
   clocks_fmt(out, len, g_clocks);
 }
 
+/* The payload and the card driver run at whatever clocks the system had
+ * at the request. With a 500 MHz profile (PSV-Shell) two saves in one
+ * evening failed in the card driver (one hung while writing, one in the
+ * card's authentication; every run at the default clocks worked), so the
+ * run is made at the defaults and the profile restored afterwards. */
+void jv_clocks_default(char *out, int len) {
+  int now[4], after[4];
+  static char a[64], b[64];
+  clocks_resolve();
+  clocks_read(now);
+  if (now[0] != 333 && p_set_arm)
+    p_set_arm(333);
+  if (now[1] != 222 && p_set_bus)
+    p_set_bus(222);
+  if (now[2] != 111 && p_set_gpu)
+    p_set_gpu(111, 111);
+  if (now[3] != 111 && p_set_xbar)
+    p_set_xbar(111);
+  clocks_read(after);
+  clocks_fmt(a, sizeof(a), now);
+  clocks_fmt(b, sizeof(b), after);
+  snprintf(out, len, "%s -> %s", a, b);
+}
+
 void jv_clocks_restore(char *out, int len) {
   static char a[64], b[64], c[64];
   int now[4], after[4];
@@ -580,6 +604,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   pargs.write_sectors = debug_mode == JV_TEST_VERIFY ? 255 : 0;
   pargs.verify_bad = pargs.verify_screen = pargs.verify_first = 0;
   pargs.verify_ms = 0;
+  pargs.savedata_files = pargs.savedata_folders = 0; /* set by the payload */
   {
     uint32_t ttbcr = 0;
     __asm__ volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));

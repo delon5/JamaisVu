@@ -33,6 +33,9 @@ void jv_last_savedata(uint32_t *selected, uint32_t *files, uint32_t *folders);
 int jv_count_class(const char *name);
 /* clock speeds: record before a save/load, put back after it (see main.c) */
 void jv_clocks_remember(char *out, int len);
+/* the console's default clocks (cpu 333, bus 222, gpu 111, xbar 111) for
+ * the run; jv_clocks_restore puts the remembered ones back afterwards */
+void jv_clocks_default(char *out, int len);
 void jv_clocks_restore(char *out, int len);
 #define JV_PAYLOAD_DEFAULT 0 /* the only payload (variants were for A/B tests) */
 /* Display test (Diagnostics): the frame to draw into; the hardware info

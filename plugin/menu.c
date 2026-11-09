@@ -3934,6 +3934,9 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     jv_clocks_remember(clk, sizeof(clk));
     snprintf(line, sizeof(line), "    clocks before: %s\r\n", clk);
     log_append(line);
+    jv_clocks_default(clk, sizeof(clk));
+    snprintf(line, sizeof(line), "    clocks for the run: %s\r\n", clk);
+    log_append(line);
   }
   /* PS TV: the system's own HDMI setup while its picture is on screen
    * (read only), to compare with the progress screen's */
