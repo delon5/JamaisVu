@@ -2259,6 +2259,16 @@ static void note_buttons(int idx, int port, SceCtrlData *pad, int ret,
   if (jv_copy_from_user(&d, pad, sizeof(d)) >= 0)
     g_btn_or[k] |= neg ? ~d.buttons : d.buttons;
 }
+/* the data operations of the two reading processes (by the controller
+ * reader slot): counts for the activity line, errors into the ring */
+#define FD_HOOK_N 7
+static tai_hook_ref_t g_fd_refs[FD_HOOK_N];
+static SceUID g_fd_hooks[FD_HOOK_N];
+static volatile uint32_t g_fd_calls[2][FD_HOOK_N], g_fd_bytes[2],
+    g_fd_errors[2], g_fd_last_err[2];
+static const char *const g_fd_names[FD_HOOK_N] = {
+    "read", "write", "pread", "lseek", "close", "readasync", "preadasync"};
+
 #else
 #define note_buttons(idx, port, pad, ret, neg) ((void)0)
 #endif
@@ -5238,16 +5248,6 @@ static struct {
 static volatile uint32_t g_io_ev_w, g_io_ev_r, g_io_ev_dropped;
 static tai_hook_ref_t g_io_refs[7];
 static SceUID g_io_hooks[7] = {-1, -1, -1, -1, -1, -1, -1};
-
-/* the data operations of the two reading processes (by the controller
- * reader slot): counts for the activity line, errors into the ring */
-#define FD_HOOK_N 7
-static tai_hook_ref_t g_fd_refs[FD_HOOK_N];
-static SceUID g_fd_hooks[FD_HOOK_N];
-static volatile uint32_t g_fd_calls[2][FD_HOOK_N], g_fd_bytes[2],
-    g_fd_errors[2], g_fd_last_err[2];
-static const char *const g_fd_names[FD_HOOK_N] = {
-    "read", "write", "pread", "lseek", "close", "readasync", "preadasync"};
 
 static void fd_note(int idx, int fd, int size, int ret) {
   SceUID pid = ksceKernelGetProcessId();
