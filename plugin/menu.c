@@ -397,7 +397,7 @@ static void log_append(const char *text);
 #define IOEV_LOG    1
 #define IOEV_DECIDE 2
 static SceUID g_io_evf = -1, g_logq_mtx = -1, g_log_mtx = -1;
-static char g_logq[4096];
+static char g_logq[8192];
 static int g_logq_len;
 static char g_decide_tid[16];
 
@@ -2237,11 +2237,38 @@ static int mask_input(SceCtrlData *pad_data, int count, int negative) {
 static tai_hook_ref_t g_ctrl_refs[N_CTRL_HOOKS];
 static SceUID g_ctrl_hooks[N_CTRL_HOOKS];
 
+#ifndef JV_RELEASE
+/* Diagnostics: what the two reading processes get from the controller
+ * (by function, port, the buttons the kernel reported before JamaisVu's
+ * masking, and the calls masked), so a game that ignores its buttons after
+ * a load can be told apart from buttons that never reach it. */
+static volatile uint32_t g_btn_calls[2][N_CTRL_HOOKS], g_btn_or[2],
+    g_btn_blocked[2], g_btn_ports[2];
+
+static void note_buttons(int idx, int port, SceCtrlData *pad, int ret,
+                         int neg) {
+  SceCtrlData d;
+  SceUID pid = ksceKernelGetProcessId();
+  int k = pid == g_rd_pid[0] ? 0 : pid == g_rd_pid[1] ? 1 : -1;
+  if (k < 0 || ret <= 0 || !pad)
+    return;
+  g_btn_calls[k][idx]++;
+  g_btn_ports[k] |= 1u << (port & 7);
+  if (input_blocked())
+    g_btn_blocked[k]++;
+  if (jv_copy_from_user(&d, pad, sizeof(d)) >= 0)
+    g_btn_or[k] |= neg ? ~d.buttons : d.buttons;
+}
+#else
+#define note_buttons(idx, port, pad, ret, neg) ((void)0)
+#endif
+
 #define DEFINE_CTRL_HOOK(idx, nid, neg)                                   \
   static int ctrl_hook_##idx(int port, SceCtrlData *pad, int count) {     \
     uint32_t t0 = prof_now();                                             \
     note_reader();                                                        \
     int ret = TAI_CONTINUE(int, g_ctrl_refs[idx], port, pad, count);      \
+    note_buttons(idx, port, pad, ret, neg);                               \
     uint32_t t1 = prof_now();                                             \
     ret = mask_input(pad, ret, neg);                                      \
     prof_add(PROF_CTRL, t1);                                              \
@@ -2302,6 +2329,15 @@ static int thread_regs(SceUID thid, JvThreadRegs *r) {
     log_queue(line);
   }
   return res;
+}
+
+/* a long dump from the input thread: let the io thread drain the log
+ * queue when it is half full, so no line is dropped */
+static void log_queue_drain(void) {
+  for (int i = 0; i < 20 && g_logq_len > (int)sizeof(g_logq) / 2; i++) {
+    ksceKernelSetEventFlag(g_io_evf, IOEV_LOG);
+    ksceKernelDelayThread(20000);
+  }
 }
 
 /* "module+offset" for an address of the process, or the bare address */
@@ -2413,6 +2449,7 @@ static void thread_dump(SceUID pid, const char *why) {
         }
       }
     }
+    log_queue_drain();
   }
   /* where the active threads run: 8 samples */
   for (int a = 0; a < n_active && g_thread_regs; a++) {
@@ -2460,6 +2497,7 @@ static void thread_dump(SceUID pid, const char *why) {
         if (len > (int)sizeof(line) - 40) {
           snprintf(line + len, sizeof(line) - len, "\r\n");
           log_queue(line);
+          log_queue_drain();
           len = snprintf(line, sizeof(line), "        ");
         }
         len += snprintf(line + len, sizeof(line) - len, " %s",
@@ -3083,6 +3121,27 @@ static int input_thread(SceSize args, void *argp) {
                    (unsigned)(dt > 0 ? (uint64_t)(frames - last_frames) *
                                            1000000 / dt : 0));
           log_queue(al);
+          {
+            int k = game == g_rd_pid[0] ? 0 : game == g_rd_pid[1] ? 1 : -1;
+            if (k >= 0) {
+              static const char *const fn[N_CTRL_HOOKS] = {
+                  "peek+", "peek+2", "peek+ext", "peek+ext2", "read+",
+                  "read+2", "read+ext", "read+ext2", "peek-", "peek-2",
+                  "read-", "read-2"};
+              int len = snprintf(al, sizeof(al), "      its reads:");
+              for (int f = 0; f < N_CTRL_HOOKS; f++)
+                if (g_btn_calls[k][f])
+                  len += snprintf(al + len, sizeof(al) - len, " %s %u",
+                                  fn[f], (unsigned)g_btn_calls[k][f]);
+              snprintf(al + len, sizeof(al) - len, "; ports 0x%X; buttons "
+                       "seen 0x%08X; %u calls masked by JamaisVu\r\n",
+                       (unsigned)g_btn_ports[k], (unsigned)g_btn_or[k],
+                       (unsigned)g_btn_blocked[k]);
+              log_queue(al);
+              memset((void *)g_btn_calls[k], 0, sizeof(g_btn_calls[k]));
+              g_btn_or[k] = g_btn_ports[k] = g_btn_blocked[k] = 0;
+            }
+          }
         }
         last_reads = reads;
         last_frames = frames;
@@ -5079,7 +5138,8 @@ static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
 #define IO_PATH_N 60
 static struct {
   volatile uint8_t ready;
-  uint8_t kind; /* 0 open 1 dopen 2 getstat 3 mkdir 4 remove 5 kernel open */
+  uint8_t kind; /* 0 open 1 dopen 2 getstat 3 mkdir 4 remove 5 kernel open
+                 * 6 system event received (path = the event) */
   int32_t ret;
   int32_t flags;
   SceUID pid;
@@ -5087,8 +5147,8 @@ static struct {
   char path[IO_PATH_N];
 } g_io_ev[IO_EV_N];
 static volatile uint32_t g_io_ev_w, g_io_ev_r, g_io_ev_dropped;
-static tai_hook_ref_t g_io_refs[6];
-static SceUID g_io_hooks[6] = {-1, -1, -1, -1, -1, -1};
+static tai_hook_ref_t g_io_refs[7];
+static SceUID g_io_hooks[7] = {-1, -1, -1, -1, -1, -1, -1};
 
 static int io_window(void) {
   int64_t t = g_t_resume;
@@ -5110,7 +5170,7 @@ static void io_note(int kind, const char *upath, int flags, int ret,
       strcpy(path, "?");
   }
   path[sizeof(path) - 1] = '\0';
-  if (kernel) {
+  if (kernel && kind == 5) {
     /* only the savedata / trophy paths of the kernel's own opens */
     const char *p = path;
     int keep = 0;
@@ -5157,6 +5217,20 @@ IO_HOOK(2, 2, io_getstat_hook)
 IO_HOOK(3, 3, io_mkdir_hook)
 IO_HOOK(4, 4, io_remove_hook)
 
+/* the system events an app receives (resume, store, NP message...): what
+ * tells the game something after a load */
+static int io_sysevent_hook(void *ev, int a2, int a3, int a4) {
+  int ret = TAI_CONTINUE(int, g_io_refs[6], ev, a2, a3, a4);
+  if (ret >= 0 && ev && io_window()) {
+    uint32_t type = 0;
+    char text[32];
+    jv_copy_from_user(&type, ev, sizeof(type));
+    snprintf(text, sizeof(text), "system event 0x%08X", (unsigned)type);
+    io_note(6, text, 0, ret, 1);
+  }
+  return ret;
+}
+
 static int io_kopen_hook(const char *path, int flags, int mode) {
   int ret = TAI_CONTINUE(int, g_io_refs[5], path, flags, mode);
   if (io_window())
@@ -5169,8 +5243,8 @@ static void io_events_log(void) {
   uint32_t w = g_io_ev_w;
   while (g_io_ev_r != w) {
     int k = g_io_ev_r % IO_EV_N;
-    static const char *const kinds[6] = {"open", "dopen", "getstat", "mkdir",
-                                         "remove", "kernel open"};
+    static const char *const kinds[7] = {"open", "dopen", "getstat", "mkdir",
+                                         "remove", "kernel open", "got"};
     char tid[16];
     if (!g_io_ev[k].ready)
       return;
@@ -5183,7 +5257,7 @@ static void io_events_log(void) {
     tid[sizeof(tid) - 1] = '\0';
     g_io_ev[k].path[IO_PATH_N - 1] = '\0';
     snprintf(line, sizeof(line), "    io +%d ms %s %s %s%s -> 0x%08X%s\r\n",
-             g_io_ev[k].ms, tid, kinds[g_io_ev[k].kind < 6 ? g_io_ev[k].kind
+             g_io_ev[k].ms, tid, kinds[g_io_ev[k].kind < 7 ? g_io_ev[k].kind
                                                              : 0],
              g_io_ev[k].path, g_io_ev[k].kind == 0 || g_io_ev[k].kind == 5
                  ? (g_io_ev[k].flags & 2) ? " (write)" : " (read)" : "",
@@ -5217,9 +5291,14 @@ static void io_watch_install(void) {
   g_io_hooks[5] = taiHookFunctionExportForKernel(
       KERNEL_PID, &g_io_refs[5], "SceIofilemgr", 0x40FD29C7, 0x75192972,
       io_kopen_hook);
+  g_io_hooks[6] = taiHookFunctionExportForKernel(
+      KERNEL_PID, &g_io_refs[6], "SceAppMgr", 0x8AF17416, 0x7240375B,
+      io_sysevent_hook);
   snprintf(line, sizeof(line), "io watch (the game's file operations after "
-           "a load): %d of 5 user hooks, kernel open %s0x%08X\r\n", ok,
-           g_io_hooks[5] < 0 ? "error " : "", (unsigned)g_io_hooks[5]);
+           "a load): %d of 5 user hooks, kernel open %s0x%08X, system "
+           "events %s0x%08X\r\n", ok,
+           g_io_hooks[5] < 0 ? "error " : "", (unsigned)g_io_hooks[5],
+           g_io_hooks[6] < 0 ? "error " : "", (unsigned)g_io_hooks[6]);
   log_queue(line);
 }
 #else
