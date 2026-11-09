@@ -1,12 +1,20 @@
-# Release: pushed tag v<version> -> release build (no Diagnostics, the
-# version in status.txt), the same checks as build.yml, a zip with the
-# plugin, the Japanese font and the README, and a draft GitHub Release
-# with generated notes to edit before publishing.
+# Release: a pushed tag v<version>, or a manual run given the version
+# (the tag is then created by the release itself, on the commit the run
+# was started from) -> release build (no Diagnostics, the version in
+# status.txt), the same checks as build.yml, a zip with the plugin, the
+# Japanese font and the README, and a draft GitHub Release with generated
+# notes to edit before publishing.
 name: Release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 2.0.0 or 2.0.0-rc1 (tag v<version> is created)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -47,10 +55,23 @@ jobs:
           fi
           ls "$VITASDK/arm-vita-eabi/include/taihen.h"
 
+      - name: Version
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          case "$VERSION" in
+            [0-9]*) ;;
+            *) echo "version must start with a digit: $VERSION"; exit 1 ;;
+          esac
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION" >> "$GITHUB_ENV"
+          echo "releasing $VERSION"
+
       - name: Build the release (plugin + payload)
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version $VERSION"
           mkdir -p build && cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release -DJAMAISVU_RELEASE=ON \
                    -DJAMAISVU_VERSION="$VERSION"
@@ -75,7 +96,6 @@ jobs:
 
       - name: Package
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p "JamaisVu-$VERSION"
           cp build/JamaisVu.skprx plugin/gui/jpfont.bin README.md LICENSE "JamaisVu-$VERSION/"
           (cd "JamaisVu-$VERSION" && sha256sum JamaisVu.skprx jpfont.bin > SHA256SUMS.txt && cat SHA256SUMS.txt)
@@ -85,6 +105,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" "JamaisVu-$VERSION.zip" \
+          # a manual run has no tag yet: the release creates it on this commit
+          gh release create "$TAG" "JamaisVu-$VERSION.zip" --target "$GITHUB_SHA" \
             --draft --generate-notes --title "JamaisVu $VERSION"
