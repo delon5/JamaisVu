@@ -571,6 +571,8 @@ int main(int argc, char **argv) {
   const char *slot = "ux0:savestate/slot1.bin";
   const uint32_t slot_size = 8 * 1024 * 1024;
   uint8_t sav_a[3000], sav_b[2000], sub_a[700], buf[8192];
+  uint8_t sav_x[3000]; /* same size as sav_a, other content */
+  RangeSet same_ext, same_ext_after;
   uint32_t len, total;
   RangeSet ext;
   int res;
@@ -590,6 +592,7 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < sizeof(sav_a); i++) sav_a[i] = i * 3;
   for (size_t i = 0; i < sizeof(sav_b); i++) sav_b[i] = i * 5 + 1;
   for (size_t i = 0; i < sizeof(sub_a); i++) sub_a[i] = i ^ 0x5a;
+  for (size_t i = 0; i < sizeof(sav_x); i++) sav_x[i] = (uint8_t)~sav_a[i];
 
   /* --- Setup (what the OS / plugin would do) -------------------------- */
   printf("setup\n");
@@ -602,6 +605,7 @@ int main(int argc, char **argv) {
   f_mkdir("ux0:user/00/savedata/PCSE00123/sce_sys");
   f_mkdir("ux0:user/00/savedata/PCSE00999");
   write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_a, sizeof(sav_a));
+  write_file("ux0:user/00/savedata/PCSE00123/same.bin", sav_a, sizeof(sav_a));
   write_file("ux0:user/00/savedata/PCSE00123/sce_sys/param.sfo", sub_a, sizeof(sub_a));
   write_file("ux0:user/00/savedata/PCSE00999/other.bin", sav_b, sizeof(sav_b));
   /* reSavedata's folder (the plugin redirects games there) */
@@ -657,6 +661,9 @@ int main(int argc, char **argv) {
   write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_b, sizeof(sav_b));
   write_file("ux0:user/00/savedata/PCSE00123/new_since_save.bin", sav_a, 1000);
   f_unlink("ux0:user/00/savedata/PCSE00123/sce_sys/param.sfo");
+  /* same size, other content: must come back in place (same clusters) */
+  write_file("ux0:user/00/savedata/PCSE00123/same.bin", sav_x, sizeof(sav_x));
+  get_file_extents("ux0:user/00/savedata/PCSE00123/same.bin", &same_ext);
   write_file("ux0:resavedata/PCSE00123/save.dat", sav_a, sizeof(sav_a));
   write_file("ux0:resavedata/PCSE00123/newer.dat", sav_a, 500);
   write_file("ux0:other.txt", "changed after save", 18);
@@ -691,6 +698,12 @@ int main(int argc, char **argv) {
         len == sizeof(sub_a) && memcmp(buf, sub_a, len) == 0, "deleted savedata not restored");
   CHECK(read_file("ux0:user/00/savedata/PCSE00123/new_since_save.bin", buf, sizeof(buf), &len) != 0,
         "file created after save should be gone");
+  CHECK(read_file("ux0:user/00/savedata/PCSE00123/same.bin", buf, sizeof(buf), &len) == 0 &&
+        len == sizeof(sav_a) && memcmp(buf, sav_a, len) == 0, "same-size file not restored");
+  get_file_extents("ux0:user/00/savedata/PCSE00123/same.bin", &same_ext_after);
+  CHECK(same_ext_after.n == same_ext.n &&
+        memcmp(same_ext_after.r, same_ext.r, same_ext.n * sizeof(same_ext.r[0])) == 0,
+        "same-size file must be restored in place (same clusters)");
   CHECK(read_file("ux0:user/00/savedata/PCSE00999/other.bin", buf, sizeof(buf), &len) == 0 &&
         len == sizeof(sav_b) && memcmp(buf, sav_b, len) == 0, "other title's savedata touched");
   CHECK(read_file("ux0:resavedata/PCSE00123/save.dat", buf, sizeof(buf), &len) == 0 &&

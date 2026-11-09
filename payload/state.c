@@ -1062,6 +1062,107 @@ static int remove_dir(const char *path, int level) {
   return fres;
 }
 
+/* In-place restore: the paths the snapshot has under the root being
+ * restored (as CRCs), so that afterwards everything else under it can be
+ * removed. A folder with more records than fit is restored the old way
+ * (removed and recreated). */
+#define RESTORE_KEEP_MAX 512
+static uint32_t g_keep_crc[RESTORE_KEEP_MAX];
+static uint32_t g_keep_n;
+
+static uint32_t path_crc(const char *p) {
+  return crc32_update(0, p, (uint32_t)strlen(p));
+}
+
+static int path_kept(const char *p) {
+  uint32_t c = path_crc(p);
+  for (uint32_t i = 0; i < g_keep_n; i++)
+    if (g_keep_crc[i] == c)
+      return 1;
+  return 0;
+}
+
+/* Removes everything under path that the snapshot does not have: first
+ * the files and folders not kept, then each kept sub-folder is descended
+ * into (found again by its rank, since a listing cannot be resumed once
+ * closed). */
+static int prune_dir(const char *path, int level) {
+  static FILINFO fno;
+  char new_path[MAX_PATH_LEN];
+  uint32_t len = strlen(path);
+  FRESULT fres;
+  DIR dp;
+  int kept_dirs = 0;
+
+  if (level > MAX_DIR_DEPTH || len + 2 > MAX_PATH_LEN)
+    return FR_INVALID_NAME;
+
+  memcpy(new_path, path, len);
+  new_path[len] = '/';
+
+  fres = f_opendir(&dp, path);
+  if (fres != FR_OK)
+    return fres;
+  while (1) {
+    uint32_t name_len;
+
+    fres = f_readdir(&dp, &fno);
+    if (fres != FR_OK || fno.fname[0] == '\0')
+      break;
+    name_len = strlen(fno.fname);
+    if (len + 1 + name_len + 1 > MAX_PATH_LEN) {
+      fres = FR_INVALID_NAME;
+      break;
+    }
+    memcpy(new_path + len + 1, fno.fname, name_len + 1);
+
+    if (path_kept(new_path)) {
+      if (fno.fattrib & AM_DIR)
+        kept_dirs++;
+    } else if (fno.fattrib & AM_DIR) {
+      fres = remove_dir(new_path, level + 1);
+    } else {
+      f_chmod(new_path, 0, AM_RDO);
+      fres = f_unlink(new_path);
+    }
+    if (fres != FR_OK)
+      break;
+  }
+  f_closedir(&dp);
+  if (fres != FR_OK)
+    return fres;
+
+  for (int want = 0; want < kept_dirs; want++) {
+    int seen = 0, found = 0;
+    fres = f_opendir(&dp, path);
+    if (fres != FR_OK)
+      return fres;
+    while (1) {
+      fres = f_readdir(&dp, &fno);
+      if (fres != FR_OK || fno.fname[0] == '\0')
+        break;
+      if (!(fno.fattrib & AM_DIR))
+        continue;
+      memcpy(new_path + len + 1, fno.fname, strlen(fno.fname) + 1);
+      if (!path_kept(new_path))
+        continue;
+      if (seen++ == want) {
+        found = 1;
+        break;
+      }
+    }
+    f_closedir(&dp);
+    if (fres != FR_OK)
+      return fres;
+    if (!found)
+      break;
+    fres = prune_dir(new_path, level + 1);
+    if (fres != FR_OK)
+      return fres;
+  }
+  return FR_OK;
+}
+
 /* Puts the savedata records back, those under the folders selected by
  * the JV_SAVEDATA_* bits in folders; the others are read past and left
  * alone (a state saved with reSavedata's folder on the card, loaded on a
@@ -1071,16 +1172,25 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
   static SaveStateFile file;
   static char path[MAX_PATH_LEN];
   static char root_path[MAX_PATH_LEN];
+  static char prune_root[MAX_PATH_LEN]; /* in-place root awaiting its prune */
   static FILINFO fno;
   uint32_t consumed = 0;
   int skipping = 0;
   int root = -1;
+  /* Files that exist are overwritten in place (their directory entries,
+   * creation times and time-zone marks stay as the system wrote them;
+   * a game that kept running saw its save folder deleted and recreated
+   * under it and left gameplay a minute after every load); what the
+   * snapshot does not have is removed afterwards. */
+  int inplace = file_num <= RESTORE_KEEP_MAX;
   FRESULT fres;
   FIL fpdst;
   UINT bw;
   int res;
 
   root_path[0] = '\0';
+  prune_root[0] = '\0';
+  g_keep_n = 0;
 
   for (uint32_t i = 0; i < file_num; i++) {
     res = read_file_record(fpsrc, &file, path, root_path, &consumed);
@@ -1103,20 +1213,54 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
     *used |= 1u << root;
 
     if (file.is_root) {
-      fres = remove_dir(path, 0);
-      if (fres != FR_OK && fres != FR_NO_PATH && fres != FR_NO_FILE)
-        return JV_ERR_IO;
+      if (inplace) {
+        /* the previous root's extras first, then this root's list */
+        if (prune_root[0]) {
+          fres = prune_dir(prune_root, 0);
+          if (fres != FR_OK && fres != FR_NO_PATH && fres != FR_NO_FILE)
+            return JV_ERR_IO;
+        }
+        strcpy(prune_root, path);
+        g_keep_n = 0;
+      } else {
+        fres = remove_dir(path, 0);
+        if (fres != FR_OK && fres != FR_NO_PATH && fres != FR_NO_FILE)
+          return JV_ERR_IO;
+      }
     }
+    if (inplace && g_keep_n < RESTORE_KEEP_MAX)
+      g_keep_crc[g_keep_n++] = path_crc(path);
 
     if (file.fattrib & AM_DIR) {
       fres = f_mkdir(path);
+      if (fres == FR_EXIST && inplace) {
+        /* a file where the snapshot has a folder */
+        if (f_stat(path, &fno) == FR_OK && !(fno.fattrib & AM_DIR)) {
+          f_chmod(path, 0, AM_RDO);
+          if (f_unlink(path) != FR_OK || f_mkdir(path) != FR_OK)
+            return JV_ERR_IO;
+        }
+        fres = FR_OK;
+      }
       if (fres != FR_OK && fres != FR_EXIST)
         return JV_ERR_IO;
     } else {
       uint32_t size = file.data_len;
 
-      if (f_open(&fpdst, path, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+      if (inplace) {
+        fres = f_open(&fpdst, path, FA_OPEN_ALWAYS | FA_WRITE);
+        if (fres == FR_DENIED) { /* read-only, or a folder of that name */
+          if (f_stat(path, &fno) == FR_OK && (fno.fattrib & AM_DIR))
+            remove_dir(path, 0);
+          else
+            f_chmod(path, 0, AM_RDO);
+          fres = f_open(&fpdst, path, FA_OPEN_ALWAYS | FA_WRITE);
+        }
+        if (fres != FR_OK)
+          return JV_ERR_IO;
+      } else if (f_open(&fpdst, path, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) {
         return JV_ERR_IO;
+      }
 
       res = 0;
       while (size > 0) {
@@ -1131,6 +1275,9 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
         size -= n;
       }
 
+      /* whatever the existing file had beyond the snapshot's size */
+      if (res == 0 && inplace && f_truncate(&fpdst) != FR_OK)
+        res = JV_ERR_IO;
       if (f_close(&fpdst) != FR_OK && res == 0)
         res = JV_ERR_IO;
       if (res < 0)
@@ -1147,6 +1294,12 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
     if (f_utime(path, &fno) != FR_OK)
       return JV_ERR_IO;
     if (f_chmod(path, file.fattrib, AM_RDO | AM_HID | AM_SYS | AM_ARC) != FR_OK)
+      return JV_ERR_IO;
+  }
+
+  if (inplace && prune_root[0]) {
+    fres = prune_dir(prune_root, 0);
+    if (fres != FR_OK && fres != FR_NO_PATH && fres != FR_NO_FILE)
       return JV_ERR_IO;
   }
 
