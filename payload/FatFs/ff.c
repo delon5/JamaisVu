@@ -4171,7 +4171,10 @@ FRESULT f_sync (
 						st_qword(fs->dirbuf + XDIR_ValidFileSize, fp->obj.objsize);	/* (FatFs does not support Valid File Size feature) */
 						st_dword(fs->dirbuf + XDIR_ModTime, tm);		/* Update modified time */
 						fs->dirbuf[XDIR_ModTime10] = 0;
-						st_dword(fs->dirbuf + XDIR_AccTime, 0);
+						/* JamaisVu: a valid last-access time, not 0 (an invalid
+						 * exFAT date, which the Vita's own driver may refuse
+						 * on a stat of the file) */
+						st_dword(fs->dirbuf + XDIR_AccTime, tm);
 						res = store_xdir(&dj);	/* Restore it to the directory */
 						if (res == FR_OK) {
 							res = sync_fs(fs);
@@ -5092,6 +5095,9 @@ FRESULT f_mkdir (
 #if FF_FS_EXFAT
 				if (fs->fs_type == FS_EXFAT) {	/* Initialize directory entry block */
 					st_dword(fs->dirbuf + XDIR_ModTime, tm);	/* Created time */
+					/* JamaisVu: valid created and access times too, not 0 */
+					st_dword(fs->dirbuf + XDIR_CrtTime, tm);
+					st_dword(fs->dirbuf + XDIR_AccTime, tm);
 					st_dword(fs->dirbuf + XDIR_FstClus, dcl);	/* Table start cluster */
 					st_dword(fs->dirbuf + XDIR_FileSize, (DWORD)fs->csize * SS(fs));	/* Directory size needs to be valid */
 					st_dword(fs->dirbuf + XDIR_ValidFileSize, (DWORD)fs->csize * SS(fs));
@@ -5304,6 +5310,8 @@ FRESULT f_utime (
 #if FF_FS_EXFAT
 			if (fs->fs_type == FS_EXFAT) {
 				st_dword(fs->dirbuf + XDIR_ModTime, (DWORD)fno->fdate << 16 | fno->ftime);
+				/* JamaisVu: the access time follows (never left at 0) */
+				st_dword(fs->dirbuf + XDIR_AccTime, (DWORD)fno->fdate << 16 | fno->ftime);
 				res = store_xdir(&dj);
 			} else
 #endif
