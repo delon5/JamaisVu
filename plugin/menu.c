@@ -2272,6 +2272,37 @@ typedef struct {
   JvArmRegs entry[2];
 } JvThreadRegs;
 static int (*g_thread_regs)(SceUID thid, JvThreadRegs *regs);
+/* the registers are given only for a thread a debugger suspended
+ * (0x80028030 otherwise): ksceKernelDebugSuspendThread / ResumeThread,
+ * resolved by NID; the thread is held for the read only */
+static int (*g_dbg_suspend)(SceUID thid, int status);
+static int (*g_dbg_resume)(SceUID thid, int status);
+#define JV_DBG_SUSPEND 0x1002
+
+/* registers of a thread, suspended for the read; <0 with the failing
+ * step's error: suspend errors are returned as they are, read errors
+ * after the thread was resumed */
+static int thread_regs(SceUID thid, JvThreadRegs *r) {
+  int res, rr;
+  if (!g_thread_regs)
+    return -1;
+  if (!g_dbg_suspend || !g_dbg_resume)
+    return g_thread_regs(thid, r);
+  res = g_dbg_suspend(thid, JV_DBG_SUSPEND);
+  if (res < 0)
+    return res;
+  res = g_thread_regs(thid, r);
+  rr = g_dbg_resume(thid, JV_DBG_SUSPEND);
+  if (rr < 0)
+    rr = g_dbg_resume(thid, 2);
+  if (rr < 0) {
+    static char line[96];
+    snprintf(line, sizeof(line), "        thread 0x%08X: resume error "
+             "0x%08X\r\n", (unsigned)thid, (unsigned)rr);
+    log_queue(line);
+  }
+  return res;
+}
 
 /* "module+offset" for an address of the process, or the bare address */
 static void where_is(SceUID pid, uint32_t addr, char *out, size_t n) {
@@ -2288,7 +2319,7 @@ static void where_is(SceUID pid, uint32_t addr, char *out, size_t n) {
 /* the user-mode pc of a thread, 0 when the kernel does not give it */
 static uint32_t thread_user_pc(SceUID thid) {
   JvThreadRegs r;
-  if (!g_thread_regs || g_thread_regs(thid, &r) < 0)
+  if (thread_regs(thid, &r) < 0)
     return 0;
   for (int e = 0; e < 2; e++)
     if ((r.entry[e].cpsr & 0x1F) == 0x10)
@@ -2322,8 +2353,17 @@ static void thread_dump(SceUID pid, const char *why) {
                                TAI_ANY_LIBRARY, 0x8309E043,
                                (uintptr_t *)&g_mod_by_addr) < 0)
       g_mod_by_addr = NULL;
-    snprintf(line, sizeof(line), "    thread registers %s, module lookup "
-             "%s\r\n", g_thread_regs ? "available" : "NOT available",
+    if (module_get_export_func(KERNEL_PID, "SceKernelThreadMgr",
+                               TAI_ANY_LIBRARY, 0xFB3706CB,
+                               (uintptr_t *)&g_dbg_suspend) < 0 ||
+        module_get_export_func(KERNEL_PID, "SceKernelThreadMgr",
+                               TAI_ANY_LIBRARY, 0xEC8343DF,
+                               (uintptr_t *)&g_dbg_resume) < 0)
+      g_dbg_suspend = g_dbg_resume = NULL;
+    snprintf(line, sizeof(line), "    thread registers %s, debug "
+             "suspend %s, module lookup %s\r\n",
+             g_thread_regs ? "available" : "NOT available",
+             g_dbg_suspend ? "available" : "NOT available",
              g_mod_by_addr ? "available" : "NOT available");
     log_queue(line);
   }
@@ -2356,7 +2396,7 @@ static void thread_dump(SceUID pid, const char *why) {
     log_queue(line);
     if (g_thread_regs) {
       JvThreadRegs r;
-      int rr = g_thread_regs(ids[i], &r);
+      int rr = thread_regs(ids[i], &r);
       if (rr < 0) {
         snprintf(line, sizeof(line), "        registers: error 0x%08X\r\n",
                  (unsigned)rr);
