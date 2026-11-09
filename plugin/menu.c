@@ -199,19 +199,32 @@ static const uint16_t *img_row16(const Img16 *im, int y) {
  * Settings and VitaShell, reproduced it). */
 static volatile SceUID g_rd_pid[2];
 static volatile int64_t g_rd_t[2];
+static volatile uint32_t g_rd_n[2]; /* reads by that process (diagnostics) */
 
 static inline void note_reader(void) {
   SceUID pid = ksceKernelGetProcessId();
   int64_t t = ksceKernelGetSystemTimeWide();
-  if (pid == g_rd_pid[0])
+  if (pid == g_rd_pid[0]) {
     g_rd_t[0] = t;
-  else if (pid == g_rd_pid[1])
+    g_rd_n[0]++;
+  } else if (pid == g_rd_pid[1]) {
     g_rd_t[1] = t;
-  else {
+    g_rd_n[1]++;
+  } else {
     int k = g_rd_t[0] <= g_rd_t[1] ? 0 : 1;
     g_rd_pid[k] = pid;
     g_rd_t[k] = t;
+    g_rd_n[k] = 1;
   }
+}
+
+/* controller reads so far by pid, or 0 if it is not one of the two */
+static uint32_t reads_by(SceUID pid) {
+  if (pid && pid == g_rd_pid[0])
+    return g_rd_n[0];
+  if (pid && pid == g_rd_pid[1])
+    return g_rd_n[1];
+  return 0;
 }
 
 #define READER_RECENT_US 500000
@@ -292,6 +305,7 @@ static volatile int g_plane_yield;  /* the input thread closes the menu */
  * JamaisVu last put a picture on layer 1 (the system's LiveArea, a game's
  * loading screen, the PS button menu, notifications) */
 static volatile SceUID g_l0_pid;
+static volatile uint32_t g_l0_frames; /* layer-0 frames set so far (diagnostics) */
 static volatile int64_t g_l0_us, g_l1_other_us;
 static volatile int64_t g_l1_vis_us; /* ... with something visible in it */
 static uint32_t g_vis_row[1920];     /* one row of it, sampled (hook) */
@@ -2103,6 +2117,7 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
   if (p && p->base && head == ksceDisplayGetPrimaryHead()) {
     if (index == 0) {
       g_l0_pid = ksceKernelGetProcessId();
+      g_l0_frames++;
       g_l0_us = now_us();
     } else if (index == 1 && p->base != (void *)g_plane_px) {
       /* the plane set by someone else: the system's own overlays. With
@@ -2239,6 +2254,43 @@ CTRL_HOOKS(DEFINE_CTRL_HOOK)
   g_ctrl_hooks[idx] = taiHookFunctionExportForKernel(                     \
       KERNEL_PID, &g_ctrl_refs[idx], "SceCtrl", 0xD197E3C7, nid,           \
       ctrl_hook_##idx);
+
+/* Diagnostics: every thread of a process, with what it is waiting on
+ * (status: 1 running, 2 ready, 4 standby, 8 waiting, 16 dormant, 256
+ * suspended; the wait type and id as the kernel reports them), so a game
+ * that ignores its input after a load can be seen from the kernel's side. */
+static void thread_dump(SceUID pid, const char *why) {
+  static SceUID ids[96];
+  static char line[200];
+  char tid[16];
+  int n = 0;
+  memset(tid, 0, sizeof(tid));
+  ksceKernelGetProcessTitleId(pid, tid, sizeof(tid));
+  int res = ksceKernelGetThreadIdList(pid, ids, 96, &n);
+  snprintf(line, sizeof(line), "    threads of %s (pid 0x%08X), %s: %d "
+           "(list %s0x%08X)\r\n", tid, (unsigned)pid, why, n,
+           res < 0 ? "error " : "", (unsigned)res);
+  log_queue(line);
+  if (res < 0)
+    return;
+  for (int i = 0; i < n && i < 96; i++) {
+    SceKernelThreadInfo info;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    if (ksceKernelGetThreadInfo(ids[i], &info) < 0) {
+      snprintf(line, sizeof(line), "      0x%08X: no info\r\n",
+               (unsigned)ids[i]);
+    } else {
+      info.name[sizeof(info.name) - 1] = '\0';
+      snprintf(line, sizeof(line), "      %-24s status %3u wait type %2u "
+               "id 0x%08X prio %3d cpu %d\r\n", info.name,
+               (unsigned)info.status, (unsigned)info.waitType,
+               (unsigned)info.waitId, (int)info.currentPriority,
+               (int)info.currentCpuId);
+    }
+    log_queue(line);
+  }
+}
 
 /* ------------------------------------------------------------------------ */
 /* Input thread                                                             */
@@ -2654,6 +2706,12 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_DISPLAY, sel);
       } else if (pressed & SCE_CTRL_RIGHT) {
         start_op(OP_TEST_WRITE, sel);
+      } else if (pressed & SCE_CTRL_LEFT) {
+        SceUID game = g_l0_pid ? g_l0_pid : fg_reader();
+        if (game)
+          thread_dump(game, "asked from Diagnostics");
+        else
+          log_queue("    thread dump: no game process known\r\n");
       }
       else if (pressed & SCE_CTRL_CIRCLE)
         set_message(MV_BROWSE, "", -1, 0);
@@ -2817,6 +2875,45 @@ static int input_thread(SceSize args, void *argp) {
     /* object counts: every 10 s in the 2 minutes after a save/load (the PS
      * TV crashed as apps started 40-80 s after loads), else once a
      * minute; logged when they changed */
+#ifndef JV_RELEASE
+    /* Diagnostics, the two minutes after a load: is the game reading the
+     * controller and drawing, and what are its threads waiting on at 30 s
+     * (a game that ignored every button after some loads, PCH-1000) */
+    {
+      static int64_t next_alive, last_t;
+      static uint32_t last_reads, last_frames;
+      static int dumped;
+      int64_t tn = now_us();
+      int64_t since = g_t_resume ? tn - g_t_resume : -1;
+      if (since < 0 || since > 125000000) {
+        next_alive = 0;
+        dumped = 0;
+      } else if (tn >= next_alive) {
+        SceUID game = g_l0_pid;
+        uint32_t reads = reads_by(game), frames = g_l0_frames;
+        if (next_alive) {
+          static char al[200];
+          int64_t dt = tn - last_t;
+          snprintf(al, sizeof(al), "    game after the load (%d s): pid "
+                   "0x%08X, %u controller reads/s, %u frames/s\r\n",
+                   (int)(since / 1000000), (unsigned)game,
+                   (unsigned)(dt > 0 ? (uint64_t)(reads - last_reads) *
+                                           1000000 / dt : 0),
+                   (unsigned)(dt > 0 ? (uint64_t)(frames - last_frames) *
+                                           1000000 / dt : 0));
+          log_queue(al);
+        }
+        last_reads = reads;
+        last_frames = frames;
+        last_t = tn;
+        next_alive = tn + 10000000;
+        if (!dumped && since >= 30000000 && game) {
+          dumped = 1;
+          thread_dump(game, "30 s after the load");
+        }
+      }
+    }
+#endif
     {
       static int64_t next_counts;
       static int last[COUNTS_MAX];
