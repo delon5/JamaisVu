@@ -2255,15 +2255,78 @@ CTRL_HOOKS(DEFINE_CTRL_HOOK)
       KERNEL_PID, &g_ctrl_refs[idx], "SceCtrl", 0xD197E3C7, nid,           \
       ctrl_hook_##idx);
 
+/* SceKernelModulemgr's lookup of the module an address belongs to
+ * (ksceKernelGetModuleInfoMinByAddr, resolved by NID): the module's name
+ * and the start of its code. */
+static int (*g_mod_by_addr)(SceUID pid, const void *addr, uint32_t *nid,
+                            const void **text, void *name);
+
+/* Diagnostics: where a thread executes. The kernel keeps a thread's
+ * register sets while it is not on a cpu (SceThreadmgrForDriver's
+ * ksceKernelGetThreadCpuRegisters, own layout so an older SDK compiles it);
+ * the set whose cpsr mode is user (0x10) is the game's own code. */
+typedef struct {
+  uint32_t r[13], sp, lr, pc, cpsr, fpscr;
+} JvArmRegs;
+typedef struct {
+  JvArmRegs entry[2];
+} JvThreadRegs;
+static int (*g_thread_regs)(SceUID thid, JvThreadRegs *regs);
+
+/* "module+offset" for an address of the process, or the bare address */
+static void where_is(SceUID pid, uint32_t addr, char *out, size_t n) {
+  char name[0x1C + 4];
+  const void *text = NULL;
+  memset(name, 0, sizeof(name));
+  if (addr && g_mod_by_addr &&
+      g_mod_by_addr(pid, (const void *)addr, NULL, &text, name) >= 0 && text)
+    snprintf(out, n, "%s+0x%X", name, (unsigned)(addr - (uintptr_t)text));
+  else
+    snprintf(out, n, "0x%08X", (unsigned)addr);
+}
+
+/* the user-mode pc of a thread, 0 when the kernel does not give it */
+static uint32_t thread_user_pc(SceUID thid) {
+  JvThreadRegs r;
+  if (!g_thread_regs || g_thread_regs(thid, &r) < 0)
+    return 0;
+  for (int e = 0; e < 2; e++)
+    if ((r.entry[e].cpsr & 0x1F) == 0x10)
+      return r.entry[e].pc;
+  return r.entry[0].pc;
+}
+
 /* Diagnostics: every thread of a process, with what it is waiting on
  * (status: 1 running, 2 ready, 4 standby, 8 waiting, 16 dormant, 256
- * suspended; the wait type and id as the kernel reports them), so a game
- * that ignores its input after a load can be seen from the kernel's side. */
+ * suspended; the wait type and id as the kernel reports them) and where it
+ * executes (pc and lr of both register sets, as module+offset), so a game
+ * that ignores its input after a load can be seen from the kernel's side.
+ * The threads that are not waiting are then sampled 8 times, 25 ms apart,
+ * to show the code they loop in. The process's modules are listed too. */
 static void thread_dump(SceUID pid, const char *why) {
   static SceUID ids[96];
   static char line[200];
+  static int looked_up;
+  SceUID active[6];
+  int n_active = 0;
   char tid[16];
   int n = 0;
+  if (!looked_up) {
+    looked_up = 1;
+    if (module_get_export_func(KERNEL_PID, "SceKernelThreadMgr",
+                               TAI_ANY_LIBRARY, 0x5022689D,
+                               (uintptr_t *)&g_thread_regs) < 0)
+      g_thread_regs = NULL;
+    if (!g_mod_by_addr &&
+        module_get_export_func(KERNEL_PID, "SceKernelModulemgr",
+                               TAI_ANY_LIBRARY, 0x8309E043,
+                               (uintptr_t *)&g_mod_by_addr) < 0)
+      g_mod_by_addr = NULL;
+    snprintf(line, sizeof(line), "    thread registers %s, module lookup "
+             "%s\r\n", g_thread_regs ? "available" : "NOT available",
+             g_mod_by_addr ? "available" : "NOT available");
+    log_queue(line);
+  }
   memset(tid, 0, sizeof(tid));
   ksceKernelGetProcessTitleId(pid, tid, sizeof(tid));
   int res = ksceKernelGetThreadIdList(pid, ids, 96, &n);
@@ -2287,8 +2350,86 @@ static void thread_dump(SceUID pid, const char *why) {
                (unsigned)info.status, (unsigned)info.waitType,
                (unsigned)info.waitId, (int)info.currentPriority,
                (int)info.currentCpuId);
+      if ((info.status & (1 | 2 | 4)) && n_active < 6)
+        active[n_active++] = ids[i];
     }
     log_queue(line);
+    if (g_thread_regs) {
+      JvThreadRegs r;
+      int rr = g_thread_regs(ids[i], &r);
+      if (rr < 0) {
+        snprintf(line, sizeof(line), "        registers: error 0x%08X\r\n",
+                 (unsigned)rr);
+        log_queue(line);
+      } else {
+        for (int e = 0; e < 2; e++) {
+          char pc[48], lr[48];
+          where_is(pid, r.entry[e].pc, pc, sizeof(pc));
+          where_is(pid, r.entry[e].lr, lr, sizeof(lr));
+          snprintf(line, sizeof(line), "        set %d: pc %s lr %s sp "
+                   "0x%08X mode 0x%02X\r\n", e, pc, lr,
+                   (unsigned)r.entry[e].sp, (unsigned)(r.entry[e].cpsr & 0x1F));
+          log_queue(line);
+        }
+      }
+    }
+  }
+  /* where the active threads run: 8 samples */
+  for (int a = 0; a < n_active && g_thread_regs; a++) {
+    SceKernelThreadInfo info;
+    char where[48];
+    int len;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    ksceKernelGetThreadInfo(active[a], &info);
+    info.name[sizeof(info.name) - 1] = '\0';
+    len = snprintf(line, sizeof(line), "      %s runs at:", info.name);
+    for (int k = 0; k < 8 && len < (int)sizeof(line) - 52; k++) {
+      if (k)
+        ksceKernelDelayThread(25000);
+      where_is(pid, thread_user_pc(active[a]), where, sizeof(where));
+      len += snprintf(line + len, sizeof(line) - len, " %s", where);
+    }
+    snprintf(line + len, sizeof(line) - len, "\r\n");
+    log_queue(line);
+  }
+  /* the process's modules */
+  {
+    static SceUID mods[64];
+    SceSize nm = 64;
+    int (*mod_list)(SceUID pid, int f1, int f2, SceUID *ids, SceSize *n) =
+        NULL;
+    int (*mod_info)(SceUID pid, SceUID modid, SceKernelModuleInfo *mi) =
+        NULL;
+    if (module_get_export_func(KERNEL_PID, "SceKernelModulemgr",
+                               TAI_ANY_LIBRARY, 0x97CF7B4E,
+                               (uintptr_t *)&mod_list) >= 0 &&
+        module_get_export_func(KERNEL_PID, "SceKernelModulemgr",
+                               TAI_ANY_LIBRARY, 0xD269F915,
+                               (uintptr_t *)&mod_info) >= 0 &&
+        mod_list(pid, 0x7FFFFFFF, 1, mods, &nm) >= 0) {
+      static SceKernelModuleInfo mi;
+      int len = snprintf(line, sizeof(line), "      modules (%u):",
+                         (unsigned)nm);
+      for (SceSize m = 0; m < nm && m < 64; m++) {
+        memset(&mi, 0, sizeof(mi));
+        mi.size = sizeof(mi);
+        if (mod_info(pid, mods[m], &mi) < 0)
+          continue;
+        mi.module_name[sizeof(mi.module_name) - 1] = '\0';
+        if (len > (int)sizeof(line) - 40) {
+          snprintf(line + len, sizeof(line) - len, "\r\n");
+          log_queue(line);
+          len = snprintf(line, sizeof(line), "        ");
+        }
+        len += snprintf(line + len, sizeof(line) - len, " %s",
+                        mi.module_name);
+      }
+      snprintf(line + len, sizeof(line) - len, "\r\n");
+      log_queue(line);
+    } else {
+      log_queue("      modules: list not available\r\n");
+    }
   }
 }
 
@@ -4839,8 +4980,6 @@ void menu_on_resumed(const PayloadArguments *pa, int stale_open_files) {
  * the last wake-up, are logged. */
 static tai_hook_ref_t g_umount_ref, g_mount_ref;
 static SceUID g_umount_hook = -1, g_mount_hook = -1;
-static int (*g_mod_by_addr)(SceUID pid, const void *addr, uint32_t *nid,
-                            const void **text, void *name);
 
 /* the hooks only record (no lookups or locks in the system's own mount
  * calls); the io thread formats the events */
@@ -4886,6 +5025,167 @@ static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
   __sync_synchronize();
   g_mount_ev[k].ready = 1; /* the io thread reads the entry only now */
 }
+
+#ifndef JV_RELEASE
+/* Diagnostics: the file operations of the processes after a load (the two
+ * minutes after the wake-up), with their results: a game whose title
+ * screen stays unresponsive and whose "Load Game" cannot be entered after
+ * some loads may be getting errors from its savedata or trophy files. The
+ * user-side syscalls of SceIofilemgr are hooked (they only record; the io
+ * thread formats), plus the kernel's own open for savedata paths (what
+ * SceAppMgr opens for the game). The game's own assets (app0:) are left
+ * out unless they fail. */
+#define IO_EV_N 64
+#define IO_PATH_N 60
+static struct {
+  volatile uint8_t ready;
+  uint8_t kind; /* 0 open 1 dopen 2 getstat 3 mkdir 4 remove 5 kernel open */
+  int32_t ret;
+  int32_t flags;
+  SceUID pid;
+  int ms;
+  char path[IO_PATH_N];
+} g_io_ev[IO_EV_N];
+static volatile uint32_t g_io_ev_w, g_io_ev_r, g_io_ev_dropped;
+static tai_hook_ref_t g_io_refs[6];
+static SceUID g_io_hooks[6] = {-1, -1, -1, -1, -1, -1};
+
+static int io_window(void) {
+  int64_t t = g_t_resume;
+  if (!t)
+    return 0;
+  int64_t since = ksceKernelGetSystemTimeWide() - t;
+  return since >= 0 && since < 125000000;
+}
+
+static void io_note(int kind, const char *upath, int flags, int ret,
+                    int kernel) {
+  char path[IO_PATH_N];
+  memset(path, 0, sizeof(path));
+  if (kernel) {
+    strncpy(path, upath ? upath : "", sizeof(path) - 1);
+  } else if (jv_copy_from_user(path, upath, sizeof(path) - 1) < 0) {
+    memset(path, 0, sizeof(path));
+    if (jv_copy_from_user(path, upath, 16) < 0)
+      strcpy(path, "?");
+  }
+  path[sizeof(path) - 1] = '\0';
+  if (kernel) {
+    /* only the savedata / trophy paths of the kernel's own opens */
+    const char *p = path;
+    int keep = 0;
+    for (; *p; p++)
+      if (!strncmp(p, "savedata", 8) || !strncmp(p, "trophy", 6)) {
+        keep = 1;
+        break;
+      }
+    if (!keep)
+      return;
+  } else if (ret >= 0 && !strncmp(path, "app0:", 5)) {
+    return;
+  }
+  uint32_t w;
+  do { /* a slot is reserved only when there is one: every reserved slot
+        * is written, so the reader never waits for a dropped entry */
+    w = g_io_ev_w;
+    if (w - g_io_ev_r >= IO_EV_N) {
+      __sync_fetch_and_add(&g_io_ev_dropped, 1);
+      return;
+    }
+  } while (!__sync_bool_compare_and_swap(&g_io_ev_w, w, w + 1));
+  int k = w % IO_EV_N;
+  g_io_ev[k].kind = (uint8_t)kind;
+  g_io_ev[k].ret = ret;
+  g_io_ev[k].flags = flags;
+  g_io_ev[k].pid = ksceKernelGetProcessId();
+  g_io_ev[k].ms = (int)((ksceKernelGetSystemTimeWide() - g_t_resume) / 1000);
+  memcpy(g_io_ev[k].path, path, sizeof(path));
+  __sync_synchronize();
+  g_io_ev[k].ready = 1;
+}
+
+#define IO_HOOK(idx, kind, name)                                            \
+  static int name(const char *path, int a2, int a3, int a4) {              \
+    int ret = TAI_CONTINUE(int, g_io_refs[idx], path, a2, a3, a4);         \
+    if (io_window())                                                       \
+      io_note(kind, path, a2, ret, 0);                                     \
+    return ret;                                                            \
+  }
+IO_HOOK(0, 0, io_open_hook)
+IO_HOOK(1, 1, io_dopen_hook)
+IO_HOOK(2, 2, io_getstat_hook)
+IO_HOOK(3, 3, io_mkdir_hook)
+IO_HOOK(4, 4, io_remove_hook)
+
+static int io_kopen_hook(const char *path, int flags, int mode) {
+  int ret = TAI_CONTINUE(int, g_io_refs[5], path, flags, mode);
+  if (io_window())
+    io_note(5, path, flags, ret, 1);
+  return ret;
+}
+
+static void io_events_log(void) {
+  static char line[200];
+  uint32_t w = g_io_ev_w;
+  while (g_io_ev_r != w) {
+    int k = g_io_ev_r % IO_EV_N;
+    static const char *const kinds[6] = {"open", "dopen", "getstat", "mkdir",
+                                         "remove", "kernel open"};
+    char tid[16];
+    if (!g_io_ev[k].ready)
+      return;
+    __sync_synchronize();
+    memset(tid, 0, sizeof(tid));
+    if (g_io_ev[k].pid == KERNEL_PID)
+      strcpy(tid, "kernel");
+    else if (ksceKernelGetProcessTitleId(g_io_ev[k].pid, tid, sizeof(tid)) < 0)
+      strcpy(tid, "?");
+    tid[sizeof(tid) - 1] = '\0';
+    g_io_ev[k].path[IO_PATH_N - 1] = '\0';
+    snprintf(line, sizeof(line), "    io +%d ms %s %s %s%s -> 0x%08X%s\r\n",
+             g_io_ev[k].ms, tid, kinds[g_io_ev[k].kind < 6 ? g_io_ev[k].kind
+                                                             : 0],
+             g_io_ev[k].path, g_io_ev[k].kind == 0 || g_io_ev[k].kind == 5
+                 ? (g_io_ev[k].flags & 2) ? " (write)" : " (read)" : "",
+             (unsigned)g_io_ev[k].ret, g_io_ev[k].ret < 0 ? " ERROR" : "");
+    log_append(line);
+    g_io_ev[k].ready = 0;
+    g_io_ev_r++;
+  }
+  if (g_io_ev_dropped) {
+    snprintf(line, sizeof(line), "    io: %u operations not recorded (ring "
+             "full)\r\n", (unsigned)g_io_ev_dropped);
+    log_append(line);
+    g_io_ev_dropped = 0;
+  }
+}
+
+static void io_watch_install(void) {
+  static const uint32_t nids[5] = {0xCC67B6FD, 0xE6E614B5, 0x8E7E11F2,
+                                   0x8F1ACC32, 0x78955C65};
+  static const void *const fns[5] = {io_open_hook, io_dopen_hook,
+                                     io_getstat_hook, io_mkdir_hook,
+                                     io_remove_hook};
+  static char line[160];
+  int ok = 0;
+  for (int i = 0; i < 5; i++) {
+    g_io_hooks[i] = taiHookFunctionExportForKernel(
+        KERNEL_PID, &g_io_refs[i], "SceIofilemgr", 0xF2FF276E, nids[i],
+        fns[i]);
+    ok += g_io_hooks[i] >= 0;
+  }
+  g_io_hooks[5] = taiHookFunctionExportForKernel(
+      KERNEL_PID, &g_io_refs[5], "SceIofilemgr", 0x40FD29C7, 0x75192972,
+      io_kopen_hook);
+  snprintf(line, sizeof(line), "io watch (the game's file operations after "
+           "a load): %d of 5 user hooks, kernel open %s0x%08X\r\n", ok,
+           g_io_hooks[5] < 0 ? "error " : "", (unsigned)g_io_hooks[5]);
+  log_queue(line);
+}
+#else
+static void io_events_log(void) {}
+static void io_watch_install(void) {}
+#endif
 
 /* before a new run: the last load's record is closed first */
 static void alive_stop(void) {
@@ -5091,6 +5391,7 @@ static int io_thread(SceSize args, void *argp) {
                                     &out, &timeout);
     card_watch();
     mount_events_log();
+    io_events_log();
     if (w < 0)
       continue;
 
@@ -5149,6 +5450,7 @@ int menu_init(const char *status_text) {
   g_io_evf = ksceKernelCreateEventFlag("JamaisVuIoEvf", 0, 0, NULL);
   g_logq_mtx = ksceKernelCreateMutex("JamaisVuLogQ", 0, 0, NULL);
   mount_watch_install(); /* logs through the queue: after it exists */
+  io_watch_install();
   g_log_mtx = ksceKernelCreateMutex("JamaisVuLog", 0, 0, NULL);
   g_evf = ksceKernelCreateEventFlag("JamaisVuEvf", 0, 0, NULL);
   g_mtx = ksceKernelCreateMutex("JamaisVuMenu", 0, 0, NULL);
