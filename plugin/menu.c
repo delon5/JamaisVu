@@ -3555,9 +3555,9 @@ static void after_resume(void) {
        * drive is re-read in place instead (as a late USB drive is) */
       const char *croot = storage_card_root();
       g_card_open_files = croot ? fs_open_handles(croot) : 0;
-      /* data/JamaisVu/cardinplace: re-read in place even with no file
-       * open (to tell the fresh mount from the rest) */
-      g_card_in_place = croot && jv_switch_file("cardinplace");
+      /* data/JamaisVu/cardinplace (read before the request: the card is
+       * not readable here): re-read in place even with no file open, to
+       * tell the fresh mount from the rest */
       if (g_card_open_files > 0 || g_card_in_place) {
         g_card_remount_ret = fs_card_refresh(croot);
         root = croot;
@@ -3937,6 +3937,13 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     jv_clocks_default(clk, sizeof(clk));
     snprintf(line, sizeof(line), "    clocks for the run: %s\r\n", clk);
     log_append(line);
+  }
+  /* the switch files, read now while the card is readable (after the
+   * wake-up it is not until it has been mounted again) */
+  g_card_in_place = jv_switch_file("cardinplace");
+  if (g_card_in_place) {
+    log_append("    data/JamaisVu/cardinplace: the card will be re-read in "
+               "place after the load\r\n");
   }
   /* PS TV: the system's own HDMI setup while its picture is on screen
    * (read only), to compare with the progress screen's */
