@@ -2260,14 +2260,17 @@ static void note_buttons(int idx, int port, SceCtrlData *pad, int ret,
     g_btn_or[k] |= neg ? ~d.buttons : d.buttons;
 }
 /* the data operations of the two reading processes (by the controller
- * reader slot): counts for the activity line, errors into the ring */
-#define FD_HOOK_N 7
+ * reader slot): counts for the activity line, errors into the ring. Only
+ * calls whose arguments and result fit the four registers: pread, pwrite
+ * and lseek take a 64-bit offset on the stack (lseek returns one too), and
+ * forwarding them with four words broke every positioned read of the
+ * system (b8828f5 boot-looped); the async variants are undocumented. */
+#define FD_HOOK_N 3
 static tai_hook_ref_t g_fd_refs[FD_HOOK_N];
 static SceUID g_fd_hooks[FD_HOOK_N];
 static volatile uint32_t g_fd_calls[2][FD_HOOK_N], g_fd_bytes[2],
     g_fd_errors[2], g_fd_last_err[2];
-static const char *const g_fd_names[FD_HOOK_N] = {
-    "read", "write", "pread", "lseek", "close", "readasync", "preadasync"};
+static const char *const g_fd_names[FD_HOOK_N] = {"read", "write", "close"};
 
 #else
 #define note_buttons(idx, port, pad, ret, neg) ((void)0)
@@ -5260,7 +5263,7 @@ static void fd_note(int idx, int fd, int size, int ret) {
   if (ret < 0) {
     g_fd_errors[k]++;
     g_fd_last_err[k] = (uint32_t)ret;
-  } else if (idx == 0 || idx == 2) {
+  } else if (idx == 0) {
     g_fd_bytes[k] += (uint32_t)ret;
   }
 }
@@ -5367,11 +5370,7 @@ static int io_kopen_hook(const char *path, int flags, int mode) {
   }
 FD_HOOK(0, fd_read_hook)
 FD_HOOK(1, fd_write_hook)
-FD_HOOK(2, fd_pread_hook)
-FD_HOOK(3, fd_lseek_hook)
-FD_HOOK(4, fd_close_hook)
-FD_HOOK(5, fd_readasync_hook)
-FD_HOOK(6, fd_preadasync_hook)
+FD_HOOK(2, fd_close_hook)
 
 static void io_events_log(void) {
   static char line[200];
@@ -5431,12 +5430,10 @@ static void io_watch_install(void) {
       KERNEL_PID, &g_io_refs[6], "SceAppMgr", 0x8AF17416, 0x7240375B,
       io_sysevent_hook);
   {
-    static const uint32_t fnids[FD_HOOK_N] = {
-        0xFDB32293, 0x34EFD876, 0x539FD5C4, 0xA604764A, 0xC70B8886,
-        0x773EBD45, 0xBCF5684D};
-    static const void *const ffns[FD_HOOK_N] = {
-        fd_read_hook, fd_write_hook, fd_pread_hook, fd_lseek_hook,
-        fd_close_hook, fd_readasync_hook, fd_preadasync_hook};
+    static const uint32_t fnids[FD_HOOK_N] = {0xFDB32293, 0x34EFD876,
+                                              0xC70B8886};
+    static const void *const ffns[FD_HOOK_N] = {fd_read_hook, fd_write_hook,
+                                                fd_close_hook};
     int fok = 0;
     for (int i = 0; i < FD_HOOK_N; i++) {
       g_fd_hooks[i] = taiHookFunctionExportForKernel(
@@ -5445,7 +5442,7 @@ static void io_watch_install(void) {
       fok += g_fd_hooks[i] >= 0;
     }
     snprintf(line, sizeof(line), "io watch: %d of %d data hooks (read, "
-             "write, pread, lseek, close, async reads)\r\n", fok, FD_HOOK_N);
+             "write, close)\r\n", fok, FD_HOOK_N);
     log_queue(line);
   }
   snprintf(line, sizeof(line), "io watch (the game's file operations after "
