@@ -1,12 +1,12 @@
 # Publishes a draft release made by release.yml (its tag is created on
-# publish). Run by hand with the tag, e.g. v2.0.0-rc1.
+# publish). Run by hand with the tag, e.g. v1.1.0-rc1.
 name: Publish release
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag of the draft release to publish, e.g. v2.0.0-rc1'
+        description: 'Tag of the draft release to publish, e.g. v1.1.0-rc1'
         required: true
         type: string
 
