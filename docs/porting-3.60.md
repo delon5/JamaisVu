@@ -1,4 +1,4 @@
-# Why JamaisVu works on 3.65 but not 3.60, and how to port it
+# Why dejavu works on 3.65 but not 3.60, and how to port it
 
 > **Status: supported and hardware-tested.** The 3.60 offset table is complete, every offset was checked against a dump of a retail 3.60 console (details below), and a dry run, a save and a load (including the ux0 remount) passed on a PCH-2000 with an official Memory Card as ux0. 3.60 is enabled in the normal build (`JamaisVu.skprx`); it only arms if SceExfatfs is module NID `0x23AA294A`.
 >
