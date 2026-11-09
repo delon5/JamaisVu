@@ -1,0 +1,26 @@
+# Publishes a draft release made by release.yml (its tag is created on
+# publish). Run by hand with the tag, e.g. v2.0.0-rc1.
+name: Publish release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag of the draft release to publish, e.g. v2.0.0-rc1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ inputs.tag }}" --draft=false
+          gh release view "${{ inputs.tag }}" --json tagName,isDraft,url
