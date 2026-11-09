@@ -700,6 +700,10 @@ int main(int argc, char **argv) {
         "file created after save should be gone");
   CHECK(read_file("ux0:user/00/savedata/PCSE00123/same.bin", buf, sizeof(buf), &len) == 0 &&
         len == sizeof(sav_a) && memcmp(buf, sav_a, len) == 0, "same-size file not restored");
+  /* data.bin (other size), same.bin (other content), param.sfo (gone),
+   * resavedata's save.dat (other content): rewritten; the rest untouched */
+  CHECK(args.savedata_rewritten == 4, "rewritten count %u, expected 4",
+        (unsigned)args.savedata_rewritten);
   get_file_extents("ux0:user/00/savedata/PCSE00123/same.bin", &same_ext_after);
   CHECK(same_ext_after.n == same_ext.n &&
         memcmp(same_ext_after.r, same_ext.r, same_ext.n * sizeof(same_ext.r[0])) == 0,

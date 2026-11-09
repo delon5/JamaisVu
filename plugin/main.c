@@ -176,10 +176,12 @@ PayloadArguments pargs;
 uint32_t jv_last_process_num(void) {
   return pargs.process_num;
 }
-void jv_last_savedata(uint32_t *selected, uint32_t *files, uint32_t *folders) {
+void jv_last_savedata(uint32_t *selected, uint32_t *files, uint32_t *folders,
+                      uint32_t *rewritten) {
   *selected = pargs.backup_savedata;
   *files = pargs.savedata_files;
   *folders = pargs.savedata_folders;
+  *rewritten = pargs.savedata_rewritten;
 }
 uint32_t pargs_size = sizeof(PayloadArguments);
 
@@ -605,6 +607,7 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   pargs.verify_bad = pargs.verify_screen = pargs.verify_first = 0;
   pargs.verify_ms = 0;
   pargs.savedata_files = pargs.savedata_folders = 0; /* set by the payload */
+  pargs.savedata_rewritten = 0;
   {
     uint32_t ttbcr = 0;
     __asm__ volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));

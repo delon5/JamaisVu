@@ -3608,10 +3608,14 @@ static void after_resume(void) {
     if (g_res_debug == JV_TEST_NONE) {
       /* the games' savedata: which folders on the card were selected
        * and what the payload did with them */
-      uint32_t sel, files, used;
+      uint32_t sel, files, used, rewritten;
+      char rw[64] = "";
       const char *verb = g_res_mode == JAMAISVU_MODE_SAVE ? "backed up"
                                                            : "put back";
-      jv_last_savedata(&sel, &files, &used);
+      jv_last_savedata(&sel, &files, &used, &rewritten);
+      if (g_res_mode == JAMAISVU_MODE_LOAD && files)
+        snprintf(rw, sizeof(rw), "; %u rewritten, the rest identical",
+                 (unsigned)rewritten);
       if (sel == 0 && jv_switch_file("nosavedata"))
         snprintf(line, sizeof(line), "    savedata: left alone "
                  "(data/JamaisVu/nosavedata is on the card)\r\n");
@@ -3625,11 +3629,11 @@ static void after_resume(void) {
                  sel & JV_SAVEDATA_RESAVEDATA ? " resavedata" : "");
       else
         snprintf(line, sizeof(line), "    savedata: %u files and folders %s "
-                 "(%s%s%s)\r\n", (unsigned)files, verb,
+                 "(%s%s%s%s)\r\n", (unsigned)files, verb,
                  used & JV_SAVEDATA_SYSTEM ? "user/00/savedata" : "",
                  (used & JV_SAVEDATA_SYSTEM) && (used & JV_SAVEDATA_RESAVEDATA)
                      ? ", " : "",
-                 used & JV_SAVEDATA_RESAVEDATA ? "resavedata" : "");
+                 used & JV_SAVEDATA_RESAVEDATA ? "resavedata" : "", rw);
       log_append(line);
     }
     if (g_card_remount_root) {

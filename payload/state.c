@@ -1168,8 +1168,10 @@ static int prune_dir(const char *path, int level) {
  * alone (a state saved with reSavedata's folder on the card, loaded on a
  * console where it is not). */
 static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
-                         uint32_t *written, uint32_t *used) {
+                         uint32_t *written, uint32_t *used,
+                         uint32_t *rewritten) {
   static SaveStateFile file;
+  static uint8_t cmp_buf[4096];
   static char path[MAX_PATH_LEN];
   static char root_path[MAX_PATH_LEN];
   static char prune_root[MAX_PATH_LEN]; /* in-place root awaiting its prune */
@@ -1246,18 +1248,23 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
         return JV_ERR_IO;
     } else {
       uint32_t size = file.data_len;
+      /* comparing: the file exists with the snapshot's size, and so far
+       * matches it byte for byte; nothing is written while this holds */
+      int comparing = 0, changed = 1;
 
       if (inplace) {
-        fres = f_open(&fpdst, path, FA_OPEN_ALWAYS | FA_WRITE);
+        fres = f_open(&fpdst, path, FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
         if (fres == FR_DENIED) { /* read-only, or a folder of that name */
           if (f_stat(path, &fno) == FR_OK && (fno.fattrib & AM_DIR))
             remove_dir(path, 0);
           else
             f_chmod(path, 0, AM_RDO);
-          fres = f_open(&fpdst, path, FA_OPEN_ALWAYS | FA_WRITE);
+          fres = f_open(&fpdst, path, FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
         }
         if (fres != FR_OK)
           return JV_ERR_IO;
+        comparing = f_size(&fpdst) == size;
+        changed = !comparing;
       } else if (f_open(&fpdst, path, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) {
         return JV_ERR_IO;
       }
@@ -1268,6 +1275,32 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
         res = state_read(fpsrc, io_buf, n);
         if (res < 0)
           break;
+        if (comparing) {
+          /* the same range of the existing file, piece by piece */
+          FSIZE_t chunk_pos = f_tell(&fpdst);
+          uint32_t off = 0;
+          while (off < n) {
+            uint32_t m = MIN(n - off, sizeof(cmp_buf));
+            UINT br = 0;
+            if (f_read(&fpdst, cmp_buf, m, &br) != FR_OK || br != m ||
+                memcmp(cmp_buf, io_buf + off, m) != 0)
+              break;
+            off += m;
+          }
+          if (off < n) {
+            /* a difference in this chunk: the chunk is written whole,
+             * and everything after it */
+            comparing = 0;
+            changed = 1;
+            if (f_lseek(&fpdst, chunk_pos) != FR_OK) {
+              res = JV_ERR_IO;
+              break;
+            }
+          } else {
+            size -= n;
+            continue;
+          }
+        }
         if (f_write(&fpdst, io_buf, n, &bw) != FR_OK || bw != n) {
           res = JV_ERR_IO;
           break;
@@ -1276,7 +1309,7 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
       }
 
       /* whatever the existing file had beyond the snapshot's size */
-      if (res == 0 && inplace && f_truncate(&fpdst) != FR_OK)
+      if (res == 0 && inplace && changed && f_truncate(&fpdst) != FR_OK)
         res = JV_ERR_IO;
       if (f_close(&fpdst) != FR_OK && res == 0)
         res = JV_ERR_IO;
@@ -1286,6 +1319,10 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
       res = state_skip(fpsrc, ALIGN(file.data_len, 4) - file.data_len);
       if (res < 0)
         return res;
+
+      if (!changed)
+        continue; /* identical: its entry is not touched at all */
+      (*rewritten)++;
     }
 
     memset(&fno, 0, sizeof(fno));
@@ -1470,11 +1507,13 @@ int load_state(FATFS *fs, const char *path) {
    * plugin's JV_SAVEDATA_* bits), never into a folder that is not theirs */
   pargs->savedata_files = 0;
   pargs->savedata_folders = 0;
+  pargs->savedata_rewritten = 0;
   if (pargs->backup_savedata) {
     guard_deny_all();
     guard_allow(vol_start, vol_end - vol_start);
     res = restore_files(&fp, header.file_num, pargs->backup_savedata,
-                        &pargs->savedata_files, &pargs->savedata_folders);
+                        &pargs->savedata_files, &pargs->savedata_folders,
+                        &pargs->savedata_rewritten);
     guard_deny_all();
     if (res < 0)
       goto out;

@@ -149,6 +149,9 @@ typedef struct {
    * back (load), and the folders they came from / went to (JV_SAVEDATA_*
    * bits), for the log. */
   uint32_t savedata_files, savedata_folders;
+  /* load: of those, the files whose content on the card differed from
+   * the snapshot's and were rewritten (identical ones are not touched) */
+  uint32_t savedata_rewritten;
 } PayloadArguments;
 
 #define JV_REFUSE_PROCESSES 1 /* more processes than the snapshot holds */

@@ -27,7 +27,8 @@ const char *jv_build_id(void);
 uint32_t jv_last_process_num(void);
 /* the last job's savedata: which folders the plugin selected, how many
  * records the payload backed up / put back and from / into which folders */
-void jv_last_savedata(uint32_t *selected, uint32_t *files, uint32_t *folders);
+void jv_last_savedata(uint32_t *selected, uint32_t *files, uint32_t *folders,
+                      uint32_t *rewritten);
 /* number of kernel objects of a class (e.g. "SceUIDProcessClass"), < 0 if
  * the class is unknown (diagnostics: counted, nothing changed) */
 int jv_count_class(const char *name);
