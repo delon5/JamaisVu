@@ -72,7 +72,11 @@ A corrupted or tampered state is rejected with nothing changed.
 
 ## Memory after a wake-up
 
-A kernel that cannot find a free page panics, and the console restarts. In a game that leaves the system almost nothing, the menu's memory partly comes from the kernel's own pool. So nothing of it is held across a wake-up for longer than needed: it is given back as soon as the system is awake (the new slot's picture is kept in the plugin's own data), and for 20 s after a wake-up the result banner takes kernel-pool memory only while a megabyte stays free there. If it cannot, the banner is skipped; `log.txt` has the result either way.
+A kernel that cannot find a free page panics, and the console restarts. In a game that leaves the system almost nothing, the menu's memory partly comes from the kernel's own pool. So nothing of it is held across a wake-up for longer than needed: it is given back as soon as the system is awake (the new slot's picture is kept in a block taken for the save only), and for 20 s after a wake-up the result banner takes kernel-pool memory only while a megabyte stays free there. If it cannot, the banner is skipped; `log.txt` has the result either way.
+
+## The plugin's own share of the kernel's pool
+
+The plugin's code and fixed buffers sit in the kernel's own memory pool for as long as the console is on. On a PCH-1000 with other kernel plugins that pool had 2.9 MB of its 36 MB free when JamaisVu started, about 430 KB in the LiveArea and 200-260 KB with a game running, and a save request ended in a restart when it reached zero while the system was going to sleep (the console's own crash dump). So buffers that are only needed for a moment are not fixed ones: the read buffer for the plugin folders' fingerprint, the zeroes a new slot file is written with, the new slot's picture and the diagnostics' buffers are taken when the work starts and given back when it ends, from another pool whenever one has room (`plugin/workmem.h`), and a Japanese glyph is read in 1 KB pieces. The count lines in `log.txt` show the pool's free size.
 
 ## What is still not guaranteed
 

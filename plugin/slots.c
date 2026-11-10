@@ -19,6 +19,7 @@
 #include "md5.h"
 #include "appdb.h"
 #include "storage.h"
+#include "workmem.h"
 #include "../payload/crc32.h"
 
 #define THUMB_PIXELS  (JV_THUMB_W * JV_THUMB_H)
@@ -226,12 +227,11 @@ int slot_prepare(int slot, int (*progress)(int pct)) {
       (uint64_t)avail < (uint64_t)JV_SLOT_SIZE + JV_FREE_SPACE_MARGIN)
     return JV_ERR_SLOT_NO_SPACE;
 
-  blk = ksceKernelAllocMemBlock("JamaisVuZero",
-                                SCE_KERNEL_MEMBLOCK_TYPE_KERNEL_RW,
-                                0x40000, NULL);
-  if (blk < 0)
+  /* 256 KB of zeroes to write the file with: the kernel's own pool last
+   * (it was the only one asked, and has less than that free in a game) */
+  zero = jv_work_alloc("JamaisVuZero", 0x40000, &blk, 1);
+  if (!zero)
     return JV_ERR_SLOT_IO;
-  ksceKernelGetMemBlockBase(blk, &zero);
   memset(zero, 0, 0x40000);
 
   fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
@@ -879,10 +879,29 @@ static int is_jamaisvu_file(const char *name) {
 
 /* md5(relative name, NUL, content) XORed into t->md5: the order the
  * folder lists its files in does not matter */
+/* 64 KB reads: with 4 KB each, 1.6 MB of plugins took 4-6 s while a
+ * game streamed from the same drive (PS TV logs, "tai folders"). The 64 KB
+ * are taken for the time a folder is read (tai_hash_dir); only when no
+ * pool has them is it read 4 KB at a time. */
+static uint8_t g_tai_small[0x1000];
+static uint8_t *g_tai_buf = g_tai_small;
+static uint32_t g_tai_buf_len = sizeof(g_tai_small);
+static SceUID g_tai_blk = -1;
+
+static void tai_buf_get(void) {
+  uint8_t *b = jv_work_alloc("JamaisVuRead", 0x10000, &g_tai_blk, 1);
+  g_tai_buf = b ? b : g_tai_small;
+  g_tai_buf_len = b ? 0x10000 : sizeof(g_tai_small);
+}
+
+static void tai_buf_put(void) {
+  g_tai_buf = g_tai_small;
+  g_tai_buf_len = sizeof(g_tai_small);
+  jv_work_free(&g_tai_blk);
+}
+
 static int tai_hash_file(const char *path, const char *rel, TaiPrint *t) {
-  /* 64 KB reads: with 4 KB each, 1.6 MB of plugins took 4-6 s while a
-   * game streamed from the same drive (PS TV logs, "tai folders") */
-  static uint8_t buf[0x10000];
+  uint8_t *buf = g_tai_buf;
   uint8_t d[16];
   Md5 m;
   SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
@@ -891,7 +910,7 @@ static int tai_hash_file(const char *path, const char *rel, TaiPrint *t) {
   md5_init(&m);
   md5_update(&m, rel, (uint32_t)strlen(rel) + 1);
   for (;;) {
-    int n = ksceIoRead(fd, buf, sizeof(buf));
+    int n = ksceIoRead(fd, buf, g_tai_buf_len);
     if (n < 0 || t->bytes + (uint32_t)n > 256u * 1024 * 1024) {
       ksceIoClose(fd);
       return -1;
@@ -919,6 +938,8 @@ static int tai_hash_dir(const char *dir, const char *relbase, int depth,
   if (dfd < 0)
     return depth == 0 ? 1 : -1; /* top folder missing: "absent" */
   int res = 0;
+  if (depth == 0)
+    tai_buf_get();
   while (res == 0 && ksceIoDread(dfd, &ent[depth]) > 0) {
     const char *name = ent[depth].d_name;
     if (!name[0] || !strcmp(name, ".") || !strcmp(name, ".."))
@@ -937,6 +958,8 @@ static int tai_hash_dir(const char *dir, const char *relbase, int depth,
     }
   }
   ksceIoDclose(dfd);
+  if (depth == 0)
+    tai_buf_put();
   return res;
 }
 

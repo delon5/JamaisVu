@@ -26,6 +26,7 @@ int ksceAppMgrIsExclusiveProcessRunning(void); /* used before its later declarat
 #include "slots.h"
 #include "storage.h"
 #include "trace.h"
+#include "workmem.h"
 #include "hwdump.h"
 #include "remap.h"
 #include "prof.h"
@@ -340,8 +341,10 @@ static volatile uint32_t g_panel_seq = 1, g_panel_gen;
 static uint16_t *g_thumbs[JV_NUM_SLOTS + 1]; /* RGB565 */
 /* The new slot's picture, copied out of the menu's memory before a save:
  * the slot info is written after the wake-up, and the menu's memory is
- * given back as soon as the system is awake (see after_resume). */
-static uint16_t g_pending_thumb[THUMB_PX];
+ * given back as soon as the system is awake (see after_resume). Its 29 KB
+ * are taken for the save only (workmem.h), and given back by do_save. */
+static uint16_t *g_pending_thumb;
+static SceUID g_pending_thumb_blk = -1;
 static int g_pending_thumb_ok;
 static void model_clear_thumbs(void);
 
@@ -2817,9 +2820,9 @@ static void read_probe(SceUID pid, const JvReadProbe *p, const char *why) {
     log_queue("        the descriptor is not an open file here\r\n");
     return;
   }
-  blk = ksceKernelAllocMemBlock("JamaisVuProbe", 0x1020D006,
-                                (a_size + 0xFFF) & ~0xFFFu, NULL);
-  if (blk < 0 || ksceKernelGetMemBlockBase(blk, (void **)&buf) < 0 || !buf) {
+  /* not from the kernel's own pool while another has room (workmem.h) */
+  buf = jv_work_alloc("JamaisVuProbe", a_size, &blk, 1);
+  if (!buf) {
     snprintf(line, sizeof(line), "        no memory for the read (0x%08X)"
              "\r\n", (unsigned)blk);
     log_queue(line);
@@ -2941,8 +2944,8 @@ static void files_probe(SceUID pid) {
     log_queue(line);
     return;
   }
-  blk = ksceKernelAllocMemBlock("JamaisVuProbe", 0x1020D006, 0x40000, NULL);
-  if (blk < 0 || ksceKernelGetMemBlockBase(blk, (void **)&buf) < 0 || !buf) {
+  buf = jv_work_alloc("JamaisVuProbe", 0x40000, &blk, 1);
+  if (!buf) {
     snprintf(line, sizeof(line), "    open files: no memory (0x%08X)\r\n",
              (unsigned)blk);
     log_queue(line);
@@ -4720,12 +4723,13 @@ static int card_wait(int ms) {
   return 0;
 }
 
-/* Memory canary: 64 KB of this plugin's own memory, filled with pattern
+/* Memory canary: 4 KB of this plugin's own memory (64 KB until ce9b5f5:
+ * it sits in the kernel's pool all the time), filled with pattern
  * A before a save (so the snapshot holds A) and with pattern B just before
  * a load is requested. After the load the restored image must see A in
  * every word: a B word is memory the restore did not put back, or a stale
  * cache line (the payload restores RAM by DMA with the caches off). */
-#define CANARY_WORDS 16384
+#define CANARY_WORDS 1024
 static uint32_t g_canary[CANARY_WORDS];
 static void canary_fill(uint32_t tag) {
   for (uint32_t i = 0; i < CANARY_WORDS; i++)
@@ -5594,11 +5598,23 @@ static void do_save(int slot) {
       jv_set_display_frame(0, 0, 0, 0, 0);
     }
   }
-  g_pending_thumb_ok = g_thumbs[PENDING] != NULL;
+  jv_work_free(&g_pending_thumb_blk);
+  g_pending_thumb = g_thumbs[PENDING]
+      ? jv_work_alloc("JamaisVuThumb", THUMB_PX * 2, &g_pending_thumb_blk, 1)
+      : NULL;
+  g_pending_thumb_ok = g_pending_thumb != NULL;
   if (g_pending_thumb_ok)
-    memcpy(g_pending_thumb, g_thumbs[PENDING], sizeof(g_pending_thumb));
+    memcpy(g_pending_thumb, g_thumbs[PENDING], THUMB_PX * 2);
+  else if (g_thumbs[PENDING])
+    log_append("    no memory for the new slot's picture: the slot is saved "
+               "without one\r\n");
   run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce, JV_TEST_NONE,
                JV_PAYLOAD_DEFAULT);
+  /* also reached by the restored image after a load of this very save:
+   * the block is part of it */
+  g_pending_thumb_ok = 0;
+  g_pending_thumb = NULL;
+  jv_work_free(&g_pending_thumb_blk);
 }
 
 static void do_load(int slot) {

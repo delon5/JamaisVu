@@ -227,6 +227,15 @@ static int japanese(const char *font_path, MenuModel *m) {
     sorted &= ext->cp[i - 1] < ext->cp[i];
   CHECK(sorted, "set sorted by code point");
   uint32_t used = ext->used;
+  {
+    /* the same pixels whatever the size of the pieces a glyph is read in
+     * (run.sh builds this test a second time with 16-byte pieces) */
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; i < used; i++)
+      h = (h ^ ext->bitmap[i]) * 16777619u;
+    printf("  glyph pixels: %u bytes, checksum 0x%08X\n", (unsigned)used,
+           (unsigned)h);
+  }
   CHECK(jpfont_load(file_read, f, names, 3, ext) == n && ext->used == used,
         "loading again adds nothing");
   CHECK(ext_has_all(ext, names, 3), "set has every letter of the names");

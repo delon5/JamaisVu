@@ -107,13 +107,19 @@ int ext_has_all(const ExtGlyphs *ext, const char *const *strs, int nstrs) {
   return 1;
 }
 
+#ifndef JF_PACKED_BYTES
+#define JF_PACKED_BYTES 1024 /* the host test also builds with 16 */
+#endif
+
 /* loads into ext, or with ext NULL only adds up the bitmap bytes */
 static int jf_run(JfRead rd, void *ctx, const char *const *strs, int nstrs,
                   ExtGlyphs *ext, uint32_t *bytes) {
   static uint8_t hdr[32];
   static uint32_t index[JF_MAX_BLOCKS];
   static uint8_t block[JF_BLOCK * JF_ENTRY];
-  static uint8_t packed[(255 * 255 + 1) / 2];
+  /* a glyph's 4-bit pixels, read a piece at a time (a whole glyph can be
+   * 32 KB by the format; that buffer sat in memory all the time) */
+  static uint8_t packed[JF_PACKED_BYTES];
   static uint32_t want[EXT_MAX_GLYPHS];
   int nwant = 0;
 
@@ -195,12 +201,18 @@ static int jf_run(JfRead rd, void *ctx, const char *const *strs, int nstrs,
       }
       if (npx > ext->cap - ext->used)
         break; /* full: skip this glyph */
-      if (npx && rd(ctx, data_off + off, packed, nbytes) != (int)nbytes)
-        return -1;
       g.offset = ext->used;
-      for (uint32_t i = 0; i < npx; i++) {
-        uint8_t v = (i & 1) ? packed[i / 2] & 15 : packed[i / 2] >> 4;
-        ext->bitmap[ext->used + i] = (uint8_t)(v * 17);
+      for (uint32_t done = 0; done < nbytes; done += sizeof(packed)) {
+        uint32_t part = nbytes - done;
+        if (part > sizeof(packed))
+          part = sizeof(packed);
+        if (rd(ctx, data_off + off + done, packed, part) != (int)part)
+          return -1;
+        for (uint32_t i = done * 2; i < npx && i < (done + part) * 2; i++) {
+          uint32_t b = i / 2 - done;
+          uint8_t v = (i & 1) ? packed[b] & 15 : packed[b] >> 4;
+          ext->bitmap[ext->used + i] = (uint8_t)(v * 17);
+        }
       }
       ext->used += npx;
       insert(ext, cp, &g);

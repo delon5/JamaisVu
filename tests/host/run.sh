@@ -115,6 +115,22 @@ gcc -O2 -Wall -Wextra -fsanitize=address,undefined -I"$ROOT/plugin/gui" \
   "$ROOT/plugin/gui/logo.c" \
   "$ROOT/plugin/gui/font_data.c" "$ROOT/plugin/gui/jpfont.c"
 "$WORK/test_render" "$ROOT/plugin/gui/jpfont.bin" || rc=1
+# a glyph read in 16-byte pieces must give the same pixels
+gcc -O2 -Wall -Wextra -fsanitize=address,undefined -DJF_PACKED_BYTES=16 \
+  -I"$ROOT/plugin/gui" \
+  -o "$WORK/test_render16" "$ROOT/tests/host/test_render.c" \
+  "$ROOT/plugin/gui/render.c" "$ROOT/plugin/gui/menu_view.c" \
+  "$ROOT/plugin/gui/rle16.c" \
+  "$ROOT/plugin/gui/logo.c" \
+  "$ROOT/plugin/gui/font_data.c" "$ROOT/plugin/gui/jpfont.c"
+a=$("$WORK/test_render" "$ROOT/plugin/gui/jpfont.bin" | grep "glyph pixels")
+b=$("$WORK/test_render16" "$ROOT/plugin/gui/jpfont.bin" | grep "glyph pixels") \
+  || rc=1
+if [ -z "$a" ] || [ "$a" != "$b" ]; then
+  echo "FAIL: glyph pixels differ with small pieces: '$a' vs '$b'"; rc=1
+else
+  echo "  glyphs read in 16-byte pieces: same pixels"
+fi
 echo
 
 mkdir -p "$WORK/appdb"
