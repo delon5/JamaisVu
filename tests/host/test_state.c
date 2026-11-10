@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "main.h"
 #include "state.h"
@@ -1110,7 +1111,16 @@ int main(int argc, char **argv) {
                : getenv("JV_POWERCUT_FULL") || fs.csize == 64 ? 16 : 2;
     unmount();
     memcpy(card_base, card, card_bytes);
-    snprintf(img, sizeof(img), "%s/powercut.img", outdir);
+    /* the card images fsck reads: two per cut point, 64 MB each - in
+     * memory where there is /dev/shm (a disk makes this take minutes) */
+    snprintf(img, sizeof(img), "/dev/shm/jv_powercut_%ld.img", (long)getpid());
+    {
+      FILE *probe = fopen(img, "wb");
+      if (probe)
+        fclose(probe);
+      else
+        snprintf(img, sizeof(img), "%s/powercut.img", outdir);
+    }
     snprintf(fsck_out, sizeof(fsck_out), "%s.fsck", img);
     snprintf(cmd, sizeof(cmd), "fsck.exfat -n '%s' >'%s' 2>&1", img, fsck_out);
 
@@ -1293,6 +1303,8 @@ int main(int argc, char **argv) {
           not_error);
     CHECK(n_shifts < 16 || repaired > 0, "power cut: no entry block across "
           "two sectors was ever cut (the test no longer covers that)");
+    remove(img);
+    remove(fsck_out);
     free(card_cut);
     free(card_base);
   }
