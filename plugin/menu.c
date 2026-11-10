@@ -2259,18 +2259,6 @@ static void note_buttons(int idx, int port, SceCtrlData *pad, int ret,
   if (jv_copy_from_user(&d, pad, sizeof(d)) >= 0)
     g_btn_or[k] |= neg ? ~d.buttons : d.buttons;
 }
-/* the data operations of the two reading processes (by the controller
- * reader slot): counts for the activity line, errors into the ring. Only
- * calls whose arguments and result fit the four registers: pread, pwrite
- * and lseek take a 64-bit offset on the stack (lseek returns one too), and
- * forwarding them with four words broke every positioned read of the
- * system (b8828f5 boot-looped); the async variants are undocumented. */
-#define FD_HOOK_N 3
-static tai_hook_ref_t g_fd_refs[FD_HOOK_N];
-static SceUID g_fd_hooks[FD_HOOK_N];
-static volatile uint32_t g_fd_calls[2][FD_HOOK_N], g_fd_bytes[2],
-    g_fd_errors[2], g_fd_last_err[2];
-static const char *const g_fd_names[FD_HOOK_N] = {"read", "write", "close"};
 
 #else
 #define note_buttons(idx, port, pad, ret, neg) ((void)0)
@@ -3229,19 +3217,6 @@ static int input_thread(SceSize args, void *argp) {
               log_queue(al);
               memset((void *)g_btn_calls[k], 0, sizeof(g_btn_calls[k]));
               g_btn_or[k] = g_btn_ports[k] = g_btn_blocked[k] = 0;
-              len = snprintf(al, sizeof(al), "      its files:");
-              for (int f = 0; f < FD_HOOK_N; f++)
-                if (g_fd_calls[k][f])
-                  len += snprintf(al + len, sizeof(al) - len, " %s %u",
-                                  g_fd_names[f], (unsigned)g_fd_calls[k][f]);
-              snprintf(al + len, sizeof(al) - len, "; %u KB read; %u "
-                       "errors%s0x%08X\r\n", (unsigned)(g_fd_bytes[k] >> 10),
-                       (unsigned)g_fd_errors[k],
-                       g_fd_errors[k] ? ", last " : ", last ever ",
-                       (unsigned)g_fd_last_err[k]);
-              log_queue(al);
-              memset((void *)g_fd_calls[k], 0, sizeof(g_fd_calls[k]));
-              g_fd_bytes[k] = g_fd_errors[k] = 0;
             }
           }
         }
@@ -5280,21 +5255,7 @@ static volatile uint32_t g_io_ev_w, g_io_ev_r, g_io_ev_dropped;
 static tai_hook_ref_t g_io_refs[7];
 static SceUID g_io_hooks[7] = {-1, -1, -1, -1, -1, -1, -1};
 
-static void fd_note(int idx, int fd, int size, int ret) {
-  SceUID pid = ksceKernelGetProcessId();
-  int k = pid == g_rd_pid[0] ? 0 : pid == g_rd_pid[1] ? 1 : -1;
-  (void)fd;
-  (void)size;
-  if (k < 0)
-    return;
-  g_fd_calls[k][idx]++;
-  if (ret < 0) {
-    g_fd_errors[k]++;
-    g_fd_last_err[k] = (uint32_t)ret;
-  } else if (idx == 0) {
-    g_fd_bytes[k] += (uint32_t)ret;
-  }
-}
+
 
 static int io_window(void) {
   int64_t t = g_t_resume;
@@ -5384,21 +5345,6 @@ static int io_kopen_hook(const char *path, int flags, int mode) {
   return ret;
 }
 
-#define FD_HOOK(idx, name)                                                  \
-  static int name(int fd, int a2, int a3, int a4) {                        \
-    int ret = TAI_CONTINUE(int, g_fd_refs[idx], fd, a2, a3, a4);           \
-    fd_note(idx, fd, a3, ret);                                             \
-    if (ret < 0 && io_window()) {                                          \
-      char text[48];                                                       \
-      snprintf(text, sizeof(text), "%s fd 0x%08X size %d", g_fd_names[idx], \
-               (unsigned)fd, a3);                                          \
-      io_note(7, text, 0, ret, 1);                                         \
-    }                                                                      \
-    return ret;                                                            \
-  }
-FD_HOOK(0, fd_read_hook)
-FD_HOOK(1, fd_write_hook)
-FD_HOOK(2, fd_close_hook)
 
 static void io_events_log(void) {
   static char line[200];
@@ -5457,22 +5403,9 @@ static void io_watch_install(void) {
   g_io_hooks[6] = taiHookFunctionExportForKernel(
       KERNEL_PID, &g_io_refs[6], "SceAppMgr", 0x8AF17416, 0x7240375B,
       io_sysevent_hook);
-  {
-    static const uint32_t fnids[FD_HOOK_N] = {0xFDB32293, 0x34EFD876,
-                                              0xC70B8886};
-    static const void *const ffns[FD_HOOK_N] = {fd_read_hook, fd_write_hook,
-                                                fd_close_hook};
-    int fok = 0;
-    for (int i = 0; i < FD_HOOK_N; i++) {
-      g_fd_hooks[i] = taiHookFunctionExportForKernel(
-          KERNEL_PID, &g_fd_refs[i], "SceIofilemgr", 0xF2FF276E, fnids[i],
-          ffns[i]);
-      fok += g_fd_hooks[i] >= 0;
-    }
-    snprintf(line, sizeof(line), "io watch: %d of %d data hooks (read, "
-             "write, close)\r\n", fok, FD_HOOK_N);
-    log_queue(line);
-  }
+  /* (The data calls - read, write, close, pread, lseek - are not hooked:
+   * builds that did locked the console up at boot, b8828f5 and aa0d658.
+   * Only the calls by name above are watched.) */
   snprintf(line, sizeof(line), "io watch (the game's file operations after "
            "a load): %d of 5 user hooks, kernel open %s0x%08X, system "
            "events %s0x%08X\r\n", ok,
