@@ -3911,7 +3911,10 @@ static void log_result(const char *msg) {
   n += snprintf(text + n, sizeof(text) - n, "    message: %s\r\n", msg);
   if (wn >= 0 && n < (int)sizeof(text))
     snprintf(text + n, sizeof(text) - n, "    wake-up steps written to "
-             "trace.bin: %d (last result 0x%08X)\r\n", wn, (unsigned)wret);
+             "trace.bin: %d (last result 0x%08X%s)\r\n", wn, (unsigned)wret,
+             wret == JV_WAKE_NOT_OURS
+                 ? ": the sector read back was not trace.bin's, so "
+                   "nothing was written" : "");
   log_append(text);
   trace_wake(JV_WAKE_REPORT_LOGGED);
   /* after a load the record stays open a little longer (run_and_wait):

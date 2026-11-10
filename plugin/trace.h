@@ -82,6 +82,9 @@ void trace_wake(uint8_t step);
 void trace_wake_io(int on);
 /* returns how many steps were written and the last write's result */
 int trace_wake_end(int *last_ret);
+/* last_ret when the sector read back after the wake-up did not carry this
+ * run's magic + nonce: nothing was written through the raw device */
+#define JV_WAKE_NOT_OURS ((int)0x8FFF0001)
 /* the load's file system re-read result inside the wake-up record (fs.c
  * fills it in; it goes out with the next trace_wake). Never NULL. */
 JvWakeFs *trace_wake_fs(void);

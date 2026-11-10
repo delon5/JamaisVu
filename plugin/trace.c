@@ -128,6 +128,7 @@ const char *jv_result_text(int32_t res) {
     case JV_ERR_TIMER:      return "CPU cycle counter not running";
     case JV_ERR_HW:         return "hardware did not respond";
     case JV_ERR_CRASH:      return "crashed (details in log.txt)";
+    case JV_ERR_CHECKSUM:   return "the restored memory did not match the slot's checksum";
     case JV_ERR_ARGS:       return "invalid request";
 
     case JV_ERR_SLOT_NO_SPACE: return "not enough free space (704 MB needed)";
@@ -518,6 +519,9 @@ static JvTraceSector g_wake __attribute__((aligned(64)));
 static uint32_t g_wake_rel;
 static const char *g_wake_dev;
 static int g_wake_on, g_wake_io, g_wake_writes, g_wake_ret;
+/* this wake-up: 0 the sector has not been read back yet, 1 it carries this
+ * run's magic + nonce (only then is it written), -1 it does not */
+static volatile int g_wake_checked;
 static volatile int g_wake_busy; /* raw writes in flight */
 static int64_t g_wake_t0;
 
@@ -535,6 +539,7 @@ void trace_wake_begin(const PayloadArguments *pa) {
   g_wake.wake_n = 0;
   g_wake_t0 = ksceKernelGetSystemTimeWide();
   g_wake_io = 0;
+  g_wake_checked = 0;
   g_wake_on = 1;
 }
 
@@ -569,8 +574,42 @@ void trace_wake(uint8_t step) {
   if (!g_wake_io)
     return;
   /* the payload checked magic + nonce in this very sector before the run;
-   * only it is written, through the card's raw device */
+   * only it is written, through the card's raw device. After the wake-up
+   * the device is asked once more: the sector is read back, and written
+   * only if it still carries this run's magic + nonce (the device the
+   * system gives now is then the one the payload wrote; a raw write must
+   * never land anywhere else). A read that fails is tried again at the
+   * next step; a sector that is not ours ends the writes for this run. */
+  if (g_wake_checked < 0)
+    return;
   __sync_fetch_and_add(&g_wake_busy, 1);
+  if (!g_wake_checked) {
+    JvTraceSector seen __attribute__((aligned(64)));
+    int rr;
+    SceUID rfd = ksceIoOpen(g_wake_dev, SCE_O_RDONLY, 0);
+    if (rfd < 0) {
+      g_wake_ret = rfd;
+      __sync_fetch_and_sub(&g_wake_busy, 1);
+      return;
+    }
+    rr = (int)ksceIoLseek(rfd, (SceOff)g_wake_rel * 512, SCE_SEEK_SET);
+    if (rr >= 0)
+      rr = ksceIoRead(rfd, &seen, 512);
+    ksceIoClose(rfd);
+    if (rr != 512) {
+      g_wake_ret = rr;
+      __sync_fetch_and_sub(&g_wake_busy, 1);
+      return;
+    }
+    if (memcmp(seen.magic, JV_TRACE_MAGIC, 8) != 0 ||
+        memcmp(seen.nonce, g_wake.nonce, 16) != 0) {
+      g_wake_checked = -1;
+      g_wake_ret = JV_WAKE_NOT_OURS;
+      __sync_fetch_and_sub(&g_wake_busy, 1);
+      return;
+    }
+    g_wake_checked = 1;
+  }
   SceUID fd = ksceIoOpen(g_wake_dev, SCE_O_WRONLY, 0);
   if (fd < 0) {
     g_wake_ret = fd;
