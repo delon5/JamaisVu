@@ -102,24 +102,6 @@ Already there since 2.0.0-rc1 (details in `docs/design.md`):
 - **The menu opens faster the first time.** The slot list is read in the
   background shortly after the start and after each load, instead of
   while the menu stands empty.
-- Switch files in `data/JamaisVu/` on the card, for narrowing down a
-  problem. All are off unless the file exists:
-  - `nosavedata`: saves and loads leave the games' savedata alone.
-  - `cardinplace`: a load re-reads the card in place instead of mounting
-    it afresh.
-  - `fullmem` (experimental): a save also takes the memory between the
-    mapped pages. Slots get larger; it has not shown a benefit.
-
-### Development builds only
-
-Not part of a release build:
-
-- The Diagnostics screen can dump a game's threads, repeat a read a
-  thread is stuck in, and read every file the game has open at fixed
-  places with checksums. This is what found the file problem above.
-- The dump 30 seconds after a load and the record of file calls after a
-  load are on request only (`loaddump` and `iowatch` in
-  `data/JamaisVu/`).
 
 ## 2.0.0-rc1 - 2026-11-09
 
