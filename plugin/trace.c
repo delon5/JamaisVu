@@ -418,7 +418,8 @@ out:
 
 /* ------------------------------------------------------------------------ */
 
-static int write_header(const uint8_t nonce[16]) {
+static int write_header(const uint8_t nonce[16], uint32_t mode,
+                        uint32_t debug_mode, uint32_t slot) {
   static char path[80];
   static uint8_t buf[TRACE_BYTES] __attribute__((aligned(64)));
   JvTraceSector *t = (JvTraceSector *)buf;
@@ -426,6 +427,11 @@ static int write_header(const uint8_t nonce[16]) {
   memset(buf, 0, sizeof(buf));
   memcpy(t->magic, JV_TRACE_MAGIC, 8);
   memcpy(t->nonce, nonce, 16);
+  /* the request itself: all that is left of a run whose record nothing
+   * wrote afterwards (trace_collect) */
+  t->mode = mode;
+  t->debug_mode = debug_mode;
+  t->slot = slot;
 
   jv_file_path(path, sizeof(path), TRACE_NAME);
   /* no O_TRUNC: keep the file's cluster(s) from run to run */
@@ -438,7 +444,8 @@ static int write_header(const uint8_t nonce[16]) {
   return w == (int)sizeof(buf) ? 0 : -1;
 }
 
-int trace_prepare(uint32_t *rel_lba, uint8_t nonce[16], const char **why) {
+int trace_prepare(uint32_t *rel_lba, uint8_t nonce[16], uint32_t mode,
+                  uint32_t debug_mode, uint32_t slot, const char **why) {
   static uint32_t counter;
   const char *blkdev;
 
@@ -460,7 +467,7 @@ int trace_prepare(uint32_t *rel_lba, uint8_t nonce[16], const char **why) {
     nonce[i] = x >> 24;
   }
 
-  if (write_header(nonce) < 0) {
+  if (write_header(nonce, mode, debug_mode, slot) < 0) {
     *why = "cannot write trace.bin";
     return -1;
   }
@@ -496,19 +503,34 @@ int trace_collect(char *out, int len) {
     return 0;
   int r = ksceIoRead(fd, &t, sizeof(t));
   ksceIoClose(fd);
-  if (r != (int)sizeof(t) || memcmp(t.magic, JV_TRACE_MAGIC, 8) != 0 ||
-      t.written != 1)
+  if (r != (int)sizeof(t) || memcmp(t.magic, JV_TRACE_MAGIC, 8) != 0)
     return 0;
+  if (t.written != 1) {
+    /* the header of a request (a nonce, written by trace_prepare) that
+     * nothing wrote after: the payload marks the sector once it has the
+     * card running, and every run that comes back clears it. Seen on the
+     * PCH-1000 (bc8c15c): a save request, then the console starting again
+     * 11 s later with nothing in the log about it. */
+    if (t.written != 0 || memcmp(t.nonce, zero, 16) == 0)
+      return 0;
+    snprintf(out, len, "%s%s slot=%u\r\n",
+             t.mode == JAMAISVU_MODE_LOAD ? "load" :
+             t.mode == JAMAISVU_MODE_SAVE ? "save" : "run",
+             t.debug_mode == JV_TEST_NONE ? "" : " (test)",
+             (unsigned)t.slot + 1);
+    write_header(zero, 0, 0, 0); /* consumed */
+    return 2;
+  }
 
   trace_format(out, len, &t);
-  write_header(zero); /* consumed */
+  write_header(zero, 0, 0, 0); /* consumed */
   return 1;
 }
 
 void trace_consumed(void) {
   static const uint8_t zero[16];
   if (storage_mc_root())
-    write_header(zero);
+    write_header(zero, 0, 0, 0);
 }
 
 /* ------------------------------------------------------------------------ */

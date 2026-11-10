@@ -286,7 +286,8 @@ static void test_trace(const char *mc_mount, int sd_ux0, int usb_uma0,
     ksceIoClose(fd);
   }
 
-  CHECK(trace_prepare(&rel, nonce, &why) == 0, "trace_prepare: %s", why);
+  CHECK(trace_prepare(&rel, nonce, JAMAISVU_MODE_SAVE, JV_TEST_NONE, 0,
+                      &why) == 0, "trace_prepare: %s", why);
   CHECK(rel != 0 && rel < fk_mc_sectors, "rel %u", rel);
   if (rel == 0 || rel >= fk_mc_sectors)
     return;
@@ -297,11 +298,25 @@ static void test_trace(const char *mc_mount, int sd_ux0, int usb_uma0,
   /* a second run keeps working (new nonce, same file) */
   uint32_t rel2 = 0;
   uint8_t nonce2[16];
-  CHECK(trace_prepare(&rel2, nonce2, &why) == 0 && rel2 == rel,
+  CHECK(trace_prepare(&rel2, nonce2, JAMAISVU_MODE_LOAD, JV_TEST_NONE, 4,
+                      &why) == 0 && rel2 == rel,
         "second prepare: %s (%u vs %u)", why, rel2, rel);
   CHECK(!memcmp(t->nonce, nonce2, 16), "nonce updated");
 
-  CHECK(trace_collect(out, sizeof(out)) == 0, "nothing to collect yet");
+  /* a request nothing wrote after (the console started again instead of
+   * running the payload): the next start names it, once */
+  CHECK(trace_collect(out, sizeof(out)) == 2, "request without a record");
+  printf("  request only: %s", out);
+  CHECK(strcmp(out, "load slot=5\r\n") == 0, "request named: %s", out);
+  CHECK(trace_collect(out, sizeof(out)) == 0, "request consumed");
+  /* a run that came back clears the header: nothing at the next start */
+  CHECK(trace_prepare(&rel2, nonce2, JAMAISVU_MODE_SAVE, JV_TEST_NONE, 1,
+                      &why) == 0 && rel2 == rel, "third prepare: %s", why);
+  trace_consumed();
+  CHECK(trace_collect(out, sizeof(out)) == 0, "nothing after a run that "
+        "came back");
+  CHECK(trace_prepare(&rel2, nonce2, JAMAISVU_MODE_SAVE, JV_TEST_DRYRUN, 2,
+                      &why) == 0 && rel2 == rel, "fourth prepare: %s", why);
 
   /* what the payload writes behind the OS's back */
   t->written = 1;

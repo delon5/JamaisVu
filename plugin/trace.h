@@ -15,12 +15,16 @@
 const char *jv_stage_name(uint32_t stage);
 const char *jv_result_text(int32_t res);
 
-/* Writes trace.bin with a fresh nonce and finds its sector on the card
- * (relative to the card device the OS mounts). 0 = ready. */
-int trace_prepare(uint32_t *rel_lba, uint8_t nonce[16], const char **why);
+/* Writes trace.bin with a fresh nonce and the request (mode, test, slot)
+ * and finds its sector on the card (relative to the card device the OS
+ * mounts). 0 = ready. */
+int trace_prepare(uint32_t *rel_lba, uint8_t nonce[16], uint32_t mode,
+                  uint32_t debug_mode, uint32_t slot, const char **why);
 
 /* At boot: if the last run left a record in trace.bin, formats it into
- * out, marks it consumed and returns 1. */
+ * out, marks it consumed and returns 1. 2: only the request is there -
+ * nothing wrote the record after it and the run never came back; out
+ * names the request. */
 int trace_collect(char *out, int len);
 
 /* After a normal resume (the result is logged from the arguments). */

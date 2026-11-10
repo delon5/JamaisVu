@@ -5188,7 +5188,8 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   uint32_t trel = 0;
   const char *why = "";
   alive_stop(); /* the last load's record, if still open */
-  int tok = trace_prepare(&trel, tnonce, &why) == 0;
+  int tok = trace_prepare(&trel, tnonce, (uint32_t)mode, (uint32_t)debug_mode,
+                          (uint32_t)slot, &why) == 0;
   snprintf(start, sizeof(start), "starting %s%s slot=%d build=%s payload=%s; "
            "trace.bin: %s\r\n", mode == JAMAISVU_MODE_LOAD ? "load" : "save",
            debug_mode == JV_TEST_RESET ? " (reset test)" :
@@ -5249,6 +5250,7 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   if (jv_request(mode, slot, nonce, debug_mode, trel,
                  tok ? tnonce : NULL, variant) < 0) {
     lockskip_release();
+    trace_consumed(); /* no run: the request's header is not left behind */
     toast("Could not start - the system refused to reset", 1);
     return;
   }
@@ -5928,10 +5930,23 @@ static int worker_thread(SceSize args, void *argp) {
 
   write_status();
   /* a run that never got back to the system: its trace is in trace.bin */
-  if (trace_collect(prev, sizeof(prev) - 120)) {
+  int left = trace_collect(prev, sizeof(prev) - 120);
+  if (left == 1) {
     static char text[2100];
     snprintf(text, sizeof(text), "PREVIOUS RUN DID NOT RETURN (recovered "
              "from trace.bin):\r\n    %s", prev);
+    log_append(text);
+  } else if (left == 2) {
+    /* requested, and then this start: the payload marks trace.bin as soon
+     * as it has the card running (card-auth, ~0.4 s in), a run that comes
+     * back clears it */
+    static char text[600];
+    snprintf(text, sizeof(text), "PREVIOUS REQUEST LEFT NO RECORD (from "
+             "trace.bin): %s"
+             "    it was requested, and the console started again without "
+             "coming back from it. JamaisVu's code for the sleep never ran, "
+             "or did not get as far as the Memory Card (about 0.4 s in), or "
+             "did not find trace.bin on it.\r\n", prev);
     log_append(text);
   }
   /* is the check that loads use to see whether a USB drive is back right
