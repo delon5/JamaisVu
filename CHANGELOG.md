@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **A console restart right after a save in a game that leaves the system
+  almost no memory** (PCH-1000, a homebrew title). JamaisVu's menu had to
+  take part of its memory from the kernel's own pool there and kept it
+  until the result banner had gone, about four seconds after the
+  wake-up. One second after the wake-up the system started a process,
+  the kernel had no page left for it and panicked (read from the
+  console's own kernel crash dump). The menu's memory is now given back
+  as soon as the system is awake, and for 20 seconds after a wake-up the
+  banner only takes kernel-pool memory if a megabyte stays free;
+  otherwise the banner is skipped and the log says so.
+
 - After a load on 3.60, files that were open keep their cluster cache in
   the exFAT driver (it was dropped by the re-read of the drive and not
   recreated), so reads in large files do not get slower.

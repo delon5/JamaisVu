@@ -70,6 +70,10 @@ A corrupted or tampered state is rejected with nothing changed.
 - Card transfers are split into ≤128 sectors (the original could send a wrong sector count for transfers above 255 sectors).
 - The payload clears its `.bss` at startup, and several buffer overflows are fixed.
 
+## Memory after a wake-up
+
+A kernel that cannot find a free page panics, and the console restarts. In a game that leaves the system almost nothing, the menu's memory partly comes from the kernel's own pool. So nothing of it is held across a wake-up for longer than needed: it is given back as soon as the system is awake (the new slot's picture is kept in the plugin's own data), and for 20 s after a wake-up the result banner takes kernel-pool memory only while a megabyte stays free there. If it cannot, the banner is skipped; `log.txt` has the result either way.
+
 ## What is still not guaranteed
 
 No software can promise "100 %". These are the remaining risks:

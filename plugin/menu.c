@@ -338,6 +338,11 @@ static int (*g_set_owner)(int head, int index, SceUID pid);
 static int g_render_thread_ok;
 static volatile uint32_t g_panel_seq = 1, g_panel_gen;
 static uint16_t *g_thumbs[JV_NUM_SLOTS + 1]; /* RGB565 */
+/* The new slot's picture, copied out of the menu's memory before a save:
+ * the slot info is written after the wake-up, and the menu's memory is
+ * given back as soon as the system is awake (see after_resume). */
+static uint16_t g_pending_thumb[THUMB_PX];
+static int g_pending_thumb_ok;
 static void model_clear_thumbs(void);
 
 /* The slot list: every slot that can exist (slot_total), read by the
@@ -1053,9 +1058,20 @@ static const int k_ovl_order[OVL_POOLS] = { 1, 0, 2, 3, 4, 5, 6 };
  * then user main, root contiguous last. */
 static const int k_panel_order[OVL_POOLS] = { 0, 2, 1, 3, 4, 5, 6 };
 
+/* In the 20 s after a wake-up the system starts and restarts things of
+ * its own, and a kernel that cannot find a page for them panics (see
+ * after_resume): then the menu takes memory from the kernel's pool only
+ * while a whole megabyte stays free there (the size the kernel asks for
+ * first). */
+#define OVL_ROOT_MARGIN_WAKE 0x100000
+#define OVL_WAKE_WINDOW_US 20000000
+
 static int root_margin_free(void) {
+  int64_t since = g_t_resume ? ksceKernelGetSystemTimeWide() - g_t_resume : -1;
+  uint32_t margin = since >= 0 && since < OVL_WAKE_WINDOW_US
+                        ? OVL_ROOT_MARGIN_WAKE : OVL_ROOT_MARGIN;
   SceUID t = ksceKernelAllocMemBlock("JamaisVuMargin", k_ovl_types[0],
-                                     OVL_ROOT_MARGIN, NULL);
+                                     margin, NULL);
   if (t < 0)
     return 0;
   ksceKernelFreeMemBlock(t);
@@ -1287,8 +1303,12 @@ static void overlay_release(void) {
 }
 
 static void toast(const char *msg, int is_error) {
-  if (overlay_acquire() < 0)
-    return; /* no memory for the banner; log.txt still has the result */
+  if (overlay_acquire() < 0) {
+    /* no memory for the banner; log.txt still has the result */
+    log_queue("    result banner not shown: no memory for it that the "
+              "system can spare right now\r\n");
+    return;
+  }
   strncpy(g_toast_msg, msg, sizeof(g_toast_msg) - 1);
   g_toast_msg[sizeof(g_toast_msg) - 1] = '\0';
   g_toast_err = is_error;
@@ -4703,8 +4723,13 @@ static const char *g_card_remount_root;
 static int g_card_open_files;
 static int g_card_in_place; /* forced by data/JamaisVu/cardinplace */
 
+static const uint16_t *pending_thumb(void) {
+  return g_pending_thumb_ok ? g_pending_thumb : NULL;
+}
+
 static void after_resume(void) {
   static char msg[128];
+
 
   /* the list in memory is the snapshot's after a load, and the card's
    * free space is counted anew after any wake-up: read again, once the
@@ -4714,6 +4739,21 @@ static void after_resume(void) {
 
   trace_wake_io(1);
   trace_wake(JV_WAKE_WORKER);
+
+  /* The menu's memory, taken before the run, goes back first. In a game
+   * that leaves the system almost nothing, part of it comes from the
+   * kernel's own pool, and it used to be held until the result banner
+   * had gone, ~4 s after the wake-up - while the system does its own
+   * work after a wake-up. PCH-1000, 5aa35b0, a save in FAHRENEIT (no
+   * 2 MB block free anywhere, 152 KB of the menu in the kernel's pool):
+   * 1 s after the wake-up the shell started a process, the kernel could
+   * not find a 4 KB page in ScePhyMemPartKD for its address space, and
+   * panicked (the console's own psp2core-SceKernelProcess dump:
+   * SceShell -> SceAppMgr -> SceProcessmgr -> ksceKernelCreateAddressSpace
+   * -> "Cannot allocate physical page ... Kernel Panic"). Nothing of the
+   * menu is on the screen now and the payload is done with its image;
+   * the banner takes memory again by itself, under the wake-up margin. */
+  overlay_release();
 
   /* put the clocks back to the snapshot's (or, after a save, to what they
    * were before) and record it */
@@ -4911,7 +4951,7 @@ static void after_resume(void) {
   if (g_res_mode == JAMAISVU_MODE_SAVE) {
     if (g_res_result == JV_OK) {
       trace_wake(JV_WAKE_SLOT_INFO);
-      int r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
+      int r = slot_info_write(g_res_slot, &g_pending_info, pending_thumb());
       if (r != 0) {
         /* PS TV (8fdbce8): uma0 dropped out right after the wake-up, the
          * slot info could not be written ("save failed") and the card was
@@ -4920,7 +4960,7 @@ static void after_resume(void) {
         int back = card_wait(10000);
         int r1 = r;
         if (back)
-          r = slot_info_write(g_res_slot, &g_pending_info, g_thumbs[PENDING]);
+          r = slot_info_write(g_res_slot, &g_pending_info, pending_thumb());
         snprintf(rl, sizeof(rl), "    slot info: first write %d, card %s, "
                  "second write %d\r\n", r1, back ? "back" : "still missing",
                  back ? r : r1);
@@ -5512,6 +5552,9 @@ static void do_save(int slot) {
       jv_set_display_frame(0, 0, 0, 0, 0);
     }
   }
+  g_pending_thumb_ok = g_thumbs[PENDING] != NULL;
+  if (g_pending_thumb_ok)
+    memcpy(g_pending_thumb, g_thumbs[PENDING], sizeof(g_pending_thumb));
   run_and_wait(JAMAISVU_MODE_SAVE, slot, nonce, JV_TEST_NONE,
                JV_PAYLOAD_DEFAULT);
 }
