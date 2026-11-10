@@ -55,7 +55,7 @@ Fill in the zero fields of the `"3.60"` entry in `plugin/offsets.c`:
 | `exfat_release_fnode` | SceExfatfs, text | `0x7ae9` | `UVFAT_ReleaseFnode` |
 | `exfat_cleanup_cluster_cache` | SceExfatfs, text | `0x2695` | `cleanup_cluster_cache_area` |
 | `exfat_invalidate_cluster_cache` | SceExfatfs, text | `0x2191` | `invalidate_cluster_cache_data` |
-| `exfat_free_fp_cache` | SceExfatfs, text | `0x7ebd` | `FreeFpCache` |
+| `exfat_free_fp_cache` | SceExfatfs, text | `0x7ebd` | `FreeFpCache` (still resolved and checked, no longer called: see `invalidate_file_caches()` in `plugin/fs.c`) |
 | `exfat_sfree` | SceExfatfs, text | `0x68a5` | `sfree` |
 | `exfat_write_device` | SceExfatfs, text | `0x1315c` | `UVFAT_WriteDevice` (hooked; even = ARM/Thumb flag handled by taiHEN) |
 | `exfat_read_mgmt_patch` | SceExfatfs, text | `0x140fe` | the 4-byte check inside `UVFAT_ReadManagementArea` that is replaced with two Thumb NOPs so the management area can be re-read on remount |

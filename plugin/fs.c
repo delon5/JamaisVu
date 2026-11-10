@@ -67,7 +67,8 @@ static void *(* UVFAT_GetParentFnode)(void *sharedResource, void *fileSystem,
 static int (* UVFAT_ReleaseFnode)(void *sharedResource, void *fnode);
 static int (* cleanup_cluster_cache_area)(void *drive);
 static int (* invalidate_cluster_cache_data)(void *fnode);
-static int (* FreeFpCache)(void *filep);
+static int (* FreeFpCache)(void *filep); /* resolved, no longer called:
+                                            see invalidate_file_caches() */
 static int (* sfree)(void *p, int size);
 
 static int (* clear_ncache)(void *nc, int unk);
@@ -216,13 +217,37 @@ static void ro_mask_record(void) {
   trace_wake_fs()->ro_mask = m;
 }
 
+/* Every open file's position in its cluster chain and its sector buffer's
+ * contents are forgotten; the buffer itself stays.
+ *
+ * dejavu freed the buffer here (FreeFpCache). The driver allocates it in
+ * one place only, when the file is opened (3.60 SceExfatfs text+0x7e80,
+ * called from the four handle set-ups at +0x3d16/+0x3ebc/+0x3fc2/+0x408a),
+ * and its read loop (+0xe5d0) reads every piece that is not a whole
+ * cluster-size unit into filep->alignedBuf without a look at it: a file
+ * that was open in the snapshot had no buffer after a load, and a read on
+ * it that reached the driver with a partial unit came back as
+ * 0x80010005. Most reads never do - the I/O manager's own 32 KB window
+ * turns them into whole windows - but one at a sector-aligned position
+ * into a 64-byte-aligned buffer, longer than the window, is passed down
+ * as it is, and so is the last window of a file. Catherine: Full Body's
+ * file library reads its archives exactly that way and retries a failed
+ * read for ever (0fc459c log: 53,312 bytes at 0x2809000 of Base.cpk,
+ * 0x80010005 after a load, 0xD040 bytes after a normal start, the same
+ * bytes in whole sectors fine both times).
+ *
+ * The buffer is part of the restored memory like the file itself, so it
+ * is as valid as it was when the snapshot was taken; CacheIndex = -1 is
+ * the driver's own "nothing in it" (+0xd834, +0xe648). */
 static void invalidate_file_caches(uint32_t only) {
   uint32_t num = *(uint32_t *)(g_shared_resource + g_off->sr_num_files);
   void *files = *(uintptr_t **)(g_shared_resource + g_off->sr_files);
   for (uint32_t i = 0; i < num; i++) {
     FileCache *filep = (FileCache *)(files + 0x38 * i);
     if (filep->fnode && fs_wanted(fnode_fs((void *)filep->fnode), only)) {
-      FreeFpCache(filep);
+      g_fs_notes.fp_files++;
+      if (filep->buf && filep->alignedBuf)
+        g_fs_notes.fp_bufs++;
       filep->Cluster = -2;
       filep->ClusterIndex = -1;
       filep->CacheIndex = -1;

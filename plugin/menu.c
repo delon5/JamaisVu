@@ -2873,7 +2873,7 @@ static int (*g_fd_list)(int vis, JvFdInfo *dst, SceSize max, SceSize *res);
 static void files_probe(SceUID pid) {
   static JvFdInfo list[1024];
   static JvFileInfo fi;
-  static char line[420];
+  static char line[560];
   SceSize got = 0;
   uint8_t *buf = NULL;
   SceUID blk;
@@ -2944,8 +2944,9 @@ static void files_probe(SceUID pid) {
                           ? FILES_PROBE_LEN
                           : (uint32_t)(size - at[k]);
       uint32_t head = (uint32_t)(at[k] & 0x1FF), s1 = 0, s2 = 0, ms;
+      uint32_t s2b = 0, s3 = 0;
       int64_t t0 = ksceKernelGetSystemTimeWide();
-      int r1 = ksceIoPread(guid, buf, want, (SceOff)at[k]), r2;
+      int r1 = ksceIoPread(guid, buf, want, (SceOff)at[k]), r2, r3, ok;
       ms = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
       if (r1 > 0)
         s1 = probe_sum(buf, (uint32_t)r1);
@@ -2955,13 +2956,24 @@ static void files_probe(SceUID pid) {
         uint32_t n = (uint32_t)r2 - head;
         s2 = probe_sum(buf + head, n > want ? want : n);
       }
-      if (r1 != (int)want || s1 != s2)
+      if (r2 >= (int)want)
+        s2b = probe_sum(buf, want);
+      /* the shape that failed after a load up to 0fc459c: from a sector
+       * boundary, ending inside a sector, into an aligned buffer - passed
+       * down to the exFAT driver as it is */
+      r3 = ksceIoPread(guid, buf, want, (SceOff)(at[k] - head));
+      if (r3 > 0)
+        s3 = probe_sum(buf, (uint32_t)r3);
+      ok = r1 == (int)want && s1 == s2 && r3 == (int)want && s3 == s2b;
+      if (!ok)
         wrong = 1;
       len += snprintf(line + len, sizeof(line) - len, " [0x%X%08X: 0x%X %08X "
                       "%s %u ms]", (unsigned)(at[k] >> 32), (unsigned)at[k],
-                      (unsigned)r1, (unsigned)s1,
-                      r1 == (int)want && s1 == s2 ? "ok" : "WRONG",
+                      (unsigned)r1, (unsigned)s1, ok ? "ok" : "WRONG",
                       (unsigned)ms);
+      if (!ok && len < (int)sizeof(line) - 40)
+        len += snprintf(line + len, sizeof(line) - len, "(from the sector "
+                        "boundary 0x%X)", (unsigned)r3);
     }
     snprintf(line + len, sizeof(line) - len, "\r\n");
     log_queue(line);
@@ -5061,6 +5073,10 @@ static void fs_notes_log(void) {
                (unsigned long long)e->size_now, (unsigned)e->refs);
     log_append(line);
   }
+  snprintf(line, sizeof(line), "    files open in the exFAT driver: %u, "
+           "%u of them with their sector buffer (kept; its contents "
+           "forgotten)\r\n", (unsigned)f->fp_files, (unsigned)f->fp_bufs);
+  log_append(line);
   snprintf(line, sizeof(line), "    entries nothing held open: %u files "
            "and %u folders given back without a lookup (as the kernel's "
            "reclaim does); kept and looked up: %u folders with cached "

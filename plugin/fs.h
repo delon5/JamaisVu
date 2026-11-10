@@ -122,6 +122,8 @@ typedef struct {
   uint32_t dropped, dropped_dirs;
   uint32_t kept_children; /* folder with cached entries under it */
   uint32_t kept_parent;   /* no parent, or its lock was taken */
+  uint32_t fp_files;      /* open exFAT files whose caches were reset */
+  uint32_t fp_bufs;       /* of them, with their sector buffer (kept) */
   uint32_t looked_up;     /* entries looked up on their drive */
   uint32_t dirs;             /* distinct folders seen (table may be full) */
   uint32_t parent_us, search_us; /* all lookups: folder part, file part */
