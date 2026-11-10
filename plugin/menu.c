@@ -42,7 +42,21 @@ int ksceRtcGetCurrentClockLocalTime(SceDateTime *time);
 
 enum { OP_NONE, OP_REFRESH, OP_SAVE, OP_LOAD, OP_TEST_RESET, OP_TEST_DRY,
        OP_PREPARE, OP_PREPARE_ALL, OP_TEST_DISPLAY, OP_TEST_WRITE,
-       OP_WINDOW /* thumbnails and names for the five slots on screen */ };
+       OP_WINDOW /* thumbnails and names for the five slots on screen */,
+       OP_WARM /* the slot list, read in the background, menu closed */ };
+
+/* The first opening after a start read everything it shows from the card
+ * while the menu stood empty (2.5 s in the logs: free space and slot files
+ * 0.7-1.9 s, slot info, plugin folders, game versions, then pictures and
+ * names). Now the list is read once in the background - some seconds
+ * after the start and after every wake-up of JamaisVu's own - so an
+ * opening finds it in memory: the slots are on screen at once, their
+ * pictures and names are read first, and the list is checked against the
+ * card behind that, as it always was. */
+static int g_list_ready;            /* a list read from the card is in memory */
+static volatile int g_open_refresh; /* the next refresh is an opening's */
+static volatile int64_t g_warm_due; /* when to read it in the background */
+static int g_warm_tries;
 
 #define THUMB_PX (JV_THUMB_W * JV_THUMB_H)
 #define PENDING  JV_NUM_SLOTS /* thumbnail index of the live capture */
@@ -3020,6 +3034,7 @@ static int open_menu(void) {
   g_model.progress = -1;
   model_end();
   g_menu_open = 1;
+  g_open_refresh = 1;
   start_op(OP_REFRESH, 0);
   return 0;
 }
@@ -3816,7 +3831,10 @@ static void window_load(void) {
   }
 }
 
-static void refresh_slots(void) {
+/* bg: with the menu closed (OP_WARM) - nothing that needs the menu's
+ * memory, and nothing is written (the old slot layout is moved at the
+ * first real opening). Returns 1 if the Memory Card was there. */
+static int refresh_slots(int bg) {
   static SlotInfo info;
   static int exists[JV_MAX_SLOTS], locked[JV_MAX_SLOTS];
   static MenuSlot list[JV_MAX_SLOTS];
@@ -3825,7 +3843,8 @@ static void refresh_slots(void) {
    * thumbnails showed LOADING for ~30 s in GTA: San Andreas on the PS TV) */
   uint64_t t0 = ksceKernelGetSystemTimeWide(), t;
   uint32_t ms_detect, ms_space, ms_cfg, ms_tai, ms_info = 0, ms_ver = 0,
-           ms_env = 0, ms_names;
+           ms_env = 0, ms_names = 0, ms_first = 0;
+  int fast = 0, changed = 1;
 #define JV_LAP(var) do { uint64_t _n = ksceKernelGetSystemTimeWide(); \
     var = (uint32_t)((_n - t) / 1000); t = _n; } while (0)
 #define JV_ADD(var) do { uint64_t _n = ksceKernelGetSystemTimeWide(); \
@@ -3838,7 +3857,7 @@ static void refresh_slots(void) {
   /* slots laid out the old way (slotN.bin in data/JamaisVu): into their
    * folders, once per start */
   static int migrated;
-  if (mc && !migrated) {
+  if (mc && !migrated && !bg) {
     int failed = 0;
     int moved = slots_migrate(&failed);
     migrated = 1;
@@ -3856,6 +3875,19 @@ static void refresh_slots(void) {
       storage_savedata_flags() != 0 && !jv_switch_file("nosavedata");
   g_model.refreshing = 1; /* thumbnails still loading */
   model_end();
+
+  /* an opening, and a list read before is in memory (and on screen): its
+   * pictures and names first, the check against the card after them */
+  if (!bg && g_open_refresh && g_list_ready && mc) {
+    model_begin();
+    window_fill_locked();
+    model_end();
+    window_load();
+    fast = 1;
+    JV_LAP(ms_first);
+  }
+  if (!bg)
+    g_open_refresh = 0;
 
   /* which slots can exist: those with a file, plus as many new ones as
    * the free space allows (slot_policy.h) */
@@ -3933,6 +3965,8 @@ static void refresh_slots(void) {
 
   /* the list, then the five on screen (thumbnails follow) */
   model_begin();
+  changed = g_total != total || memcmp(g_slot_list, list, sizeof(list)) ||
+            memcmp(g_list_has_thumb, has_thumb, sizeof(has_thumb));
   memcpy(g_slot_list, list, sizeof(list));
   memcpy(g_list_has_thumb, has_thumb, sizeof(has_thumb));
   g_total = total;
@@ -3950,11 +3984,28 @@ static void refresh_slots(void) {
     log_queue(line);
   }
 
-  window_load(); /* thumbnails and names for the five on screen */
-  JV_LAP(ms_names);
+  /* thumbnails and names for the five on screen - unless they were read
+   * first and the card had nothing new */
+  if (!bg && (!fast || changed || g_model.refreshing)) {
+    window_load();
+    JV_LAP(ms_names);
+  }
+  g_list_ready = mc != NULL;
 
   uint32_t total_ms = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
-  if (total_ms >= 2000) {
+  if (bg || fast) {
+    static char line[300];
+    snprintf(line, sizeof(line), "slot list %s: %u ms - pictures and names "
+             "first %u, card check %u, free space + %d slot files %u, config "
+             "files %u, tai folders %u, slot info %u, game versions %u, slot "
+             "environment %u, pictures and names again %u%s\r\n",
+             bg ? "read in the background" : "at the opening, from memory",
+             (unsigned)total_ms, (unsigned)ms_first, (unsigned)ms_detect, n,
+             (unsigned)ms_space, (unsigned)ms_cfg, (unsigned)ms_tai,
+             (unsigned)ms_info, (unsigned)ms_ver, (unsigned)ms_env,
+             (unsigned)ms_names, mc ? "" : " (no Memory Card)");
+    log_queue(line);
+  } else if (total_ms >= 2000) {
     static char line[300];
     char tid[16];
     fg_title(tid, sizeof(tid));
@@ -3970,6 +4021,7 @@ static void refresh_slots(void) {
   }
 #undef JV_LAP
 #undef JV_ADD
+  return mc != NULL;
 }
 
 /* Why save/load cannot run right now, or NULL */
@@ -4171,6 +4223,12 @@ static int g_card_in_place; /* forced by data/JamaisVu/cardinplace */
 
 static void after_resume(void) {
   static char msg[128];
+
+  /* the list in memory is the snapshot's after a load, and the card's
+   * free space is counted anew after any wake-up: read again, once the
+   * card is back and settled */
+  g_warm_tries = 0;
+  g_warm_due = now_us() + 25000000;
 
   trace_wake_io(1);
   trace_wake(JV_WAKE_WORKER);
@@ -5232,7 +5290,7 @@ static void do_prepare(int all, int slot) {
   g_progress_note = "";
 
   for (int i = all ? 0 : slot; i < (all ? JV_MAX_SLOTS : slot + 1); i++) {
-    refresh_slots(); /* current free space -> which slots may be created */
+    refresh_slots(0); /* current free space -> which slots may be created */
     ksceKernelLockMutex(g_mtx, 1, NULL);
     int total = g_total;
     int prepared = g_slot_list[i].prepared;
@@ -5343,7 +5401,12 @@ static int worker_thread(SceSize args, void *argp) {
 
     switch (g_op) {
       case OP_REFRESH:
-        refresh_slots();
+        refresh_slots(0);
+        break;
+      case OP_WARM:
+        /* no card yet (usbmc mounts it late): again in a while */
+        if (!refresh_slots(1) && g_warm_tries++ < 6)
+          g_warm_due = now_us() + 10000000;
         break;
       case OP_SAVE:
         do_save(g_op_slot);
@@ -5376,7 +5439,7 @@ static int worker_thread(SceSize args, void *argp) {
 
     /* after a job that changed slots (not after a refresh itself) */
     if (g_menu_open && g_op != OP_REFRESH && g_op != OP_WINDOW)
-      refresh_slots();
+      refresh_slots(0);
 
     ksceKernelLockMutex(g_mtx, 1, NULL);
     if (g_next_op != OP_NONE) {
@@ -5823,6 +5886,16 @@ static int just_woke(void) {
   return w && ksceKernelGetSystemTimeWide() - w < 15000000;
 }
 
+/* io thread: the slot list in the background, when it is due and nothing
+ * else is going on (the read itself runs on the worker) */
+static void warm_watch(void) {
+  int64_t due = g_warm_due;
+  if (!due || now_us() < due || g_menu_open || g_busy || just_woke())
+    return;
+  g_warm_due = 0;
+  start_op(OP_WARM, 0);
+}
+
 static void card_watch(void) {
   static int64_t next;
   static int missing, failures;
@@ -5867,6 +5940,7 @@ static int io_thread(SceSize args, void *argp) {
                                     SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
                                     &out, &timeout);
     card_watch();
+    warm_watch();
     mount_events_log();
     io_events_log();
     if (w < 0)
@@ -5901,6 +5975,7 @@ int menu_init(const char *status_text) {
 
   g_status_text = status_text;
   g_perf_since = prof_now();
+  g_warm_due = now_us() + 12000000; /* the slot list, once the system is up */
 
   if (jv_disp_type() == JV_DISP_HDMI) {
     g_dolce = 1;
