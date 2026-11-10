@@ -2372,6 +2372,9 @@ static int (*g_copy_pid)(SceUID pid, void *dst, uintptr_t src, SceSize len);
  * a module's code (a rough backtrace: the game's own functions show as
  * xrd...+offset, library frames by name), and the code around its pc as
  * hex, so a loop a thread spins in can be read offline. */
+static uint32_t g_scan_own[3]; /* the scan's first return addresses into
+                                  the game's own code (not Sce* modules) */
+
 static uint32_t thread_stack_scan(SceUID pid, const char *name, uint32_t sp,
                                   uint32_t pc) {
   static uint32_t words[256];
@@ -2380,6 +2383,8 @@ static uint32_t thread_stack_scan(SceUID pid, const char *name, uint32_t sp,
   int len, hits = 0, n_words;
   uint32_t first_own = 0; /* first return address outside the Sce* modules */
   uint32_t room;
+  int n_own = 0;
+  g_scan_own[0] = g_scan_own[1] = g_scan_own[2] = 0;
   if (!g_copy_pid || !sp)
     return 0;
   memset(words, 0, sizeof(words));
@@ -2414,8 +2419,13 @@ static uint32_t thread_stack_scan(SceUID pid, const char *name, uint32_t sp,
              (unsigned)(w - (uintptr_t)text));
     len += snprintf(line + len, sizeof(line) - len, "%s", where);
     hits++;
-    if (!first_own && strncmp(mod, "Sce", 3) != 0)
-      first_own = w;
+    /* a return address into Thumb code is odd; an even value that falls
+     * in the module is a pointer to its data */
+    if ((w & 1) && n_own < 3 && strncmp(mod, "Sce", 3) != 0) {
+      if (!first_own)
+        first_own = w;
+      g_scan_own[n_own++] = w;
+    }
   }
   snprintf(line + len, sizeof(line) - len, "%s\r\n",
            hits ? "" : " nothing recognised");
@@ -2529,6 +2539,10 @@ static void thread_dump(SceUID pid, const char *why) {
   static int looked_up;
   SceUID active[6], extra[6];
   int n_active = 0, n_extra = 0;
+  static struct {
+    uint64_t run;
+    uint32_t released, preempted;
+  } act0[96];
   char tid[16];
   int n = 0;
   uint32_t main_sp = 0, main_pc = 0;
@@ -2584,6 +2598,11 @@ static void thread_dump(SceUID pid, const char *why) {
                (unsigned)info.status, (unsigned)info.waitType,
                (unsigned)info.waitId, (int)info.currentPriority,
                (int)info.currentCpuId);
+      memset(&act0[i], 0, sizeof(act0[i]));
+      memcpy(&act0[i].run, &info.runClocks,
+             sizeof(info.runClocks) < 8 ? sizeof(info.runClocks) : 8);
+      act0[i].released = (uint32_t)info.threadReleaseCount;
+      act0[i].preempted = (uint32_t)info.threadPreemptCount;
       if ((info.status & (1 | 2 | 4)) && n_active < 6)
         active[n_active++] = ids[i];
       /* a game's file and sound middleware (CRI) and its loading
@@ -2668,14 +2687,42 @@ static void thread_dump(SceUID pid, const char *why) {
       continue;
     for (int e = 0; e < 2; e++)
       if ((r.entry[e].cpsr & 0x1F) == 0x10) {
-        uint32_t own = thread_stack_scan(pid, info.name, r.entry[e].sp, 0);
-        if (own)
-          thread_code_calls(pid, info.name, own);
+        uint32_t own[2];
+        thread_stack_scan(pid, info.name, r.entry[e].sp, 0);
+        own[0] = g_scan_own[0];
+        own[1] = g_scan_own[1];
+        for (int k = 0; k < 2; k++)
+          if (own[k])
+            thread_code_calls(pid, info.name, own[k]);
       }
   }
   if (main_sp)
     thread_stack_scan(pid, "main thread", main_sp, 0);
   (void)main_pc;
+  /* What every thread did in a stretch of time since its line above (the
+   * stacks and code took a few seconds): the time it ran, how often it
+   * gave the cpu up to wait, how often it was pushed off. A thread that
+   * should tick 60 times a second and shows nothing is asleep for good. */
+  ksceKernelDelayThread(1000000);
+  for (int i = 0; i < n && i < 96; i++) {
+    SceKernelThreadInfo info;
+    uint64_t run = 0;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    if (ksceKernelGetThreadInfo(ids[i], &info) < 0)
+      continue;
+    info.name[sizeof(info.name) - 1] = '\0';
+    memcpy(&run, &info.runClocks,
+           sizeof(info.runClocks) < 8 ? sizeof(info.runClocks) : 8);
+    snprintf(line, sizeof(line), "      since then: %-24s ran %u, waited "
+             "%u times, pushed off %u times\r\n", info.name,
+             (unsigned)(run - act0[i].run),
+             (unsigned)((uint32_t)info.threadReleaseCount - act0[i].released),
+             (unsigned)((uint32_t)info.threadPreemptCount -
+                        act0[i].preempted));
+    log_queue(line);
+    log_queue_drain();
+  }
   /* the process's modules */
   {
     static SceUID mods[64];
@@ -4625,6 +4672,25 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
                "screen; JamaisVu's own work after the wake-up done at %d ms"
                "\r\n", (int)((t_after - g_t_resume) / 1000));
     log_append(tl);
+    {
+      /* The system clock from the last suspend event to the first resume
+       * event. After a load the suspend events are the snapshot's own
+       * (its save's): the clock a restored game's timers and sleeps run
+       * on must go on from there, as it does after the save itself. */
+      uint32_t cnt = g_ev_n < JV_EV_MAX ? g_ev_n : JV_EV_MAX;
+      int64_t last_s = 0;
+      for (uint32_t i = 0; i < cnt; i++)
+        if (!(g_ev_id[i] & 0x80000000u))
+          last_s = g_ev_last[i] > g_ev_t[i] ? g_ev_last[i] : g_ev_t[i];
+      if (last_s && g_ev_r0) {
+        snprintf(tl, sizeof(tl), "    system clock across the sleep: %d ms "
+                 "from the last suspend event to the first resume event; "
+                 "now %u s since boot\r\n",
+                 (int)((g_ev_r0 - last_s) / 1000),
+                 (unsigned)(ksceKernelGetSystemTimeWide() / 1000000));
+        log_append(tl);
+      }
+    }
     if (g_res_mode == JAMAISVU_MODE_SAVE && g_ev_n) {
       /* After a load the restored image holds its own save's events: not
        * shown. */
@@ -5423,8 +5489,6 @@ static void io_note(int kind, const char *upath, int flags, int ret,
       }
     if (!keep)
       return;
-  } else if (ret >= 0 && !strncmp(path, "app0:", 5)) {
-    return;
   }
   uint32_t w;
   do { /* a slot is reserved only when there is one: every reserved slot
