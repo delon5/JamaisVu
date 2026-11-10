@@ -61,7 +61,7 @@ A corrupted or tampered state is rejected with nothing changed.
 
 **Storage that is away during the wake-up is not touched.** With a storage plugin, the drives behind ux0 and uma0 come back from the wake-up at their own pace:
 - **A USB drive as ux0** (usbmc's PSVSD or USB stick) is only re-read once one sector of it can be read again. JamaisVu waits up to 3 s during the wake-up, and up to 20 s more afterwards. Until then it stays exactly as it was and read-only. Re-reading it too early failed and left ux0 unusable: the game went black, VitaShell reported its data as corrupt, and the PS TV restarted.
-- **The Memory Card on uma0/xmc0** is not re-read in place. It is mounted afresh once the wake-up is over. During the first 15 s after JamaisVu's own wake-ups, the **card guard** refuses the system storage driver's attempt to unmount it.
+- **The Memory Card on uma0/xmc0** is not re-read in place. It is mounted afresh once the wake-up is over. During the first 15 s after JamaisVu's own wake-ups, the **card guard** refuses the system storage driver's attempt to unmount it. The same goes for ux0 when a storage plugin has put it on another drive: after a long save or load the driver sometimes unmounts it as if the card had been pulled out, and the system then announces a restart, although neither drive was removed.
 - **A drive that disappears** while the wake-up checks the drives (its mount is being taken down) is left alone, neither remounted nor read.
 
 **Unsupported firmware is never patched.** The original hooked 3.65 offsets on every firmware. On 3.60 that means patching random instructions inside the filesystem driver.

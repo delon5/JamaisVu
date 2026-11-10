@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **"The memory card has been removed" and a restart right after a save
+  or load, with ux0 on a USB drive** (PCH-1000 with usbmc). About a
+  second after the wake-up the system's storage driver unmounted ux0 as
+  if the card had been pulled out, although the card and the USB drive
+  were both in place and working. It happened after long saves and
+  loads (about a minute and more). The unmount is now refused in the 15
+  seconds after JamaisVu's own wake-ups, as it already was for the card
+  itself.
+
 - **A console restart right after a save in a game that leaves the system
   almost no memory** (PCH-1000, a homebrew title). JamaisVu's menu had to
   take part of its memory from the kernel's own pool there and kept it

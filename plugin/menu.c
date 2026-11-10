@@ -6067,10 +6067,14 @@ static volatile uint32_t g_mount_ev_w, g_mount_ev_r;
  * while 0xF00/0xE00 is the card: the card was never removed. */
 static uintptr_t g_sdstor_lo, g_sdstor_hi;
 static volatile int g_card_on[2]; /* 0xF00, 0xE00 are the card (cached) */
+/* ux0 (0x800) is on another drive than the card (usbmc, StorageMgr) */
+static volatile int g_ux0_moved;
 
 static void mount_card_flags_update(void) {
   g_card_on[0] = storage_mount_is_card(0xF00);
   g_card_on[1] = storage_mount_is_card(0xE00);
+  g_ux0_moved = !storage_mount_is_card(0x800) &&
+                (g_card_on[0] || g_card_on[1]);
 }
 
 static void mount_note(int unmount, int id, int arg, int ret, uintptr_t lr) {
@@ -6350,7 +6354,7 @@ static void mount_events_log(void) {
     snprintf(line, sizeof(line), "mount table: %s 0x%X (%s) arg %d -> 0x%08X,"
              " called from %s+0x%X (process 0x%X), %d ms after the last "
              "wake-up\r\n", g_mount_ev[k].unmount == 2
-                 ? "REFUSED unmount (the card stays mounted)"
+                 ? "REFUSED unmount (the drive stays mounted)"
                  : g_mount_ev[k].unmount ? "unmount" : "mount", id,
              id == 0x800 ? "ux0:" : id == 0xF00 ? "uma0:" : "xmc0:",
              g_mount_ev[k].arg, (unsigned)g_mount_ev[k].ret, name,
@@ -6372,9 +6376,21 @@ static int umount_hook(int id, int a2, int a3, int a4) {
    * time: the PCH-1000 restarted by itself when rebooted from Settings) */
   int64_t since = g_t_resume ? ksceKernelGetSystemTimeWide() - g_t_resume
                              : -1;
+  /* ...and its unmount of ux0 when a storage plugin has put ux0 on
+   * another drive. PCH-1000 (usbmc, ux0 on a USB drive, the card on
+   * uma0), 8419419: 1014 ms after the wake-up from a save SceSdstor+0x40A3
+   * force-unmounted 0x800, and the system showed "The memory card has been
+   * removed ... This system will restart" - with the card working (the
+   * log, the slot info and trace.bin were written to it afterwards) and
+   * the USB drive in place. Why the driver does it is not established
+   * (in its own mount table ux0 is the card, which the payload has
+   * restarted; SceSdstor has not been read). Seen after payload runs of
+   * 58-87 s, never after the ~40 runs of 33-55 s in the logs. Neither
+   * drive was removed: refused in the same 15 s. */
   if (since >= 0 && since < 15000000 &&
       g_sdstor_hi && lr >= g_sdstor_lo && lr < g_sdstor_hi &&
-      ((id == 0xF00 && g_card_on[0]) || (id == 0xE00 && g_card_on[1]))) {
+      ((id == 0xF00 && g_card_on[0]) || (id == 0xE00 && g_card_on[1]) ||
+       (id == 0x800 && g_ux0_moved))) {
     mount_note(2, id, a2, 0, lr); /* refused, reported as done */
     return 0;
   }
