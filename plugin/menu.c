@@ -2372,21 +2372,34 @@ static int (*g_copy_pid)(SceUID pid, void *dst, uintptr_t src, SceSize len);
  * a module's code (a rough backtrace: the game's own functions show as
  * xrd...+offset, library frames by name), and the code around its pc as
  * hex, so a loop a thread spins in can be read offline. */
-static void thread_stack_scan(SceUID pid, const char *name, uint32_t sp,
-                              uint32_t pc) {
+static uint32_t thread_stack_scan(SceUID pid, const char *name, uint32_t sp,
+                                  uint32_t pc) {
   static uint32_t words[256];
   static char line[520];
   static uint8_t code[128];
-  int len, hits = 0;
+  int len, hits = 0, n_words;
+  uint32_t first_own = 0; /* first return address outside the Sce* modules */
+  uint32_t room;
   if (!g_copy_pid || !sp)
-    return;
+    return 0;
   memset(words, 0, sizeof(words));
-  if (g_copy_pid(pid, words, sp & ~3u, sizeof(words)) < 0 &&
-      g_copy_pid(pid, words, sp & ~3u, 256) < 0)
-    return;
+  /* a stack ends at a page boundary: nothing is read past the page the
+   * stack pointer is in unless that works (a thread deep in a wait has
+   * only a few words left above its sp) */
+  sp &= ~3u;
+  room = 0x1000 - (sp & 0xFFF);
+  if (g_copy_pid(pid, words, sp, sizeof(words)) >= 0) {
+    n_words = 256;
+  } else {
+    if (room > sizeof(words))
+      room = sizeof(words);
+    if (room < 8 || g_copy_pid(pid, words, sp, room) < 0)
+      return 0;
+    n_words = (int)(room / 4);
+  }
   len = snprintf(line, sizeof(line), "      %s stack (sp 0x%08X):", name,
                  (unsigned)sp);
-  for (int i = 0; i < 256 && hits < 14 && len < (int)sizeof(line) - 48;
+  for (int i = 0; i < n_words && hits < 14 && len < (int)sizeof(line) - 48;
        i++) {
     char where[48];
     const void *text = NULL;
@@ -2401,22 +2414,104 @@ static void thread_stack_scan(SceUID pid, const char *name, uint32_t sp,
              (unsigned)(w - (uintptr_t)text));
     len += snprintf(line + len, sizeof(line) - len, "%s", where);
     hits++;
+    if (!first_own && strncmp(mod, "Sce", 3) != 0)
+      first_own = w;
   }
   snprintf(line + len, sizeof(line) - len, "%s\r\n",
            hits ? "" : " nothing recognised");
   log_queue(line);
   log_queue_drain();
   if (!pc)
-    return;
+    return first_own;
   memset(code, 0, sizeof(code));
   if (g_copy_pid(pid, code, (pc & ~1u) - 64, sizeof(code)) < 0)
-    return;
+    return first_own;
   len = snprintf(line, sizeof(line), "      %s code at pc-64 (0x%08X, "
                  "%s): ", name, (unsigned)((pc & ~1u) - 64),
                  (pc & 1) ? "thumb" : "arm");
   for (int i = 0; i < 128 && len < (int)sizeof(line) - 4; i++)
     len += snprintf(line + len, sizeof(line) - len, "%02X", code[i]);
   snprintf(line + len, sizeof(line) - len, "\r\n");
+  log_queue(line);
+  log_queue_drain();
+  return first_own;
+}
+
+/* Diagnostics: the code of the game around one of its return addresses
+ * (0x240 bytes, as hex, to be disassembled offline), and what it calls
+ * from there: every Thumb bl/blx in it, with the target followed through
+ * the module's import stub (movw ip / movt ip / bx ip) to the library
+ * function behind it. A thread that polls something for ever shows here
+ * what it polls. */
+#define CODE_BEFORE 0x200
+#define CODE_LEN    0x240
+static void thread_code_calls(SceUID pid, const char *name, uint32_t anchor) {
+  static uint8_t code[CODE_LEN];
+  static char line[420];
+  uint32_t base;
+  int len, calls = 0;
+  if (!g_copy_pid || !anchor)
+    return;
+  base = (anchor & ~1u) - CODE_BEFORE;
+  memset(code, 0, sizeof(code));
+  if (g_copy_pid(pid, code, base, sizeof(code)) < 0)
+    return;
+  {
+    char where[48];
+    where_is(pid, anchor, where, sizeof(where));
+    snprintf(line, sizeof(line), "      %s code before %s (from 0x%08X, "
+             "thumb):\r\n", name, where, (unsigned)base);
+    log_queue(line);
+  }
+  for (int o = 0; o < CODE_LEN; o += 128) {
+    len = snprintf(line, sizeof(line), "        %03X: ", o);
+    for (int i = o; i < o + 128 && i < CODE_LEN; i++)
+      len += snprintf(line + len, sizeof(line) - len, "%02X", code[i]);
+    snprintf(line + len, sizeof(line) - len, "\r\n");
+    log_queue(line);
+    log_queue_drain();
+  }
+  len = snprintf(line, sizeof(line), "      %s calls:", name);
+  for (int o = 0; o + 4 <= CODE_LEN && calls < 48; o += 2) {
+    uint32_t hw1 = code[o] | (code[o + 1] << 8);
+    uint32_t hw2 = code[o + 2] | (code[o + 3] << 8);
+    uint32_t s1, i1, i2, off, at, target, stub[3];
+    char where[48];
+    int blx;
+    if ((hw1 & 0xF800) != 0xF000 || (hw2 & 0xC000) != 0xC000)
+      continue;
+    blx = !(hw2 & 0x1000);
+    if (blx && (hw2 & 1))
+      continue;
+    s1 = (hw1 >> 10) & 1;
+    i1 = !(((hw2 >> 13) & 1) ^ s1);
+    i2 = !(((hw2 >> 11) & 1) ^ s1);
+    off = (s1 << 24) | (i1 << 23) | (i2 << 22) | ((hw1 & 0x3FF) << 12) |
+          ((hw2 & 0x7FF) << 1);
+    if (s1)
+      off |= 0xFE000000u;
+    at = base + (uint32_t)o;
+    target = (blx ? ((at + 4) & ~3u) : at + 4) + off;
+    /* through an import stub to the function behind it */
+    if (blx && g_copy_pid(pid, stub, target, sizeof(stub)) >= 0 &&
+        (stub[0] & 0xFFF0F000u) == 0xE300C000u &&
+        (stub[1] & 0xFFF0F000u) == 0xE340C000u && stub[2] == 0xE12FFF1Cu)
+      target = (((stub[0] >> 4) & 0xF000) | (stub[0] & 0xFFF)) |
+               ((((stub[1] >> 4) & 0xF000) | (stub[1] & 0xFFF)) << 16);
+    where_is(pid, target, where, sizeof(where));
+    if (where[0] == '0')
+      continue; /* not in any module: not a call */
+    if (len > (int)sizeof(line) - 80) {
+      snprintf(line + len, sizeof(line) - len, "\r\n");
+      log_queue(line);
+      log_queue_drain();
+      len = snprintf(line, sizeof(line), "       ");
+    }
+    len += snprintf(line + len, sizeof(line) - len, " %03X>%s", o, where);
+    calls++;
+    o += 2; /* (the second half of this instruction) */
+  }
+  snprintf(line + len, sizeof(line) - len, "%s\r\n", calls ? "" : " none");
   log_queue(line);
   log_queue_drain();
 }
@@ -2432,8 +2527,8 @@ static void thread_dump(SceUID pid, const char *why) {
   static SceUID ids[96];
   static char line[200];
   static int looked_up;
-  SceUID active[6];
-  int n_active = 0;
+  SceUID active[6], extra[6];
+  int n_active = 0, n_extra = 0;
   char tid[16];
   int n = 0;
   uint32_t main_sp = 0, main_pc = 0;
@@ -2491,6 +2586,13 @@ static void thread_dump(SceUID pid, const char *why) {
                (int)info.currentCpuId);
       if ((info.status & (1 | 2 | 4)) && n_active < 6)
         active[n_active++] = ids[i];
+      /* a game's file and sound middleware (CRI) and its loading
+       * threads, also while they wait: what they wait in */
+      else if (n_extra < 6 && (!strncmp(info.name, "CRI FS File", 11) ||
+                               !strncmp(info.name, "CRI Server", 10) ||
+                               !strncmp(info.name, "FileSeq", 7) ||
+                               !strncmp(info.name, "pakDev", 6)))
+        extra[n_extra++] = ids[i];
     }
     log_queue(line);
     if (g_thread_regs) {
@@ -2541,12 +2643,39 @@ static void thread_dump(SceUID pid, const char *why) {
       JvThreadRegs r;
       if (thread_regs(active[a], &r) >= 0)
         for (int e = 0; e < 2; e++)
-          if ((r.entry[e].cpsr & 0x1F) == 0x10)
-            thread_stack_scan(pid, info.name, r.entry[e].sp, r.entry[e].pc);
+          if ((r.entry[e].cpsr & 0x1F) == 0x10) {
+            char mod[48];
+            uint32_t own = thread_stack_scan(pid, info.name, r.entry[e].sp,
+                                             r.entry[e].pc);
+            /* the code it is in if that is the game's own, and the code
+             * that called it */
+            where_is(pid, r.entry[e].pc, mod, sizeof(mod));
+            if (mod[0] != '0' && strncmp(mod, "Sce", 3) != 0)
+              thread_code_calls(pid, info.name, r.entry[e].pc + 0x40);
+            if (own)
+              thread_code_calls(pid, info.name, own);
+          }
     }
   }
+  for (int a = 0; a < n_extra && g_thread_regs; a++) {
+    SceKernelThreadInfo info;
+    JvThreadRegs r;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    ksceKernelGetThreadInfo(extra[a], &info);
+    info.name[sizeof(info.name) - 1] = '\0';
+    if (thread_regs(extra[a], &r) < 0)
+      continue;
+    for (int e = 0; e < 2; e++)
+      if ((r.entry[e].cpsr & 0x1F) == 0x10) {
+        uint32_t own = thread_stack_scan(pid, info.name, r.entry[e].sp, 0);
+        if (own)
+          thread_code_calls(pid, info.name, own);
+      }
+  }
   if (main_sp)
-    thread_stack_scan(pid, "main thread", main_sp, main_pc);
+    thread_stack_scan(pid, "main thread", main_sp, 0);
+  (void)main_pc;
   /* the process's modules */
   {
     static SceUID mods[64];
