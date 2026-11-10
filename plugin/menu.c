@@ -2641,13 +2641,19 @@ static void probe_vnode(const char *what, uintptr_t vp) {
   }
 }
 
-static void probe_file_state(SceUID pid, SceUID fd, SceUID guid) {
+/* < 0: the descriptor is not an open file (the I/O manager's own look-up
+ * checks the object's kind; nothing is read out of an object it refuses) */
+static int probe_file_state(SceUID pid, SceUID fd, SceUID guid) {
   static JvFileInfo fi;
   static char line[200];
   void *obj = NULL;
-  if (g_file_info) {
+  if (!g_file_info)
+    return -1;
+  {
     memset(&fi, 0, sizeof(fi));
     int r = g_file_info(fd, pid, &fi);
+    if (r < 0)
+      return r;
     /* rest[]: +0x808 the position, +0x818 the size the file table has */
     snprintf(line, sizeof(line), "        open file (0x%08X): position "
              "0x%08X%08X, size 0x%08X%08X, other %08X %08X %08X %08X\r\n",
@@ -2659,7 +2665,7 @@ static void probe_file_state(SceUID pid, SceUID fd, SceUID guid) {
   }
   if (!g_guid_refer || !g_guid_release || g_guid_refer(guid, &obj) < 0 ||
       !obj)
-    return;
+    return 0;
   uintptr_t f = (uintptr_t)obj + 8; /* the open file, after the object's
                                        header */
   probe_words("file object", f, 14);
@@ -2669,6 +2675,7 @@ static void probe_file_state(SceUID pid, SceUID fd, SceUID guid) {
     probe_vnode("the entry under it", *(uintptr_t *)(vp + 0x98));
   g_guid_release(guid);
   log_queue_drain();
+  return 0;
 }
 
 /* Is it one read again and again, or a file being read through? The
@@ -2764,7 +2771,10 @@ static void read_probe(SceUID pid, const JvReadProbe *p, const char *why) {
     log_queue(line);
     return;
   }
-  probe_file_state(pid, p->fd, guid);
+  if (probe_file_state(pid, p->fd, guid) < 0) {
+    log_queue("        the descriptor is not an open file here\r\n");
+    return;
+  }
   blk = ksceKernelAllocMemBlock("JamaisVuProbe", 0x1020D006,
                                 (a_size + 0xFFF) & ~0xFFFu, NULL);
   if (blk < 0 || ksceKernelGetMemBlockBase(blk, (void **)&buf) < 0 || !buf) {
