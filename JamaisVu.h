@@ -159,6 +159,13 @@ typedef struct {
   /* load: directory entries of the savedata folders that an earlier,
    * interrupted load had left half written, and that were put right */
   uint32_t savedata_repaired;
+  /* save: 1 = the snapshot also takes the memory between the lowest and
+   * the highest page that a translation table maps, in DRAM and in VRAM
+   * each, not only the mapped pages (data/JamaisVu/fullmem; experiment).
+   * Memory a process has handed to the codec engine is taken out of its
+   * translation table while a decoder uses it; a snapshot of the mapped
+   * pages alone brings a game back without it. */
+  uint32_t save_unmapped;
 } PayloadArguments;
 
 #define JV_SUM_NONE     0 /* no checksum in this slot (format 2 or 3) */

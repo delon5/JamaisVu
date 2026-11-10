@@ -265,6 +265,26 @@ static void get_dram_vram_segments(void) {
     l1_page_table(pargs->ttbs[num], 0, split);
 
   coalesce_segments();
+
+  /* save_unmapped: everything from the lowest to the highest mapped page,
+   * in VRAM and in DRAM each (both are one piece of RAM, so whatever lies
+   * between two mapped pages is RAM too; nothing below the first or above
+   * the last mapped page is touched). */
+  if (pargs->save_unmapped && n_segments > 0) {
+    uint32_t lo[2] = {0, 0}, hi[2] = {0, 0};
+    for (int i = 0; i < n_segments; i++) {
+      int k = segments[i].addr >= DRAM_START;
+      uint32_t end = segments[i].addr + segments[i].size;
+      if (!hi[k] || segments[i].addr < lo[k])
+        lo[k] = segments[i].addr;
+      if (end > hi[k])
+        hi[k] = end;
+    }
+    n_segments = 0;
+    for (int k = 0; k < 2; k++)
+      if (hi[k])
+        add_segment(lo[k], hi[k] - lo[k]);
+  }
 }
 
 /* A segment is only acceptable if save_state() could have produced it. */

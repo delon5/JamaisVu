@@ -93,6 +93,7 @@ JV_PIN(savedata_rewritten, 2184);
 JV_PIN(data_sum_state, 2188);
 JV_PIN(data_sum_ms, 2192);
 JV_PIN(savedata_repaired, 2196);
+JV_PIN(save_unmapped, 2200);
 _Static_assert(sizeof(PayloadArguments) >= 2084,
                "PayloadArguments shrank: old snapshots would break");
 
@@ -162,10 +163,16 @@ typedef struct {
 #define L2_PA       0x50004000u
 #define FLAG_PA     0x40000100u
 
+/* DRAM from 0x40204000 to 0x40300000 is RAM that no translation table
+ * maps (memory handed to the codec engine is like that): fill_pattern
+ * leaves it alone, the save_unmapped test fills it itself */
+#define GAP_PA      0x40204000u
+#define GAP_END     0x40300000u
+
 static Region regions[] = {
-  { 0x40000000u, 0x204000, NULL }, /* two 1MB sections + 4 small pages
-                                      (adjacent, so coalesced) */
-  { 0x40300000u, 0x10000,  NULL }, /* one large page via L2          */
+  { 0x40000000u, 0x310000, NULL }, /* two 1MB sections + 4 small pages
+                                      (adjacent, so coalesced), the gap,
+                                      one large page via L2 */
   { 0x20000000u, 0x100000, NULL }, /* VRAM section                    */
   { TTB_PA,      0x5000,   NULL }, /* L1 + L2 tables (not mapped)     */
   { CONTEXT_PADDR, sizeof(SceSysconResumeContext), NULL },
@@ -212,6 +219,8 @@ static void fill_pattern(uint32_t seed) {
     uint32_t x = seed ^ regions[i].pa;
     for (uint32_t j = 0; j < regions[i].size; j++) {
       x = x * 1103515245u + 12345u;
+      if (regions[i].pa + j >= GAP_PA && regions[i].pa + j < GAP_END)
+        continue; /* not mapped */
       regions[i].mem[j] = x >> 16;
     }
   }
@@ -786,6 +795,58 @@ int main(int argc, char **argv) {
   ((master_block_t *)card)->partitions[0].code = 0;
   expect_rejected("no mediaid partition", slot, state_copy, slot_size, t_none, JV_ERR_MEDIAID);
   ((master_block_t *)card)->partitions[0].code = 0xd;
+
+  /* --- Memory that no translation table maps ----------------------------- */
+  printf("memory between the mapped pages\n");
+  {
+    uint8_t *gap = jv_phys(GAP_PA, GAP_END - GAP_PA);
+    uint8_t *keep = malloc(slot_size);
+    int same = 1;
+
+    /* as saved so far: the mapped pages only - what lies between them
+     * is not in the snapshot and stays as it is at the load */
+    memset(gap, 0x5a, GAP_END - GAP_PA);
+    reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+    mount();
+    res = load_state(&fs, slot);
+    unmount();
+    for (uint32_t i = 0; i < GAP_END - GAP_PA; i += 4096)
+      same = same && gap[i] == 0x5a;
+    printf("  %-44s -> %d\n", "mapped pages only: the gap is left as it is", res);
+    CHECK(res == JV_OK && same, "mapped-only load touched unmapped memory");
+
+    /* save_unmapped: the gap is in the snapshot and comes back */
+    memcpy(keep, state_copy, slot_size);
+    for (uint32_t i = 0; i < GAP_END - GAP_PA; i++)
+      gap[i] = (uint8_t)(i * 7 + (i >> 12));
+    stamp_slot(slot);
+    snapshot_card();
+    reset_args(JAMAISVU_MODE_SAVE, slot, slot_size);
+    args.save_unmapped = 1;
+    mount();
+    res = save_state(&fs, slot);
+    unmount();
+    CHECK(res == JV_OK && changed_outside(&ext, NULL) == 0,
+          "save with the unmapped memory: %d", res);
+    memset(gap, 0xa5, GAP_END - GAP_PA);
+    fill_pattern(0x1234);
+    reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+    mount();
+    res = load_state(&fs, slot);
+    unmount();
+    same = 1;
+    for (uint32_t i = 0; i < GAP_END - GAP_PA; i++)
+      same = same && gap[i] == (uint8_t)(i * 7 + (i >> 12));
+    printf("  %-44s -> %d\n", "with the gap: it comes back", res);
+    CHECK(res == JV_OK && same && args.data_sum_state == JV_SUM_OK,
+          "unmapped memory not restored (res %d)", res);
+
+    /* back to the state the following tests expect */
+    memset(gap, 0, GAP_END - GAP_PA);
+    write_state(slot, keep, slot_size);
+    fill_pattern(0xcccc);
+    free(keep);
+  }
 
   /* --- Memory image checksum (format 4) ---------------------------------- */
   printf("memory image checksum\n");

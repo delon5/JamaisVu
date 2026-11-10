@@ -4021,6 +4021,12 @@ static void after_resume(void) {
       snprintf(line, sizeof(line), "    processes in the snapshot: %u\r\n",
                (unsigned)jv_last_process_num());
       log_append(line);
+      snprintf(line, sizeof(line), "    memory in the snapshot: %s\r\n",
+               jv_last_save_unmapped()
+                   ? "everything between the lowest and the highest mapped "
+                     "page (data/JamaisVu/fullmem is on the card)"
+                   : "the mapped pages");
+      log_append(line);
     }
     if (g_res_debug == JV_TEST_NONE) {
       /* the games' savedata: which folders on the card were selected

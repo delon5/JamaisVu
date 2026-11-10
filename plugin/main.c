@@ -190,6 +190,9 @@ void jv_last_data_sum(uint32_t *state, uint32_t *ms) {
 uint32_t jv_last_savedata_repaired(void) {
   return pargs.savedata_repaired;
 }
+uint32_t jv_last_save_unmapped(void) {
+  return pargs.save_unmapped;
+}
 uint32_t pargs_size = sizeof(PayloadArguments);
 
 static int g_armed = 0;
@@ -618,6 +621,9 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   pargs.data_sum_state = JV_SUM_NONE; /* set by the payload */
   pargs.data_sum_ms = 0;
   pargs.savedata_repaired = 0;
+  /* data/JamaisVu/fullmem on the card (experiment): saves also take the
+   * memory between the mapped pages, see PayloadArguments.save_unmapped */
+  pargs.save_unmapped = jv_switch_file("fullmem") ? 1 : 0;
   {
     uint32_t ttbcr = 0;
     __asm__ volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));
