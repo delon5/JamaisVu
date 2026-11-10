@@ -681,7 +681,25 @@ static int sfo_read(const char *path, uint8_t *buf, int size) {
 }
 
 /* one buffer for all param.sfo reads (all on the worker thread) */
-static uint8_t g_sfo_buf[0x4000];
+/* A param.sfo is read into 16 KB taken for the look-up (workmem.h; it was
+ * a fixed buffer). Only when no pool has them: 4 KB, enough for a
+ * param.sfo of the usual size. All look-ups run in the worker thread. */
+static uint8_t g_small_buf[0x1000];
+static uint8_t *g_sfo_buf = g_small_buf;
+static int g_sfo_len = sizeof(g_small_buf);
+static SceUID g_sfo_blk = -1;
+
+static void sfo_buf_get(void) {
+  uint8_t *b = jv_work_alloc("JamaisVuRead", 0x4000, &g_sfo_blk, 1);
+  g_sfo_buf = b ? b : g_small_buf;
+  g_sfo_len = b ? 0x4000 : (int)sizeof(g_small_buf);
+}
+
+static void sfo_buf_put(void) {
+  g_sfo_buf = g_small_buf;
+  g_sfo_len = sizeof(g_small_buf);
+  jv_work_free(&g_sfo_blk);
+}
 
 int title_to_ascii(const uint8_t *p, uint32_t vlen, char *out, int len) {
   /* UTF-8 -> printable ASCII. A few common symbols are spelled out,
@@ -716,7 +734,7 @@ int title_to_ascii(const uint8_t *p, uint32_t vlen, char *out, int len) {
 static int sfo_get_title(const char *path, char *out, int len) {
   uint8_t *buf = g_sfo_buf;
   uint32_t vlen;
-  int n = sfo_read(path, buf, sizeof(g_sfo_buf));
+  int n = sfo_read(path, buf, g_sfo_len);
   const uint8_t *p = sfo_find(buf, n, "TITLE", &vlen);
   if (!p)
     return -1;
@@ -731,26 +749,30 @@ static const char *const k_sfo_roots[] = { "ux0:patch", "ux0:app", "gro0:app",
 void lookup_title(const char *titleid, char *out, int len) {
   static char path[96];
 
+  sfo_buf_get();
   for (size_t i = 0; i < sizeof(k_sfo_roots) / sizeof(k_sfo_roots[0]); i++) {
     snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", k_sfo_roots[i],
              titleid);
-    if (sfo_get_title(path, out, len) == 0)
+    if (sfo_get_title(path, out, len) == 0) {
+      sfo_buf_put();
       return;
+    }
   }
+  sfo_buf_put();
 
   /* No readable name (or a non-Latin one): show the title ID */
   strncpy(out, titleid, len - 1);
   out[len - 1] = '\0';
 }
 
-int lookup_title_utf8(const char *titleid, char *out, int len) {
+static int lookup_title_utf8_do(const char *titleid, char *out, int len) {
   static char path[96];
   uint32_t vlen;
 
   for (size_t i = 0; i < sizeof(k_sfo_roots) / sizeof(k_sfo_roots[0]); i++) {
     snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", k_sfo_roots[i],
              titleid);
-    int n = sfo_read(path, g_sfo_buf, sizeof(g_sfo_buf));
+    int n = sfo_read(path, g_sfo_buf, g_sfo_len);
     const uint8_t *p = sfo_find(g_sfo_buf, n, "TITLE", &vlen);
     if (!p)
       continue;
@@ -781,7 +803,14 @@ int lookup_title_utf8(const char *titleid, char *out, int len) {
   return -1;
 }
 
-int lookup_app_ver(const char *titleid, char *out, int len) {
+int lookup_title_utf8(const char *titleid, char *out, int len) {
+  sfo_buf_get();
+  int r = lookup_title_utf8_do(titleid, out, len);
+  sfo_buf_put();
+  return r;
+}
+
+static int lookup_app_ver_do(const char *titleid, char *out, int len) {
   uint8_t *buf = g_sfo_buf;
   static char path[96];
 
@@ -789,7 +818,7 @@ int lookup_app_ver(const char *titleid, char *out, int len) {
     uint32_t vlen;
     snprintf(path, sizeof(path), "%s/%s/sce_sys/param.sfo", k_sfo_roots[i],
              titleid);
-    int n = sfo_read(path, buf, sizeof(g_sfo_buf));
+    int n = sfo_read(path, buf, g_sfo_len);
     const uint8_t *v = n > 0 ? sfo_find(buf, n, "APP_VER", &vlen) : NULL;
     if (!v)
       continue;
@@ -805,6 +834,13 @@ int lookup_app_ver(const char *titleid, char *out, int len) {
     return o > 0 ? 0 : -1;
   }
   return -1;
+}
+
+int lookup_app_ver(const char *titleid, char *out, int len) {
+  sfo_buf_get();
+  int r = lookup_app_ver_do(titleid, out, len);
+  sfo_buf_put();
+  return r;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -882,21 +918,21 @@ static int is_jamaisvu_file(const char *name) {
 /* 64 KB reads: with 4 KB each, 1.6 MB of plugins took 4-6 s while a
  * game streamed from the same drive (PS TV logs, "tai folders"). The 64 KB
  * are taken for the time a folder is read (tai_hash_dir); only when no
- * pool has them is it read 4 KB at a time. */
-static uint8_t g_tai_small[0x1000];
-static uint8_t *g_tai_buf = g_tai_small;
-static uint32_t g_tai_buf_len = sizeof(g_tai_small);
+ * pool has them is it read 4 KB at a time (g_small_buf: a folder is never
+ * read during a param.sfo look-up). */
+static uint8_t *g_tai_buf = g_small_buf;
+static uint32_t g_tai_buf_len = sizeof(g_small_buf);
 static SceUID g_tai_blk = -1;
 
 static void tai_buf_get(void) {
   uint8_t *b = jv_work_alloc("JamaisVuRead", 0x10000, &g_tai_blk, 1);
-  g_tai_buf = b ? b : g_tai_small;
-  g_tai_buf_len = b ? 0x10000 : sizeof(g_tai_small);
+  g_tai_buf = b ? b : g_small_buf;
+  g_tai_buf_len = b ? 0x10000 : sizeof(g_small_buf);
 }
 
 static void tai_buf_put(void) {
-  g_tai_buf = g_tai_small;
-  g_tai_buf_len = sizeof(g_tai_small);
+  g_tai_buf = g_small_buf;
+  g_tai_buf_len = sizeof(g_small_buf);
   jv_work_free(&g_tai_blk);
 }
 

@@ -323,7 +323,8 @@ static volatile SceUID g_l0_pid;
 static volatile uint32_t g_l0_frames; /* layer-0 frames set so far (diagnostics) */
 static volatile int64_t g_l0_us, g_l1_other_us;
 static volatile int64_t g_l1_vis_us; /* ... with something visible in it */
-static uint32_t g_vis_row[1920];     /* one row of it, sampled (hook) */
+#define VIS_PIECE 256
+static uint32_t g_vis_row[VIS_PIECE]; /* a piece of one row of it (hook) */
 static const char *g_plane_why; /* why the plane was not used (log) */
 static volatile int64_t g_plane_hide_us; /* when the menu left the plane */
 static int64_t now_us(void); /* defined below, used by plane_hide */
@@ -331,7 +332,6 @@ static void close_menu(void); /* defined below, used by render_panel */
 static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
 static volatile int g_plane_toast;  /* the message box is drawn in it */
 static volatile int g_render_active;
-static uint32_t g_plane_toast_band[TOAST_W * TOAST_BAND_ROWS];
 static int (*g_set_merge)(int head, int control, uint32_t alpha);
 static int (*g_set_owner)(int head, int index, SceUID pid);
 #define PLANE_W JV_SCREEN_W
@@ -509,12 +509,18 @@ static int psvs_swap_for(const char *tid) {
 /* read-only: ur0:data/reVita/Profile/<TITLEID>.INI, else GLOBAL.INI */
 static int revita_swap_for(const char *tid) {
   static char path[96];
-  static char buf[8192]; /* reVita's own profile buffer is ~4 KB */
+  /* 8 KB taken for the read (reVita's own profile buffer is ~4 KB) */
+  SceUID blk = -1;
+  char *buf = jv_work_alloc("JamaisVuRead", 8192, &blk, 1);
+  if (!buf)
+    return -1;
   snprintf(path, sizeof(path), "ur0:data/reVita/Profile/%s.INI", tid);
-  int n = read_small(path, buf, sizeof(buf));
+  int n = read_small(path, buf, 8192);
   if (n < 0)
-    n = read_small("ur0:data/reVita/Profile/GLOBAL.INI", buf, sizeof(buf));
-  return n > 0 ? revita_ini_swaps(buf, n) : -1;
+    n = read_small("ur0:data/reVita/Profile/GLOBAL.INI", buf, 8192);
+  int r = n > 0 ? revita_ini_swaps(buf, n) : -1;
+  jv_work_free(&blk);
+  return r;
 }
 
 static void decide_buttons(const char *tid) {
@@ -1051,10 +1057,14 @@ static uint32_t ovl_piece_bytes(int k) {
     int n = JV_NUM_SLOTS + 1 - (k - OVL_P_THUMBS) * THUMB_PER_BLOCK;
     return (n > THUMB_PER_BLOCK ? THUMB_PER_BLOCK : n) * THUMB_PX * 2;
   }
-  if (k == OVL_P_BAND) /* band, row buffer, both images' corners */
-    return MENU_W * BAND_ROWS * 4 + 2 * CORNER_PX * 4;
-  if (k == OVL_P_TOAST) /* the box, 16-bit, and its drawing band */
-    return TOAST_W * TOAST_H * 2 + TOAST_W * TOAST_BAND_ROWS * 4;
+  if (k == OVL_P_BAND) /* band, row buffer, both images' corners, and the
+                        * message box's drawing band (on the plane there
+                        * is no OVL_P_TOAST piece; it was a fixed 18 KB
+                        * buffer of the plugin's own until 0c01255) */
+    return MENU_W * BAND_ROWS * 4 + 2 * CORNER_PX * 4 +
+           TOAST_W * TOAST_BAND_ROWS * 4;
+  if (k == OVL_P_TOAST) /* the box, 16-bit */
+    return TOAST_W * TOAST_H * 2;
   return 0; /* letter sets: sized to the names, taken when they are read */
 }
 
@@ -1251,9 +1261,7 @@ static int overlay_acquire(void) {
       g_panel_img.corner = g_band_px + MENU_W * BAND_ROWS;
       g_toast_img.corner = g_panel_img.corner + CORNER_PX;
       g_toast_img.raw = base[OVL_P_TOAST];
-      g_toast_band = plane ? g_plane_toast_band
-                           : (uint32_t *)(g_toast_img.raw +
-                                          TOAST_W * TOAST_H);
+      g_toast_band = g_toast_img.corner + CORNER_PX;
       g_ext_set[0] = g_ext_set[1] = NULL; /* taken when the names are read */
       g_plane_mode = plane;
       g_plane_panel = g_plane_toast = 0;
@@ -1836,10 +1844,14 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
     for (int k = 0; k < 64; k++)
       bench_build_arith(g_rowbuf, rowcopy, c->w);
     uint32_t t6 = prof_now();
-    static uint32_t src32[1920];
-    for (int k = 0; k < 64; k++)
+    SceUID sblk = -1;
+    uint32_t *src32 = jv_work_alloc("JamaisVuBench", 1920 * 4, &sblk, 1);
+    if (src32)
+      memset(src32, 0, 1920 * 4);
+    for (int k = 0; k < 64 && src32; k++)
       bench_copy(g_rowbuf, src32, fw);
     uint32_t t7 = prof_now();
+    jv_work_free(&sblk);
     uint32_t acc = bench_alu((uint32_t)t7, 64 * c->w);
     uint32_t t8 = prof_now();
     static char bl[400];
@@ -1996,11 +2008,11 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
         for (int y0 = 0; y0 < TOAST_H; y0 += TOAST_BAND_ROWS) {
           int rows = TOAST_H - y0 < TOAST_BAND_ROWS ? TOAST_H - y0
                                                     : TOAST_BAND_ROWS;
-          Canvas b = { g_plane_toast_band, TOAST_W, rows, y0 };
+          Canvas b = { g_toast_band, TOAST_W, rows, y0 };
           menu_view_render_toast(&b, g_toast_msg, g_toast_err);
           for (int r = 0; r < rows; r++)
             memcpy(g_plane_px + (TOAST_Y + y0 + r) * PLANE_W + TOAST_X,
-                   g_plane_toast_band + r * TOAST_W, TOAST_W * 4);
+                   g_toast_band + r * TOAST_W, TOAST_W * 4);
         }
         plane_flush(TOAST_Y, TOAST_H);
         g_plane_toast = 1;
@@ -2161,11 +2173,15 @@ static int frame_visible(const SceDisplayFrameBuf *p) {
     return 1;
   for (uint32_t y = 0; y < p->height; y += 16) {
     const uint32_t *row = (const uint32_t *)p->base + y * p->pitch;
-    if (jv_copy_from_user(g_vis_row, row, p->width * 4) < 0)
-      return 1;
-    for (uint32_t x = 0; x < p->width; x++)
-      if (g_vis_row[x] & 0xff000000u)
+    /* a row in pieces of 256 pixels (it was one fixed 1920-pixel buffer) */
+    for (uint32_t x0 = 0; x0 < p->width; x0 += VIS_PIECE) {
+      uint32_t n = p->width - x0 < VIS_PIECE ? p->width - x0 : VIS_PIECE;
+      if (jv_copy_from_user(g_vis_row, row + x0, n * 4) < 0)
         return 1;
+      for (uint32_t x = 0; x < n; x++)
+        if (g_vis_row[x] & 0xff000000u)
+          return 1;
+    }
   }
   return 0;
 }
@@ -2916,7 +2932,7 @@ static int (*g_fd_list)(int vis, JvFdInfo *dst, SceSize max, SceSize *res);
 #define FILES_PROBE_MAX 40
 
 static void files_probe(SceUID pid) {
-  static JvFdInfo list[1024];
+  JvFdInfo *list; /* 1024 entries, behind the read buffer in its block */
   static JvFileInfo fi;
   static char line[560];
   SceSize got = 0;
@@ -2937,20 +2953,21 @@ static void files_probe(SceUID pid) {
     log_queue(line);
     return;
   }
+  buf = jv_work_alloc("JamaisVuProbe",
+                      0x40000 + 1024 * sizeof(JvFdInfo), &blk, 1);
+  if (!buf) {
+    snprintf(line, sizeof(line), "    open files: no memory (0x%08X)\r\n",
+             (unsigned)blk);
+    log_queue(line);
+    return;
+  }
+  list = (JvFdInfo *)(buf + 0x40000);
   total = g_fd_list(5, list, 1024, &got);
   if (total < 0 || total > 1024) {
     snprintf(line, sizeof(line), "    open files: list failed (0x%08X)\r\n",
              (unsigned)total);
     log_queue(line);
-    return;
-  }
-  buf = jv_work_alloc("JamaisVuProbe", 0x40000, &blk, 1);
-  if (!buf) {
-    snprintf(line, sizeof(line), "    open files: no memory (0x%08X)\r\n",
-             (unsigned)blk);
-    log_queue(line);
-    if (blk >= 0)
-      ksceKernelFreeMemBlock(blk);
+    ksceKernelFreeMemBlock(blk);
     return;
   }
   snprintf(line, sizeof(line), "    open files of the process, read at fixed "
@@ -4357,14 +4374,163 @@ static void window_load(void) {
   }
 }
 
+#ifndef JV_RELEASE
+/* Once after a start: what every kernel module holds of memory (its
+ * segments as the module manager has them, in whole pages), the modules
+ * that are not from the system's own drives - the plugins - by name. The
+ * kernel's pool is 36 MB and had 3 MB free when JamaisVu started on the
+ * PCH-1000 (0c01255): this says where the rest is. Own layout of the
+ * module info (0x1B8 bytes on 3.60 and 3.65), the two calls by NID. */
+typedef struct {
+  uint32_t size, modid;
+  uint16_t attr;
+  uint8_t ver[2];
+  char name[28];
+  uint32_t unk28, entry[3], ex[4], tls[3];
+  char path[256];
+  struct {
+    uint32_t size, perms, vaddr, memsz, filesz, res;
+  } seg[4];
+  uint32_t state;
+} JvModInfo;
+_Static_assert(sizeof(JvModInfo) == 0x1B8, "module info layout");
+typedef struct {
+  char name[28];
+  uint32_t kb;
+  uint32_t plugin;
+} JvModRow;
+#define MODS_MAX 512
+
+static void modules_log(void) {
+  static int done;
+  static int (*list_fn)(SceUID pid, int flags1, int flags2, SceUID *ids,
+                        SceSize *num);
+  static int (*info_fn)(SceUID pid, SceUID modid, JvModInfo *info);
+  static char line[480];
+  if (done)
+    return;
+  done = 1;
+  if (module_get_export_func(KERNEL_PID, "SceKernelModulemgr", 0xC445FA63,
+                             0x97CF7B4E, (uintptr_t *)&list_fn) < 0 &&
+      module_get_export_func(KERNEL_PID, "SceKernelModulemgr", 0x92C9FFC2,
+                             0xB72C75A4, (uintptr_t *)&list_fn) < 0)
+    list_fn = NULL;
+  if (module_get_export_func(KERNEL_PID, "SceKernelModulemgr", 0xC445FA63,
+                             0xD269F915, (uintptr_t *)&info_fn) < 0 &&
+      module_get_export_func(KERNEL_PID, "SceKernelModulemgr", 0x92C9FFC2,
+                             0xDAA90093, (uintptr_t *)&info_fn) < 0)
+    info_fn = NULL;
+  if (!list_fn || !info_fn) {
+    log_append("kernel modules: the module manager's list is not known for "
+               "this firmware\r\n");
+    return;
+  }
+  SceUID blk = -1;
+  uint8_t *mem = jv_work_alloc("JamaisVuMods", MODS_MAX * sizeof(SceUID) +
+                               sizeof(JvModInfo) +
+                               MODS_MAX * sizeof(JvModRow), &blk, 1);
+  if (!mem) {
+    log_append("kernel modules: no memory for the list\r\n");
+    return;
+  }
+  SceUID *ids = (SceUID *)mem;
+  JvModInfo *info = (JvModInfo *)(ids + MODS_MAX);
+  JvModRow *rows = (JvModRow *)(info + 1);
+  SceSize num = MODS_MAX;
+  int r = list_fn(KERNEL_PID, 0x7FFFFFFF, 1, ids, &num);
+  if (r < 0 || num > MODS_MAX) {
+    snprintf(line, sizeof(line), "kernel modules: list failed (0x%08X, "
+             "%u)\r\n", (unsigned)r, (unsigned)num);
+    log_append(line);
+    jv_work_free(&blk);
+    return;
+  }
+  uint32_t n = 0, all_kb = 0, plug_kb = 0, plug_n = 0;
+  for (uint32_t i = 0; i < num; i++) {
+    memset(info, 0, sizeof(*info));
+    info->size = sizeof(*info);
+    if (info_fn(KERNEL_PID, ids[i], info) < 0)
+      continue;
+    uint32_t kb = 0;
+    for (int k = 0; k < 4; k++)
+      if (info->seg[k].vaddr && info->seg[k].memsz < 0x10000000u)
+        kb += ((info->seg[k].memsz + 0xfff) >> 12) * 4;
+    info->path[sizeof(info->path) - 1] = '\0';
+    JvModRow *row = &rows[n++];
+    memcpy(row->name, info->name, sizeof(row->name));
+    row->name[sizeof(row->name) - 1] = '\0';
+    row->kb = kb;
+    /* the system's own: os0: and vs0: (and the boot image: no path) */
+    row->plugin = info->path[0] && strncmp(info->path, "os0:", 4) != 0 &&
+                  strncmp(info->path, "vs0:", 4) != 0;
+    all_kb += kb;
+    if (row->plugin) {
+      plug_kb += kb;
+      plug_n++;
+    }
+  }
+  /* largest first */
+  for (uint32_t i = 0; i + 1 < n; i++)
+    for (uint32_t k = i + 1; k < n; k++)
+      if (rows[k].kb > rows[i].kb) {
+        JvModRow tmp = rows[i];
+        rows[i] = rows[k];
+        rows[k] = tmp;
+      }
+  snprintf(line, sizeof(line), "kernel modules: %u, %u KB of code and data "
+           "in all; %u of them not from the system's own drives (plugins), "
+           "%u KB\r\n", (unsigned)n, (unsigned)all_kb, (unsigned)plug_n,
+           (unsigned)plug_kb);
+  log_append(line);
+  for (int pass = 0; pass < 2; pass++) {
+    /* every plugin; the system's 16 largest */
+    int m = snprintf(line, sizeof(line), "    %s:", pass == 0
+                         ? "plugins (KB)" : "the system's largest (KB)");
+    int shown = 0;
+    for (uint32_t i = 0; i < n; i++) {
+      if ((int)rows[i].plugin != (pass == 0))
+        continue;
+      if (pass == 1 && shown >= 16)
+        break;
+      if (m > (int)sizeof(line) - 48) {
+        snprintf(line + m, sizeof(line) - m, "\r\n");
+        log_append(line);
+        m = snprintf(line, sizeof(line), "     ");
+      }
+      m += snprintf(line + m, sizeof(line) - m, " %s %u,", rows[i].name,
+                    (unsigned)rows[i].kb);
+      shown++;
+    }
+    if (shown) {
+      line[m - 1] = '\0'; /* the last comma */
+      m--;
+    }
+    snprintf(line + m, sizeof(line) - m, "%s\r\n", shown ? "" : " none");
+    log_append(line);
+  }
+  jv_work_free(&blk);
+}
+#endif
+
 /* bg: with the menu closed (OP_WARM) - nothing that needs the menu's
  * memory, and nothing is written (the old slot layout is moved at the
  * first real opening). Returns 1 if the Memory Card was there. */
 static int refresh_slots(int bg) {
   static SlotInfo info;
   static int exists[JV_MAX_SLOTS], locked[JV_MAX_SLOTS];
-  static MenuSlot list[JV_MAX_SLOTS];
   static uint8_t has_thumb[JV_MAX_SLOTS];
+  /* The list being read: 21 KB taken for the read (workmem.h). It was a
+   * second fixed copy, equal to g_slot_list between two reads - so it
+   * starts as that. */
+  SceUID list_blk = -1;
+  MenuSlot *list = jv_work_alloc("JamaisVuList", sizeof(g_slot_list),
+                                 &list_blk, 1);
+  if (!list) {
+    log_queue("slot list not read again: no memory for it (the list in "
+              "memory stays)\r\n");
+    return g_list_ready;
+  }
+  memcpy(list, g_slot_list, sizeof(g_slot_list));
   /* how long each step took (log.txt when the whole read is slow: the
    * thumbnails showed LOADING for ~30 s in GTA: San Andreas on the PS TV) */
   uint64_t t0 = ksceKernelGetSystemTimeWide(), t;
@@ -4491,13 +4657,15 @@ static int refresh_slots(int bg) {
 
   /* the list, then the five on screen (thumbnails follow) */
   model_begin();
-  changed = g_total != total || memcmp(g_slot_list, list, sizeof(list)) ||
+  changed = g_total != total ||
+            memcmp(g_slot_list, list, sizeof(g_slot_list)) ||
             memcmp(g_list_has_thumb, has_thumb, sizeof(has_thumb));
-  memcpy(g_slot_list, list, sizeof(list));
+  memcpy(g_slot_list, list, sizeof(g_slot_list));
   memcpy(g_list_has_thumb, has_thumb, sizeof(has_thumb));
   g_total = total;
   window_fill_locked();
   model_end();
+  jv_work_free(&list_blk); /* not used below */
 
   static int last_total = -1;
   if (total != last_total) {
@@ -4547,6 +4715,10 @@ static int refresh_slots(int bg) {
   }
 #undef JV_LAP
 #undef JV_ADD
+#ifndef JV_RELEASE
+  if (bg && mc)
+    modules_log(); /* once, with the first list read after a start */
+#endif
   return mc != NULL;
 }
 
