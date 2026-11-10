@@ -27,6 +27,11 @@ const char *jv_build_id(void);
 uint32_t jv_last_process_num(void);
 /* the last job's savedata: which folders the plugin selected, how many
  * records the payload backed up / put back and from / into which folders */
+/* the last run's checksum of the memory image: JV_SUM_*, time of the sums */
+void jv_last_data_sum(uint32_t *state, uint32_t *ms);
+/* load: directory entries an interrupted earlier load left half written,
+ * put right by this one */
+uint32_t jv_last_savedata_repaired(void);
 void jv_last_savedata(uint32_t *selected, uint32_t *files, uint32_t *folders,
                       uint32_t *rewritten);
 /* number of kernel objects of a class (e.g. "SceUIDProcessClass"), < 0 if

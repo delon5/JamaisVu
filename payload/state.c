@@ -18,6 +18,8 @@
  *    refused before it reaches the card driver.
  *  - The header sector is cleared first and written last, with CRCs, so an
  *    interrupted save leaves a file that will never be loaded.
+ *  - A sampled checksum of the memory contents goes into the sector after
+ *    them (format 4).
  *
  * LOAD
  *  - The whole file is validated (header CRC, body CRC, every path, every
@@ -28,6 +30,13 @@
  *    boot sector).
  *  - The mediaid sector is written only to the sector it was read from, and
  *    only if the card's partition table is identical to the one at save time.
+ *  - The savedata restore is the one part that changes the file system. A
+ *    power cut in it must never leave the card unsafe, and loading the slot
+ *    again must finish it: the folders' directory entries are checked and
+ *    put right first (f_fixdir, with the write order in ff.c's store_xdir
+ *    and f_truncate; tests/host/test_state.c cuts it at every write).
+ *  - The restored memory is compared with the slot's checksum; if it is
+ *    not what was saved, the payload stops instead of resuming it.
  *  - The plugin's write-blocking flag is armed inside the restored memory
  *    image, so the restored OS cannot write with its stale filesystem caches
  *    before the plugin has remounted ux0.
@@ -344,6 +353,52 @@ static int is_valid_savedata_path(const char *path, int is_root) {
 /* bypassing all filesystem metadata.                                       */
 /* ------------------------------------------------------------------------ */
 
+/* The sampled checksum of the memory contents (JV_SUM_STRIDE in
+ * JamaisVu.h). It follows the bytes as they go to the card (save: each
+ * piece right before its card command) or come from it (load: each piece
+ * right after its read), so nothing the progress screen draws in between
+ * can make the two sides differ. next: bytes to the next sampled word. */
+typedef struct {
+  uint32_t s1, s2, next;
+} DataSum;
+
+static uint32_t g_sum_us; /* time spent summing in this run */
+
+_Static_assert(sizeof(SceSysconResumeContext) % 4 == 0 && SPRAM_SIZE % 4 == 0,
+               "segment sizes must be whole words (the sums sample words)");
+
+/* (optimised although the file is not: at -O0 every local lives on the
+ * stack, and with the data cache off each of those accesses is a trip to
+ * RAM - the loop runs several million times per save and load) */
+__attribute__((optimize("O2")))
+static void data_sum(DataSum *d, const void *buf, uint32_t len) {
+  const uint8_t *b = buf;
+  uint32_t off = d->next, s1 = d->s1, s2 = d->s2;
+  uint32_t t0 = jv_time_us();
+
+  if (((uintptr_t)b & 3) == 0) {
+    for (; off + 4 <= len; off += JV_SUM_STRIDE) {
+      s1 += *(const uint32_t *)(const void *)(b + off);
+      s2 += s1;
+    }
+  } else {
+    for (; off + 4 <= len; off += JV_SUM_STRIDE) {
+      uint32_t w;
+      memcpy(&w, b + off, 4);
+      s1 += w;
+      s2 += s1;
+    }
+  }
+  /* (a word across the end of a piece cannot happen: every piece ends on
+   * a word, see the assert above; it would be skipped on both sides) */
+  while (off < len)
+    off += JV_SUM_STRIDE;
+  d->next = off - len;
+  d->s1 = s1;
+  d->s2 = s2;
+  g_sum_us += jv_time_us() - t0;
+}
+
 typedef struct {
   SectorRange ext[MAX_EXTENTS];
   int n_ext;
@@ -352,6 +407,9 @@ typedef struct {
   uint32_t max_chunk;  /* sectors per card write */
   int crc_on;
   uint32_t crc;
+  int sum_on;          /* the bytes written now are memory contents */
+  int sum_direct;      /* ... and go to the card straight from memory */
+  DataSum sum;
   uint8_t __attribute__((aligned(64))) stage[SECTOR_SIZE];
 } SlotWriter;
 
@@ -384,6 +442,9 @@ static int slot_write_sectors(uint32_t fsec, const void *buf, uint32_t n) {
     c = MIN(n, contig);
     c = MIN(c, g_slot.max_chunk);
 
+    if (g_slot.sum_direct) /* as it is in memory right before the write */
+      data_sum(&g_slot.sum, p, c * SECTOR_SIZE);
+
     if (guarded_write_sectors(p, card_sec, c) != 0)
       return guard_violations() ? JV_ERR_GUARD : JV_ERR_IO;
 
@@ -411,6 +472,8 @@ static int slot_write(const void *buf, uint32_t len) {
 
     if (off != 0 || len < SECTOR_SIZE || ((uintptr_t)p & 0x3)) {
       uint32_t n = MIN(SECTOR_SIZE - off, len);
+      if (g_slot.sum_on) /* the copy below is what reaches the card */
+        data_sum(&g_slot.sum, p, n);
       memcpy(g_slot.stage + off, p, n);
       g_slot.pos += n;
       p += n;
@@ -424,7 +487,9 @@ static int slot_write(const void *buf, uint32_t len) {
       }
     } else {
       uint32_t nsec = len / SECTOR_SIZE;
+      g_slot.sum_direct = g_slot.sum_on;
       res = slot_write_sectors(g_slot.pos / SECTOR_SIZE, p, nsec);
+      g_slot.sum_direct = 0;
       if (res < 0)
         return res;
       g_slot.pos += nsec * SECTOR_SIZE;
@@ -873,8 +938,10 @@ int save_state(FATFS *fs, const char *path) {
                              SECTOR_SIZE);
   header.data_size = (uint32_t)data_size;
 
+  /* (the memory contents, padded to a sector, and the checksum sector) */
   if (data_size > 0xffffffffu ||
-      (uint64_t)header.data_offset + data_size > g_slot.size) {
+      ALIGN((uint64_t)header.data_offset + data_size, SECTOR_SIZE) +
+          SECTOR_SIZE > g_slot.size) {
     res = JV_ERR_TOO_BIG;
     goto out;
   }
@@ -891,10 +958,14 @@ int save_state(FATFS *fs, const char *path) {
   header.body_crc = g_slot.crc;
   g_slot.crc_on = 0;
 
-  /* 6. Memory contents. No checksum over the data: the payload runs with
-   * the MMU and data cache off, and a CPU pass over ~400 MB of uncached
-   * RAM takes minutes (build 3ab11e1: saves sat at 0%). The card's own
-   * ECC covers the medium; the header and metadata CRCs cover the file. */
+  /* 6. Memory contents, with a sampled checksum (JV_SUM_STRIDE): the
+   * payload runs with the MMU and data cache off, and a CPU pass over
+   * every byte of ~400 MB of uncached RAM takes minutes (build 3ab11e1:
+   * saves sat at 0%). The card's own ECC covers the medium; the header
+   * and metadata CRCs cover the file. */
+  memset(&g_slot.sum, 0, sizeof(g_slot.sum));
+  g_sum_us = 0;
+  g_slot.sum_on = 1;
   for (int i = 0; i < n_segments; i++) {
     void *src = jv_phys(segments[i].addr, segments[i].size);
     if (!src) {
@@ -905,10 +976,31 @@ int save_state(FATFS *fs, const char *path) {
     if (res < 0)
       goto out;
   }
+  g_slot.sum_on = 0;
 
   res = slot_pad(SECTOR_SIZE);
   if (res < 0)
     goto out;
+
+  /* 6b. The checksum sector, right after the memory contents. */
+  {
+    static SaveStateSum sum;
+    memset(&sum, 0, sizeof(sum));
+    sum.magic = JV_SUM_MAGIC;
+    sum.stride = JV_SUM_STRIDE;
+    sum.data_size = header.data_size;
+    sum.s1 = g_slot.sum.s1;
+    sum.s2 = g_slot.sum.s2;
+    sum.crc = crc32_update(0, &sum, offsetof(SaveStateSum, crc));
+    res = slot_write(&sum, sizeof(sum));
+    if (res < 0)
+      goto out;
+    res = slot_pad(SECTOR_SIZE);
+    if (res < 0)
+      goto out;
+    pargs->data_sum_state = JV_SUM_OK;
+    pargs->data_sum_ms = g_sum_us / 1000;
+  }
 
   /* 7. Commit: write the header last. */
   header.magic = SAVESTATE_MAGIC;
@@ -930,6 +1022,7 @@ int save_state(FATFS *fs, const char *path) {
     res = verify_slot(path, &header);
 
 out:
+  g_slot.sum_on = 0;
   guard_deny_all();
   return res;
 }
@@ -941,6 +1034,11 @@ out:
 /* Reads from the state file, optionally updating a running CRC. */
 static uint32_t g_read_crc;
 static int g_read_crc_on;
+
+/* the slot's checksum of its memory contents (format 4), read and checked
+ * by validate_state before anything is written */
+static int g_want_sum_on;
+static uint32_t g_want_s1, g_want_s2;
 
 static int state_read(FIL *fp, void *buf, uint32_t len) {
   UINT br;
@@ -1167,6 +1265,17 @@ static int prune_dir(const char *path, int level) {
  * the JV_SAVEDATA_* bits in folders; the others are read past and left
  * alone (a state saved with reSavedata's folder on the card, loaded on a
  * console where it is not). */
+/* Before a savedata folder is read or changed: the directory entries a
+ * load that lost power may have left half written in it are put right
+ * (f_fixdir in ff.c), so this load can finish what that one began. */
+static int fix_dir(const char *path, const char *only) {
+  UINT fixed = 0;
+  FRESULT fres = f_fixdir(path, only, &fixed);
+  pargs->savedata_repaired += fixed;
+  return fres == FR_OK || fres == FR_NO_PATH || fres == FR_NO_FILE ? 0
+                                                                   : JV_ERR_IO;
+}
+
 static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
                          uint32_t *written, uint32_t *used,
                          uint32_t *rewritten) {
@@ -1215,6 +1324,20 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
     *used |= 1u << root;
 
     if (file.is_root) {
+      /* this title's own entry in the folder that holds it */
+      static char parent[MAX_PATH_LEN];
+      char *slash = NULL;
+      strcpy(parent, path);
+      for (char *c = parent; *c; c++)
+        if (*c == '/')
+          slash = c;
+      if (slash) {
+        *slash = '\0';
+        if (fix_dir(parent, slash + 1) < 0)
+          return JV_ERR_IO;
+      }
+    }
+    if (file.is_root) {
       if (inplace) {
         /* the previous root's extras first, then this root's list */
         if (prune_root[0]) {
@@ -1245,6 +1368,9 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
         fres = FR_OK;
       }
       if (fres != FR_OK && fres != FR_EXIST)
+        return JV_ERR_IO;
+      /* the entries in it, before any of them is looked up */
+      if (fix_dir(path, NULL) < 0)
         return JV_ERR_IO;
     } else {
       uint32_t size = file.data_len;
@@ -1308,8 +1434,10 @@ static int restore_files(FIL *fpsrc, uint32_t file_num, uint32_t folders,
         size -= n;
       }
 
-      /* whatever the existing file had beyond the snapshot's size */
-      if (res == 0 && inplace && changed && f_truncate(&fpdst) != FR_OK)
+      /* whatever the existing file had beyond the snapshot's size; for a
+       * file that is identical, only clusters an interrupted load left
+       * chained behind its end (nothing is written when there are none) */
+      if (res == 0 && inplace && f_truncate(&fpdst) != FR_OK)
         res = JV_ERR_IO;
       if (f_close(&fpdst) != FR_OK && res == 0)
         res = JV_ERR_IO;
@@ -1367,10 +1495,14 @@ static int validate_state(FATFS *fs, FIL *fp, SaveStateHeader *header) {
     return res;
   memcpy(header, io_buf, sizeof(*header));
 
-  /* version 3 (build 3ab11e1 only) is version 2 plus a trailing table of
-   * per-segment CRCs that is no longer read: those slots still load */
+  /* Version 2 has no checksum of the memory contents; version 3 (build
+   * 3ab11e1 only) is version 2 plus a trailing table of per-segment CRCs
+   * that is no longer read; version 4 is version 2 plus the checksum
+   * sector. All of them load. */
+  g_want_sum_on = 0;
   if (header->magic != SAVESTATE_MAGIC ||
-      (header->version != SAVESTATE_VERSION && header->version != 3) ||
+      (header->version != SAVESTATE_VERSION && header->version != 3 &&
+       header->version != 2) ||
       header->header_size != sizeof(SaveStateHeader))
     return JV_ERR_BAD_STATE;
 
@@ -1462,6 +1594,29 @@ static int validate_state(FATFS *fs, FIL *fp, SaveStateHeader *header) {
   if (g_read_crc != header->body_crc)
     return JV_ERR_BAD_STATE;
 
+  /* Version 4: the checksum sector must be there and whole before the
+   * load starts; the sums are compared once the memory is back. */
+  if (header->version == SAVESTATE_VERSION) {
+    static SaveStateSum sum;
+    uint64_t at = ALIGN((uint64_t)header->data_offset + header->data_size,
+                        SECTOR_SIZE);
+    if (at + SECTOR_SIZE > fsize)
+      return JV_ERR_BAD_STATE;
+    if (f_lseek(fp, at) != FR_OK)
+      return JV_ERR_IO;
+    res = state_read(fp, io_buf, SECTOR_SIZE);
+    if (res < 0)
+      return res;
+    memcpy(&sum, io_buf, sizeof(sum));
+    if (sum.magic != JV_SUM_MAGIC || sum.stride != JV_SUM_STRIDE ||
+        sum.data_size != header->data_size ||
+        sum.crc != crc32_update(0, &sum, offsetof(SaveStateSum, crc)))
+      return JV_ERR_BAD_STATE;
+    g_want_s1 = sum.s1;
+    g_want_s2 = sum.s2;
+    g_want_sum_on = 1;
+  }
+
   return 0;
 }
 
@@ -1508,6 +1663,7 @@ int load_state(FATFS *fs, const char *path) {
   pargs->savedata_files = 0;
   pargs->savedata_folders = 0;
   pargs->savedata_rewritten = 0;
+  pargs->savedata_repaired = 0;
   if (pargs->backup_savedata) {
     guard_deny_all();
     guard_allow(vol_start, vol_end - vol_start);
@@ -1539,6 +1695,10 @@ int load_state(FATFS *fs, const char *path) {
   stage_mark(JV_STAGE_LOAD_MEMORY);
   progress_load_begin(header.data_size);
   uint32_t done = 0;
+  static DataSum got;
+  memset(&got, 0, sizeof(got));
+  g_sum_us = 0;
+  pargs->data_sum_state = JV_SUM_NONE;
   for (uint32_t i = 0; i < header.segs_num; i++) {
     void *dst = jv_phys(segments[i].addr, segments[i].size);
     if (!dst) {
@@ -1550,10 +1710,25 @@ int load_state(FATFS *fs, const char *path) {
       res = state_read(&fp, (uint8_t *)dst + off, n);
       if (res < 0)
         goto out;
+      if (g_want_sum_on) /* as it is in memory, before anything is drawn */
+        data_sum(&got, (uint8_t *)dst + off, n);
       off += n;
       done += n;
       progress_load_at(segments[i].addr + off, done);
     }
+  }
+
+  /* 2c'. The memory just restored against the slot's checksum. A system
+   * whose memory is not what was saved must not run (and write): as with
+   * a read error, the payload stops here. */
+  if (g_want_sum_on) {
+    pargs->data_sum_ms = g_sum_us / 1000;
+    if (got.s1 != g_want_s1 || got.s2 != g_want_s2) {
+      pargs->data_sum_state = JV_SUM_MISMATCH;
+      res = JV_ERR_CHECKSUM;
+      goto out;
+    }
+    pargs->data_sum_state = JV_SUM_OK;
   }
 
   /* 2d. Block writes in the restored OS until the plugin has remounted. */

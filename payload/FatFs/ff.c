@@ -2195,6 +2195,12 @@ static void get_xfileinfo (
 /* exFAT: Get a directry entry block */
 /*-----------------------------------*/
 
+/* JamaisVu: set while f_fixdir looks at an entry block that is not valid,
+/  to tell what is wrong with it: bit 0 - the block is loaded although its
+/  checksum does not fit; bit 1 - although its first entry is marked unused
+/  (the entries behind it must still be in use). */
+static BYTE jv_xdir_lenient;
+
 static FRESULT load_xdir (	/* FR_INT_ERR: invalid entry block */
 	DIR* dp					/* Reading direcotry object pointing top of the entry block to load */
 )
@@ -2207,7 +2213,8 @@ static FRESULT load_xdir (	/* FR_INT_ERR: invalid entry block */
 	/* Load file-directory entry */
 	res = move_window(dp->obj.fs, dp->sect);
 	if (res != FR_OK) return res;
-	if (dp->dir[XDIR_Type] != ET_FILEDIR) return FR_INT_ERR;	/* Invalid order */
+	if (dp->dir[XDIR_Type] != ET_FILEDIR &&
+		!((jv_xdir_lenient & 2) && dp->dir[XDIR_Type] == (ET_FILEDIR & 0x7F))) return FR_INT_ERR;	/* Invalid order */
 	mem_cpy(dirb + 0 * SZDIRE, dp->dir, SZDIRE);
 	sz_ent = (dirb[XDIR_NumSec] + 1) * SZDIRE;
 	if (sz_ent < 3 * SZDIRE || sz_ent > 19 * SZDIRE) return FR_INT_ERR;
@@ -2236,7 +2243,7 @@ static FRESULT load_xdir (	/* FR_INT_ERR: invalid entry block */
 
 	/* Sanity check (do it for only accessible object) */
 	if (i <= MAXDIRB(FF_MAX_LFN)) {
-		if (xdir_sum(dirb) != ld_word(dirb + XDIR_SetSum)) return FR_INT_ERR;
+		if (!(jv_xdir_lenient & 1) && xdir_sum(dirb) != ld_word(dirb + XDIR_SetSum)) return FR_INT_ERR;
 	}
 	return FR_OK;
 }
@@ -2303,18 +2310,61 @@ static FRESULT store_xdir (
 
 	/* Create set sum */
 	st_word(dirb + XDIR_SetSum, xdir_sum(dirb));
-	nent = dirb[XDIR_NumSec] + 1;
 
-	/* Store the direcotry entry block to the directory */
-	res = dir_sdi(dp, dp->blk_ofs);
-	while (res == FR_OK) {
-		res = move_window(dp->obj.fs, dp->sect);
-		if (res != FR_OK) break;
-		mem_cpy(dp->dir, dirb, SZDIRE);
-		dp->obj.fs->wflag = 1;
-		if (--nent == 0) break;
-		dirb += SZDIRE;
-		res = dir_next(dp, 0);
+	/* Store the direcotry entry block to the directory.
+	/  JamaisVu: a block that lies across a sector boundary is two sector
+	/  writes, and power can fail between them. The drive must never hold
+	/  half of one version and half of another under a first entry that
+	/  is in use (the checksum over the block is then wrong, and the block
+	/  is an error to whatever reads the directory). So:
+	/  - the sector with the first entry is written last. A new block's
+	/    other entries are then on the drive, in entries that were free,
+	/    before its first entry makes it exist - in one write.
+	/  - an existing block of which another sector changes as well first
+	/    gets its first entry marked unused (one write): while its two
+	/    sectors are of different versions the object is not there, as
+	/    after a removal, and the last write brings it back whole. A cut
+	/    in between leaves it unused with its other entries in use; that
+	/    is what f_fixdir brings back.
+	/  Entries that already are as they should be are not written. */
+	{
+		UINT pass;
+		LBA_t first;
+		int differs = 0;
+
+		res = dir_sdi(dp, dp->blk_ofs);
+		first = dp->sect;
+		for (pass = 0; pass < 3 && res == FR_OK; pass++) {
+			BYTE* d = dirb;
+
+			nent = dirb[XDIR_NumSec] + 1;
+			res = dir_sdi(dp, dp->blk_ofs);
+			if (pass == 1 && res == FR_OK && differs) {	/* Another sector changes: is the block there now? */
+				res = move_window(dp->obj.fs, dp->sect);
+				if (res == FR_OK && dp->dir[XDIR_Type] == ET_FILEDIR) {
+					dp->dir[XDIR_Type] = ET_FILEDIR & 0x7F;
+					dp->obj.fs->wflag = 1;
+					res = sync_window(dp->obj.fs);
+				}
+			}
+			while (res == FR_OK) {
+				if ((dp->sect == first) == (pass == 2)) {	/* Pass 0, 1: the other sectors; pass 2: the first */
+					res = move_window(dp->obj.fs, dp->sect);
+					if (res != FR_OK) break;
+					if (mem_cmp(dp->dir, d, SZDIRE) != 0) {
+						if (pass == 0) {
+							differs = 1;
+						} else {
+							mem_cpy(dp->dir, d, SZDIRE);
+							dp->obj.fs->wflag = 1;
+						}
+					}
+				}
+				if (--nent == 0) break;
+				d += SZDIRE;
+				res = dir_next(dp, 0);
+			}
+		}
 	}
 	return (res == FR_OK || res == FR_DISK_ERR) ? res : FR_INT_ERR;
 }
@@ -4916,6 +4966,33 @@ FRESULT f_truncate (
 	if (!(fp->flag & FA_WRITE)) LEAVE_FF(fs, FR_DENIED);	/* Check access mode */
 
 	if (fp->fptr < fp->obj.objsize) {	/* Process when fptr is not on the eof */
+#if FF_FS_EXFAT
+		/* JamaisVu: the directory entry is given the new size before the
+		/  clusters past it are freed. Freed first (as below), power failing
+		/  in between left an entry that pointed at free clusters, which the
+		/  next file created could be given as well. This way round the
+		/  clusters are only left allocated, unused. (A chain that got
+		/  fragmented in this very session, stat 3, keeps the old order.) */
+		if (fs->fs_type == FS_EXFAT && fp->obj.stat != 3) {
+			DIR dj;
+			DEF_NAMBUF
+
+			INIT_NAMBUF(fs);
+			res = load_obj_xdir(&dj, &fp->obj);
+			if (res == FR_OK) {
+				st_qword(fs->dirbuf + XDIR_FileSize, fp->fptr);
+				st_qword(fs->dirbuf + XDIR_ValidFileSize, fp->fptr);
+				if (fp->fptr == 0) {
+					st_dword(fs->dirbuf + XDIR_FstClus, 0);
+					fs->dirbuf[XDIR_GenFlags] = 1;
+				}
+				res = store_xdir(&dj);
+				if (res == FR_OK) res = sync_fs(fs);
+			}
+			FREE_NAMBUF();
+			if (res != FR_OK) ABORT(fs, res);
+		}
+#endif
 		if (fp->fptr == 0) {	/* When set file size to zero, remove entire cluster chain */
 			res = remove_chain(&fp->obj, fp->obj.sclust, 0);
 			fp->obj.sclust = 0;
@@ -4941,10 +5018,176 @@ FRESULT f_truncate (
 #endif
 		if (res != FR_OK) ABORT(fs, res);
 	}
+#if FF_FS_EXFAT
+	/* JamaisVu: at the end of the file already - clusters that are still
+	/  chained behind the last one are freed (what a truncation that lost
+	/  power after its directory entry was written leaves behind). */
+	else if (fs->fs_type == FS_EXFAT && fp->obj.stat == 0 && fp->fptr != 0 &&
+			 fp->fptr == fp->obj.objsize && fp->clust >= 2) {
+		ncl = get_fat(&fp->obj, fp->clust);
+		if (ncl == 0xFFFFFFFF) res = FR_DISK_ERR;
+		if (ncl == 1) res = FR_INT_ERR;
+		if (res == FR_OK && ncl < fs->n_fatent) {
+			res = remove_chain(&fp->obj, ncl, fp->clust);
+			fp->flag |= FA_MODIFIED;	/* (the chain may be contiguous again) */
+		}
+		if (res != FR_OK) ABORT(fs, res);
+	}
+#endif
 
 	LEAVE_FF(fs, res);
 }
 
+
+
+
+#if FF_FS_EXFAT
+/*-----------------------------------------------------------------------*/
+/* JamaisVu: Repair the entry blocks of a directory after a power cut    */
+/*-----------------------------------------------------------------------*/
+/* An entry block (file entry, stream entry, name entries) that lies across
+/  a sector boundary is written with two sector writes. Cut between them,
+/  the block has one sector of before and one of after: every field in it
+/  is a valid old or new value, only the checksum over the block no longer
+/  fits - and a block with a wrong checksum is not a file to anything that
+/  reads the directory (FatFs itself stops there with FR_INT_ERR). This
+/  walks the directory and writes the right checksum into every block that
+/  is whole in every other respect. store_xdir no longer leaves such a
+/  block: it marks the first entry unused while the two sectors differ. A
+/  block found like that - first entry unused, all its other entries in
+/  use and in order - is brought back: first entry in use again, with the
+/  checksum that fits. (A removal cut after its first write looks the same
+/  and comes back too; whoever removed it removes it again.) With
+/  only != 0, just the block of that name (ASCII, case as on the drive). A
+/  block that is not whole (entries missing or out of order) is left as it
+/  is. An entry in use behind an unused first entry that could not be
+/  brought back is marked unused as well, when only == 0; entries in use
+/  behind the end of the directory are wiped. fixed: number of blocks and
+/  entries put right. */
+
+FRESULT f_fixdir (
+	const TCHAR* path,	/* Pointer to the directory path */
+	const TCHAR* only,	/* Name of the one object to look at, or 0 */
+	UINT* fixed			/* Count of repairs (added to) */
+)
+{
+	FRESULT res;
+	FATFS *fs;
+	DIR dj;
+	BYTE b;
+	int keep = 0;	/* Behind the first entry of a block that is not whole */
+	UINT tail = 0;	/* Entries looked at behind the end of the directory */
+	DEF_NAMBUF
+
+
+	res = mount_volume(&path, &fs, FA_WRITE);
+	if (res != FR_OK) LEAVE_FF(fs, res);
+	if (fs->fs_type != FS_EXFAT) LEAVE_FF(fs, FR_OK);
+
+	dj.obj.fs = fs;
+	INIT_NAMBUF(fs);
+	res = follow_path(&dj, path);
+	if (res == FR_OK && !(dj.fn[NSFLAG] & NS_NONAME)) {
+		if (dj.obj.attr & AM_DIR) {
+			dj.obj.c_scl = dj.obj.sclust;
+			dj.obj.c_size = ((DWORD)dj.obj.objsize & 0xFFFFFF00) | dj.obj.stat;
+			dj.obj.c_ofs = dj.blk_ofs;
+			init_alloc_info(fs, &dj.obj);
+		} else {
+			res = FR_NO_PATH;
+		}
+	}
+	if (res == FR_OK) res = dir_sdi(&dj, 0);
+
+	while (res == FR_OK) {
+		DWORD ofs = dj.dptr;
+		UINT skip = 0;
+
+		res = move_window(fs, dj.sect);
+		if (res != FR_OK) break;
+		b = dj.dir[XDIR_Type];
+		if (b == 0 || tail) {
+			/* The end of the directory: nothing behind its first unused-and-
+			/  never-used entry counts. A new block whose first entry was to
+			/  go there, cut before that last write, has left its other
+			/  entries behind it, in use; the next block made here would be
+			/  put behind those, out of sight. They are wiped (at most the 18
+			/  a block can have). */
+			if (b & 0x80) {
+				dj.dir[XDIR_Type] = 0;
+				fs->wflag = 1;
+				res = sync_window(fs);
+				if (fixed) (*fixed)++;
+			}
+			if (++tail > 19) break;
+			if (res == FR_OK) res = dir_next(&dj, 0);
+			continue;
+		}
+
+		if (b != ET_STREAM && b != ET_FILENAME) keep = 0;
+		if (b == ET_FILEDIR || b == (ET_FILEDIR & 0x7F)) {
+			dj.blk_ofs = ofs;
+			res = (b == ET_FILEDIR) ? load_xdir(&dj) : FR_INT_ERR;
+			if (res == FR_INT_ERR) {	/* Not a valid block: whole apart from the checksum / the first entry's mark? */
+				jv_xdir_lenient = (b == ET_FILEDIR) ? 1 : 3;
+				res = dir_sdi(&dj, ofs);
+				if (res == FR_OK) res = load_xdir(&dj);
+				jv_xdir_lenient = 0;
+				if (res == FR_OK) {
+					int mine = 1;
+
+					if (only) {	/* The name of the block against the one asked for */
+						UINT si, nc;
+
+						for (si = SZDIRE * 2, nc = 0; nc < fs->dirbuf[XDIR_NumName]; si += 2, nc++) {
+							if ((si % SZDIRE) == 0) si += 2;
+							if (!only[nc] || ld_word(fs->dirbuf + si) != (WCHAR)(BYTE)only[nc]) break;
+						}
+						mine = nc == fs->dirbuf[XDIR_NumName] && !only[nc];
+					}
+					fs->dirbuf[XDIR_Type] = ET_FILEDIR;	/* (as it will be) */
+					if (mine && (b != ET_FILEDIR || xdir_sum(fs->dirbuf) != ld_word(fs->dirbuf + XDIR_SetSum))) {
+						res = dir_sdi(&dj, ofs);
+						if (res == FR_OK) res = move_window(fs, dj.sect);
+						if (res == FR_OK) {
+							dj.dir[XDIR_Type] = ET_FILEDIR;
+							st_word(dj.dir + XDIR_SetSum, xdir_sum(fs->dirbuf));
+							fs->wflag = 1;
+							res = sync_window(fs);
+							if (fixed) (*fixed)++;
+						}
+					}
+					skip = fs->dirbuf[XDIR_NumSec];
+				} else if (res == FR_INT_ERR) {
+					res = FR_OK;	/* Not whole: left alone */
+					/* (in use: with the entries behind it; unused: those are
+					/  marked unused below, one by one) */
+					keep = (b == ET_FILEDIR);
+				}
+			} else if (res == FR_OK) {
+				skip = fs->dirbuf[XDIR_NumSec];
+			}
+			if (res == FR_OK) res = dir_sdi(&dj, ofs);	/* Back to the first entry */
+		} else if (!only && !keep && (b == ET_STREAM || b == ET_FILENAME)) {
+			/* An entry of a block without its first entry */
+			dj.dir[XDIR_Type] = b & 0x7F;
+			fs->wflag = 1;
+			res = sync_window(fs);
+			if (fixed) (*fixed)++;
+		}
+
+		/* The next entry after this one (after this block) */
+		do {
+			if (res == FR_OK) res = dir_next(&dj, 0);
+		} while (res == FR_OK && skip-- > 0);
+	}
+	if (res == FR_NO_FILE) res = FR_OK;	/* Walked to the end of the table */
+	if (res == FR_OK) res = sync_fs(fs);
+	FREE_NAMBUF();
+
+	LEAVE_FF(fs, res);
+}
+#endif	/* FF_FS_EXFAT */
 
 
 

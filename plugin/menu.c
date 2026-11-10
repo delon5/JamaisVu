@@ -4075,6 +4075,31 @@ static void after_resume(void) {
                  used & JV_SAVEDATA_RESAVEDATA ? "resavedata" : "", rw);
       log_append(line);
     }
+    if (g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_LOAD &&
+        jv_last_savedata_repaired()) {
+      snprintf(line, sizeof(line), "    savedata: %u directory entries left "
+               "half written by an interrupted load were put right\r\n",
+               (unsigned)jv_last_savedata_repaired());
+      log_append(line);
+    }
+    if (g_res_debug == JV_TEST_NONE) {
+      /* the checksum of the memory image (slot format 4) */
+      uint32_t st, ms;
+      jv_last_data_sum(&st, &ms);
+      if (g_res_mode == JAMAISVU_MODE_SAVE)
+        snprintf(line, sizeof(line), "    memory image checksum: %s (%u ms)"
+                 "\r\n", st == JV_SUM_OK ? "written with the slot"
+                                         : "NOT written", (unsigned)ms);
+      else
+        snprintf(line, sizeof(line), "    memory image checksum: %s (%u ms)"
+                 "\r\n", st == JV_SUM_OK
+                     ? "the restored memory matches the slot"
+                     : st == JV_SUM_MISMATCH
+                           ? "MISMATCH"
+                           : "none in this slot (saved by an older build)",
+                 (unsigned)ms);
+      log_append(line);
+    }
     if (g_card_remount_root) {
       if (g_card_open_files > 0 || g_card_in_place)
         snprintf(line, sizeof(line), "    after the load: Memory Card on %s "

@@ -32,8 +32,10 @@
 
 /* Compatibility guard: snapshots saved by earlier builds (format 2) must
  * still load after an update. If the format changes, keep a load path for
- * version 2 and extend this check instead of just bumping the number. */
-_Static_assert(SAVESTATE_VERSION == 2,
+ * version 2 and extend this check instead of just bumping the number.
+ * Format 4 is format 2 plus a checksum sector after the memory contents;
+ * "old-format slot (version 2) still loads" below loads a format 2 slot. */
+_Static_assert(SAVESTATE_VERSION == 4,
                "snapshot format changed: old slots must stay loadable");
 
 /* PayloadArguments is read after a load by the plugin build *inside the
@@ -85,6 +87,11 @@ JV_PIN(verify_bad, 2160);
 JV_PIN(verify_screen, 2164);
 JV_PIN(verify_first, 2168);
 JV_PIN(verify_ms, 2172);
+JV_PIN(savedata_files, 2176);
+JV_PIN(savedata_rewritten, 2184);
+JV_PIN(data_sum_state, 2188);
+JV_PIN(data_sum_ms, 2192);
+JV_PIN(savedata_repaired, 2196);
 _Static_assert(sizeof(PayloadArguments) >= 2084,
                "PayloadArguments shrank: old snapshots would break");
 
@@ -101,6 +108,9 @@ static uint8_t *card_before;
 
 static int fail_writes_after = -1; /* fault injection */
 static int writes_done = 0;
+/* the card writes of a run, in order (power-cut test) */
+#define WLOG_N 4096
+static struct { uint32_t sector, count; } wlog[WLOG_N];
 
 int ms_read_sector(void *buf, int sector, int count) {
   if (sector < 0 || count < 0 || (uint32_t)sector + count > card_sectors)
@@ -114,6 +124,10 @@ int ms_write_sector(const void *buf, int sector, int count) {
     return -1;
   if (fail_writes_after >= 0 && writes_done >= fail_writes_after)
     return -1;
+  if (writes_done < WLOG_N) {
+    wlog[writes_done].sector = (uint32_t)sector;
+    wlog[writes_done].count = (uint32_t)count;
+  }
   writes_done++;
   memcpy(card + (size_t)sector * 512, buf, (size_t)count * 512);
   return 0;
@@ -564,6 +578,12 @@ static void t_path_len(uint8_t *st) {
 }
 
 static void t_none(uint8_t *st) { (void)st; }
+static SaveStateSum *sum_sector(uint8_t *st) {
+  SaveStateHeader *h = (SaveStateHeader *)st;
+  return (SaveStateSum *)(st + ALIGN(h->data_offset + h->data_size, 512));
+}
+static void t_sum_flip(uint8_t *st) { sum_sector(st)->s1 ^= 1; }
+static void t_sum_zero(uint8_t *st) { memset(sum_sector(st), 0, 512); }
 
 /* ------------------------------------------------------------------------ */
 
@@ -653,6 +673,10 @@ int main(int argc, char **argv) {
         args.savedata_files > 0, "savedata count reported to the plugin");
   CHECK(args.savedata_folders == (JV_SAVEDATA_SYSTEM | JV_SAVEDATA_RESAVEDATA),
         "savedata folders reported to the plugin");
+  CHECK(((SaveStateHeader *)st)->version == 4 &&
+        sum_sector(st)->magic == JV_SUM_MAGIC &&
+        args.data_sum_state == JV_SUM_OK,
+        "save: checksum sector written and reported");
 
   /* --- Change everything ---------------------------------------------- */
   printf("modify card + memory\n");
@@ -681,6 +705,8 @@ int main(int argc, char **argv) {
   unmount();
   printf("  load_state -> %d (applied=%u)\n", res, args.applied);
   CHECK(res == JV_OK, "load failed: %d", res);
+  CHECK(args.data_sum_state == JV_SUM_OK,
+        "load: the restored memory was not checked against the checksum");
 
   /* memory = snapshot, except the write-block flag which is now armed */
   CHECK(*(uint32_t *)jv_phys(FLAG_PA, 4) == 1, "write-block flag not armed");
@@ -759,6 +785,63 @@ int main(int argc, char **argv) {
   ((master_block_t *)card)->partitions[0].code = 0;
   expect_rejected("no mediaid partition", slot, state_copy, slot_size, t_none, JV_ERR_MEDIAID);
   ((master_block_t *)card)->partitions[0].code = 0xd;
+
+  /* --- Memory image checksum (format 4) ---------------------------------- */
+  printf("memory image checksum\n");
+  expect_rejected("damaged checksum sector", slot, state_copy, slot_size, t_sum_flip, JV_ERR_BAD_STATE);
+  expect_rejected("missing checksum sector", slot, state_copy, slot_size, t_sum_zero, JV_ERR_BAD_STATE);
+  {
+    uint8_t *tmp = malloc(slot_size);
+    SaveStateHeader *h = (SaveStateHeader *)tmp;
+
+    /* a sampled word of the memory contents differs on the card: found
+     * once the memory is back, and the payload must then stop (applied) */
+    memcpy(tmp, state_copy, slot_size);
+    tmp[h->data_offset + 5 * JV_SUM_STRIDE] ^= 0x01;
+    write_state(slot, tmp, slot_size);
+    reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+    mount();
+    res = load_state(&fs, slot);
+    unmount();
+    printf("  %-44s -> %d\n", "memory contents changed (sampled word)", res);
+    CHECK(res == JV_ERR_CHECKSUM && args.applied == 1 &&
+          args.data_sum_state == JV_SUM_MISMATCH,
+          "changed memory contents: res %d applied %u state %u", res,
+          (unsigned)args.applied, (unsigned)args.data_sum_state);
+
+    /* a whole sector of the memory contents replaced by another one */
+    memcpy(tmp, state_copy, slot_size);
+    memcpy(tmp + h->data_offset + 512 * 9, tmp + h->data_offset + 512 * 3, 512);
+    if (memcmp(tmp, state_copy, slot_size)) {
+      write_state(slot, tmp, slot_size);
+      reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+      mount();
+      res = load_state(&fs, slot);
+      unmount();
+      printf("  %-44s -> %d\n", "memory contents: a misplaced sector", res);
+      CHECK(res == JV_ERR_CHECKSUM, "misplaced sector: res %d", res);
+    }
+
+    /* an old-format slot (version 2: no checksum sector) still loads */
+    memcpy(tmp, state_copy, slot_size);
+    h->version = 2;
+    refresh_crcs(tmp);
+    memset(sum_sector(tmp), 0, 512);
+    write_state(slot, tmp, slot_size);
+    fill_pattern(0xdddd);
+    reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+    mount();
+    res = load_state(&fs, slot);
+    unmount();
+    printf("  %-44s -> %d\n", "old-format slot (version 2) still loads", res);
+    CHECK(res == JV_OK && args.data_sum_state == JV_SUM_NONE,
+          "old-format slot: res %d state %u", res,
+          (unsigned)args.data_sum_state);
+    CHECK(ram_equal(ram_a), "old-format slot: memory not restored");
+
+    write_state(slot, state_copy, slot_size); /* restore */
+    free(tmp);
+  }
   /* --- Save failure modes ------------------------------------------------ */
   printf("save failure modes\n");
   {
@@ -989,6 +1072,229 @@ int main(int argc, char **argv) {
     unmount();
     guard_deny_all();
     free(ram_e);
+  }
+
+  /* --- Power cut during a load's savedata restore ------------------------
+   * The restore is the one part of a run that changes the file system
+   * (through FatFs). Here it is cut after every single card write in
+   * turn - the card then holds exactly what a power cut at that moment
+   * leaves - and each of those cards is checked: by fsck.exfat, and by
+   * loading the slot once more, which must finish the restore.
+   *
+   * What a cut may leave: clusters that are allocated and unused, and a
+   * file whose directory entry is marked unused for the moment (its other
+   * entries, still in use, are what fsck calls an "unknown entry type").
+   * What it must never leave: an entry that points at clusters that are
+   * free, an entry block with a wrong checksum, or anything else fsck
+   * objects to. And the next load of the slot must put all of it right.
+   *
+   * An entry block that lies across two sectors is the hard case, so the
+   * whole run is repeated with the folder's entries shifted (pad files of
+   * 5 entries each: 16 runs put every block at every position). All 16 on
+   * one cluster size, two on the others; JV_POWERCUT_QUICK=1: one,
+   * JV_POWERCUT_FULL=1: all 16 on every cluster size. ------------------ */
+  printf("power cut during the savedata restore of a load\n");
+  {
+    size_t card_bytes = (size_t)card_sectors * 512;
+    uint8_t *card_base = malloc(card_bytes), *card_cut = malloc(card_bytes);
+    static uint8_t big[100 * 1024], rd[128 * 1024];
+    char img[300], cmd[700], fsck_out[320];
+    int cuts = 0, leaks = 0, hidden = 0, dangerous = 0, repair_bad = 0;
+    int not_error = 0, repaired = 0, n_shifts;
+    int explore = getenv("JV_POWERCUT_EXPLORE") != NULL;
+
+    for (size_t i = 0; i < sizeof(big); i++)
+      big[i] = (uint8_t)(i * 13 + (i >> 9));
+    mount();
+    n_shifts = getenv("JV_POWERCUT_QUICK") ? 1
+               : getenv("JV_POWERCUT_FULL") || fs.csize == 64 ? 16 : 2;
+    unmount();
+    memcpy(card_base, card, card_bytes);
+    snprintf(img, sizeof(img), "%s/powercut.img", outdir);
+    snprintf(fsck_out, sizeof(fsck_out), "%s.fsck", img);
+    snprintf(cmd, sizeof(cmd), "fsck.exfat -n '%s' >'%s' 2>&1", img, fsck_out);
+
+    for (int shift = 0; shift < n_shifts; shift++) {
+      int total;
+
+      memcpy(card, card_base, card_bytes);
+
+      /* the state to come back to: several clusters of savedata, behind
+       * `shift` pad files that move every later entry by 5 places */
+      allow_everything();
+      mount();
+      for (int k = 0; k < shift; k++) {
+        char pad[96];
+        snprintf(pad, sizeof(pad), "ux0:user/00/savedata/PCSE00123/"
+                 "pad%02d_a_name_of_thirty_five_letters.bin", k);
+        write_file(pad, sav_a, 10);
+      }
+      write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_a, sizeof(sav_a));
+      write_file("ux0:user/00/savedata/PCSE00123/big.bin", big, sizeof(big));
+      write_file("ux0:user/00/savedata/PCSE00123/shrunk.bin", big, 60000);
+      write_file("ux0:user/00/savedata/PCSE00123/long.bin", big, 20000);
+      write_file("ux0:user/00/savedata/PCSE00123/emptied.bin", big, 0);
+      write_file("ux0:resavedata/PCSE00123/save.dat", sav_b, sizeof(sav_b));
+      unmount();
+      guard_deny_all();
+      fill_pattern(0x7777);
+      stamp_slot(slot);
+      reset_args(JAMAISVU_MODE_SAVE, slot, slot_size);
+      mount();
+      res = save_state(&fs, slot);
+      unmount();
+      CHECK(res == JV_OK, "power cut: save failed: %d", res);
+
+      /* what the card looks like when the load starts: a file gone, one
+       * shorter, one longer, one with other content, new ones */
+      allow_everything();
+      mount();
+      f_unlink("ux0:user/00/savedata/PCSE00123/big.bin");
+      write_file("ux0:user/00/savedata/PCSE00123/data.bin", sav_b, sizeof(sav_b));
+      write_file("ux0:user/00/savedata/PCSE00123/shrunk.bin", big, 9000);
+      write_file("ux0:user/00/savedata/PCSE00123/grown.bin", big, 70000);
+      /* longer on the card than in the slot: the restore cuts it back,
+       * one to a part of itself, one to nothing */
+      write_file("ux0:user/00/savedata/PCSE00123/long.bin", big, 90000);
+      write_file("ux0:user/00/savedata/PCSE00123/emptied.bin", big, 30000);
+      write_file("ux0:resavedata/PCSE00123/save.dat", sav_x, sizeof(sav_x));
+      write_file("ux0:resavedata/PCSE00123/extra.dat", big, 50000);
+      unmount();
+      guard_deny_all();
+      memcpy(card_cut, card, card_bytes);
+
+      /* the whole load once, to count its card writes */
+      writes_done = 0;
+      reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+      mount();
+      res = load_state(&fs, slot);
+      unmount();
+      total = writes_done;
+      CHECK(res == JV_OK && total > 20, "power cut: full load %d, %d writes",
+            res, total);
+      if (explore && shift == atoi(getenv("JV_POWERCUT_EXPLORE"))) {
+        printf("    volume: fat at %u, data at %u, cluster %u sectors\n",
+               (unsigned)fs.fatbase, (unsigned)fs.database, (unsigned)fs.csize);
+        for (int n = 0; n < total && n < WLOG_N; n++)
+          printf("    write %3d: sector %u x%u (%s)\n", n,
+                 (unsigned)wlog[n].sector, (unsigned)wlog[n].count,
+                 wlog[n].sector < fs.fatbase ? "boot region"
+                 : wlog[n].sector < fs.database ? "FAT"
+                 : "cluster heap");
+      }
+
+      for (int n = 0; n < total; n++) {
+        int ok;
+        cuts++;
+        memcpy(card, card_cut, card_bytes);
+        writes_done = 0;
+        fail_writes_after = n; /* the card takes n writes, then no more */
+        reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+        mount();
+        res = load_state(&fs, slot);
+        unmount();
+        fail_writes_after = -1;
+        if (res == JV_OK)
+          not_error++;
+
+        /* the card as the cut left it */
+        dump_partition(img);
+        if (system(cmd) != 0) {
+          char ln[400];
+          int leak = 0, hid = 0;
+          FILE *f = fopen(fsck_out, "r");
+          while (f && fgets(ln, sizeof(ln), f)) {
+            if (!strstr(ln, "ERROR"))
+              continue;
+            if (strstr(ln, "more clusters are allocated")) {
+              leak = 1;
+            } else if (strstr(ln, "unknown entry type 0xc0") ||
+                       strstr(ln, "unknown entry type 0xc1")) {
+              hid = 1;
+            } else {
+              dangerous++;
+              printf("    shift %d, cut after %d writes: %s", shift, n, ln);
+            }
+          }
+          if (f)
+            fclose(f);
+          leaks += leak;
+          hidden += hid;
+          if (explore)
+            printf("    shift %d, cut after %d writes: %s%s\n", shift, n,
+                   leak ? "unused clusters left allocated " : "",
+                   hid ? "an entry hidden" : "");
+        }
+
+        /* loading the slot again must finish the job */
+        reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+        mount();
+        res = load_state(&fs, slot);
+        unmount();
+        repaired += (int)args.savedata_repaired;
+        ok = res == JV_OK;
+        allow_everything();
+        mount();
+        ok = ok &&
+             read_file("ux0:user/00/savedata/PCSE00123/big.bin", rd, sizeof(rd), &len) == 0 &&
+             len == sizeof(big) && memcmp(rd, big, len) == 0 &&
+             read_file("ux0:user/00/savedata/PCSE00123/data.bin", rd, sizeof(rd), &len) == 0 &&
+             len == sizeof(sav_a) && memcmp(rd, sav_a, len) == 0 &&
+             read_file("ux0:user/00/savedata/PCSE00123/shrunk.bin", rd, sizeof(rd), &len) == 0 &&
+             len == 60000 && memcmp(rd, big, len) == 0 &&
+             read_file("ux0:user/00/savedata/PCSE00123/long.bin", rd, sizeof(rd), &len) == 0 &&
+             len == 20000 && memcmp(rd, big, len) == 0 &&
+             read_file("ux0:user/00/savedata/PCSE00123/emptied.bin", rd, sizeof(rd), &len) == 0 &&
+             len == 0 &&
+             read_file("ux0:user/00/savedata/PCSE00123/grown.bin", rd, sizeof(rd), &len) != 0 &&
+             read_file("ux0:resavedata/PCSE00123/save.dat", rd, sizeof(rd), &len) == 0 &&
+             len == sizeof(sav_b) && memcmp(rd, sav_b, len) == 0 &&
+             read_file("ux0:resavedata/PCSE00123/extra.dat", rd, sizeof(rd), &len) != 0;
+        for (int k = 0; ok && k < shift; k++) {
+          char pad[96];
+          snprintf(pad, sizeof(pad), "ux0:user/00/savedata/PCSE00123/"
+                   "pad%02d_a_name_of_thirty_five_letters.bin", k);
+          ok = read_file(pad, rd, sizeof(rd), &len) == 0 && len == 10;
+        }
+        unmount();
+        guard_deny_all();
+        dump_partition(img);
+        if (!ok || system(cmd) != 0) {
+          repair_bad++;
+          printf("    shift %d, cut after %d writes: loading again did not "
+                 "put it right (res %d)\n", shift, n, res);
+          if (explore) { /* the card as the cut left it, to look at */
+            char keep[340];
+            memcpy(card, card_cut, card_bytes);
+            writes_done = 0;
+            fail_writes_after = n;
+            reset_args(JAMAISVU_MODE_LOAD, slot, 0);
+            mount();
+            load_state(&fs, slot);
+            unmount();
+            fail_writes_after = -1;
+            snprintf(keep, sizeof(keep), "%s/powercut_fail_%d_%d.img", outdir,
+                     shift, n);
+            dump_partition(keep);
+          }
+        }
+      }
+    }
+    (void)hidden; /* (fsck does not report a hidden entry as an error) */
+    printf("  %d cut points over %d layouts: nothing unsafe left on the "
+           "card; %d left unused clusters allocated; loading the slot again "
+           "finished every one (%d directory entries put right)\n", cuts,
+           n_shifts, leaks, repaired);
+    CHECK(dangerous == 0, "power cut: %d findings of a kind that must "
+          "never be left on the card", dangerous);
+    CHECK(repair_bad == 0, "power cut: %d cut points that loading the slot "
+          "again did not put right", repair_bad);
+    CHECK(not_error == 0, "power cut: %d cut loads reported success",
+          not_error);
+    CHECK(n_shifts < 16 || repaired > 0, "power cut: no entry block across "
+          "two sectors was ever cut (the test no longer covers that)");
+    free(card_cut);
+    free(card_base);
   }
 
   snprintf(out, sizeof(out), "%s/04_final.img", outdir);

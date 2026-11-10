@@ -31,11 +31,21 @@ The original README warned that *"your SD Card and/or Memory Card may be corrupt
 - every memory segment (only DRAM/VRAM and the two known system regions)
 - that the state was made on the same Memory Card
 
-A corrupted or tampered state is rejected with nothing changed. (The memory contents themselves carry no checksum: the payload runs with the data cache off, and a CPU pass over the whole image would take minutes. The card's own error correction covers the medium.)
+A corrupted or tampered state is rejected with nothing changed.
+
+**The restored memory is checked before the system runs on it.** A save stores a checksum of the memory contents in the slot (slot format 4; slots saved by earlier builds have none and load as before). A load compares it with the memory it has just restored. If they differ, the payload stops with the LED blinking, as after a read error, instead of resuming a system whose memory is not what was saved.
+- The payload runs with the data cache off, where a pass over every byte of the image takes minutes. So the checksum samples one 32-bit word in every 64 bytes, eight per sector, in order. That catches a sector that is missing, stale, misplaced or from another file. A single flipped bit in a word that is not sampled is left to the card's own error correction and the bus CRC, as before.
+- `log.txt` records it on every run (`memory image checksum: …`), with the time the sums took.
 
 **Load writes are fenced.**
 - Savedata restore can only write inside ux0's exFAT area, never the partition table or boot sectors.
 - The mediaid sector is restored only to the sector it came from, and can no longer fall back to sector 0 (the MBR), which the original could.
+
+**A power cut during a load cannot leave the card unsafe.** Putting the savedata back is the one step that changes the file system itself (through FatFs), so it is ordered to survive losing power after any single write:
+- A file that is cut back gets its directory entry shortened before its clusters are freed. The other way round, which FatFs does by default, leaves for a moment an entry that points at free clusters, which the console could then give to another file.
+- A directory entry that lies across two sectors takes two writes. A new one is written so that it only exists with the last write. An existing one is marked unused while its two sectors differ, like a removed file, and is back with the last write. The drive never holds an entry with a wrong checksum.
+- What a cut can leave is therefore limited to clusters that are allocated and unused, and a file that is hidden for the moment. Loading the slot again finishes the job: before it reads a savedata folder, the load brings hidden entries back and clears leftovers (`f_fixdir` in `payload/FatFs/ff.c`), and it frees clusters still chained behind a file's end.
+- `tests/host/test_state.c` proves this by brute force. It cuts the restore after every single card write in turn, on three cluster sizes and with the folder's entries shifted through all sixteen positions in a sector, runs `fsck.exfat` on each card, and loads the slot again. Over 2,300 cut points, none leaves anything unsafe and every one is finished by the second load.
 
 **The restored OS cannot write with stale caches.** The payload arms a write block *inside the restored memory image*. The plugin re-reads every exFAT drive from its storage before writes are allowed again. If a file that was open at snapshot time no longer exists, **that drive** stays **read-only until restart** rather than risk writing to the wrong clusters. The other drives, including the system's own internal storage, stay writable. (Blocking writes on every drive, as an earlier version did, left the system unable to write anything and made it restart.)
 
@@ -61,7 +71,7 @@ No software can promise "100 %". These are the remaining risks:
 
 - **Hardware coverage.** Tested on 3.60 only: a PCH-2000 (card as ux0), a PCH-1000 and a PS TV (both with usbmc). Other storage plugins and setups are untested. See the README's Compatibility section.
 - **Load is inherently invasive.** It replaces the entire OS memory. The ux0 remount (`plugin/fs.c`, inherited from the original) refreshes the exFAT driver's caches, but it is reverse-engineered code. JamaisVu's protections make an inconsistency fail safe (read-only) rather than silently corrupt, but it can't rule out every bug in that path.
-- **A card I/O error in the middle of a load.** The payload stops (the LED blinks) instead of resuming a half-restored system. Savedata of the loaded game may be partially restored, as after a power cut.
+- **A card I/O error or a power cut in the middle of a load.** The payload stops (the LED blinks) instead of resuming a half-restored system. The savedata of the loaded game may be partly the slot's and partly what it was. The file system itself stays valid (see above), and loading the slot again completes the restore. Until then the game may not find all of its save files.
 - **A slot brings back the system as it was when it was saved**, plugin settings included. A slot saved while something was wrong will bring it back on every load. Overwrite it with a new save rather than loading it again.
 - **An oversized home screen.** On the PS TV, loads froze while the LiveArea had more apps than it could show and rebuilt its database at every restart. They worked again once the home screen was cleaned up. This is likely but not proven to be the cause. If loads start freezing, check that every installed app has a bubble.
 - **What the log shows.** Every run is recorded in `data/JamaisVu/log.txt`. When it grows past 64 KB it is renamed `log.old.txt` and a new one starts, so the run before a restart is always kept. A load's step record (`trace.bin`) stays open for 60 s after the wake-up, so a later restart still shows how long the system lived.

@@ -183,6 +183,13 @@ void jv_last_savedata(uint32_t *selected, uint32_t *files, uint32_t *folders,
   *folders = pargs.savedata_folders;
   *rewritten = pargs.savedata_rewritten;
 }
+void jv_last_data_sum(uint32_t *state, uint32_t *ms) {
+  *state = pargs.data_sum_state;
+  *ms = pargs.data_sum_ms;
+}
+uint32_t jv_last_savedata_repaired(void) {
+  return pargs.savedata_repaired;
+}
 uint32_t pargs_size = sizeof(PayloadArguments);
 
 static int g_armed = 0;
@@ -608,6 +615,9 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
   pargs.verify_ms = 0;
   pargs.savedata_files = pargs.savedata_folders = 0; /* set by the payload */
   pargs.savedata_rewritten = 0;
+  pargs.data_sum_state = JV_SUM_NONE; /* set by the payload */
+  pargs.data_sum_ms = 0;
+  pargs.savedata_repaired = 0;
   {
     uint32_t ttbcr = 0;
     __asm__ volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(ttbcr));

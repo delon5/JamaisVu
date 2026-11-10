@@ -152,7 +152,18 @@ typedef struct {
   /* load: of those, the files whose content on the card differed from
    * the snapshot's and were rewritten (identical ones are not touched) */
   uint32_t savedata_rewritten;
+  /* The checksum of the memory image (JV_SUM_*): written with the slot
+   * (save), or compared with the memory just restored (load); the time
+   * the sums took. A load of a slot made before format 4 has none. */
+  uint32_t data_sum_state, data_sum_ms;
+  /* load: directory entries of the savedata folders that an earlier,
+   * interrupted load had left half written, and that were put right */
+  uint32_t savedata_repaired;
 } PayloadArguments;
+
+#define JV_SUM_NONE     0 /* no checksum in this slot (format 2 or 3) */
+#define JV_SUM_OK       1 /* written (save) / the restored memory matches */
+#define JV_SUM_MISMATCH 2 /* load: the restored memory does not match */
 
 #define JV_REFUSE_PROCESSES 1 /* more processes than the snapshot holds */
 #define JV_REFUSE_CONTEXT   2 /* a process's translation table not found */
@@ -314,6 +325,7 @@ enum JamaisVuModes {
 #define JV_ERR_TIMER         (-13) /* CPU cycle counter is not running     */
 #define JV_ERR_HW            (-14) /* syscon / crypto engine did not answer */
 #define JV_ERR_CRASH         (-15) /* the payload hit a CPU exception      */
+#define JV_ERR_CHECKSUM      (-16) /* restored memory differs from the slot */
 
 typedef struct {
   uint32_t addr; /* physical address (or special value) */
@@ -339,6 +351,8 @@ typedef struct {
  *   [segtab_offset, +segtab_size)  Segment table
  *   zero padding up to data_offset (sector aligned)
  *   [data_offset, +data_size)       memory contents, in segment table order
+ * Version 4 is version 2 plus, in the sector after the memory contents
+ * (sector aligned), a SaveStateSum: a checksum of the memory contents.
  *
  * body_crc covers [0x200, data_offset). The header is written last, so an
  * interrupted save never produces a loadable file. */
@@ -361,6 +375,25 @@ typedef struct {
   uint32_t header_crc; /* crc32 of all preceding header bytes */
 } SaveStateHeader;
 
+/* The checksum of the memory contents (version 4). The payload runs with
+ * the data cache off: a pass over every byte of ~500 MB takes minutes
+ * (version 3's CRCs, build 3ab11e1: saves sat at 0%), so one 32-bit word
+ * in every JV_SUM_STRIDE bytes is summed, at stream offsets that are a
+ * multiple of the stride: s1 += word; s2 += s1 (both modulo 2^32, so the
+ * order counts). Every sector contributes 8 words: a sector that is
+ * missing, stale, misplaced or from another file is caught; a flipped bit
+ * in a word that is not sampled is left to the card's own error
+ * correction and the bus CRC, as before. */
+#define JV_SUM_STRIDE 64u
+#define JV_SUM_MAGIC  0x4D55534A /* "JSUM" */
+typedef struct {
+  uint32_t magic;
+  uint32_t stride;    /* JV_SUM_STRIDE */
+  uint32_t data_size; /* bytes covered: the header's data_size */
+  uint32_t s1, s2;
+  uint32_t crc;       /* crc32 of the preceding fields */
+} SaveStateSum;
+
 #define SAVESTATE_MAGIC   0x54535653
 /* Snapshot format. Snapshots must keep loading after a plugin update:
  * changing this requires the load path to still accept every older
@@ -369,7 +402,7 @@ typedef struct {
  * snapshot, and that old plugin reads PayloadArguments after the load:
  * PayloadArguments is append-only (existing fields never move or change
  * meaning; the layout is pinned in tests/host/test_state.c). */
-#define SAVESTATE_VERSION 2
+#define SAVESTATE_VERSION 4
 
 #define SAVESTATE_MEDIAID_OFFSET 0x200
 #define SAVESTATE_FILES_OFFSET   0x400

@@ -307,6 +307,7 @@ FRESULT f_read (FIL* fp, void* buff, UINT btr, UINT* br);			/* Read data from th
 FRESULT f_write (FIL* fp, const void* buff, UINT btw, UINT* bw);	/* Write data to the file */
 FRESULT f_lseek (FIL* fp, FSIZE_t ofs);								/* Move file pointer of the file object */
 FRESULT f_truncate (FIL* fp);										/* Truncate the file */
+FRESULT f_fixdir (const TCHAR* path, const TCHAR* only, UINT* fixed);	/* JamaisVu: repair entry blocks cut in two by a power failure */
 FRESULT f_sync (FIL* fp);											/* Flush cached data of the writing file */
 FRESULT f_opendir (DIR* dp, const TCHAR* path);						/* Open a directory */
 FRESULT f_closedir (DIR* dp);										/* Close an open directory */
