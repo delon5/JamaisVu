@@ -2367,6 +2367,29 @@ static uint32_t thread_user_pc(SceUID thid) {
 /* a copy out of another process's memory (SceSysmem's
  * ksceKernelMemcpyUserToKernelForPid, by NID so every SDK builds it) */
 static int (*g_copy_pid)(SceUID pid, void *dst, uintptr_t src, SceSize len);
+/* the name of a kernel object by its id (SceSysmem's ksceGUIDGetName, by
+ * NID): what a waiting thread waits on */
+static int (*g_guid_name)(SceUID guid, const char **name);
+
+/* the file behind a descriptor of a process (SceIofilemgr's
+ * ksceIoGetFileInfo, by NID; own layout of its 0x828-byte result): the
+ * path it was opened by and the path on the drive */
+typedef struct {
+  char path[0x400];
+  char path2[0x400];
+  uint32_t rest[10];
+} JvFileInfo;
+static int (*g_file_info)(SceUID fd, SceUID pid, JvFileInfo *info);
+
+static void wait_name(SceUID id, char *out, size_t n) {
+  const char *name = NULL;
+  out[0] = '\0';
+  if (!g_guid_name || id == (SceUID)-1 || id == 0)
+    return;
+  if (g_guid_name(id, &name) < 0 || (uintptr_t)name < 0x100000)
+    return;
+  snprintf(out, n, " \"%.31s\"", name);
+}
 
 /* Diagnostics: the return addresses on a thread's user stack that fall in
  * a module's code (a rough backtrace: the game's own functions show as
@@ -2567,6 +2590,12 @@ static void thread_dump(SceUID pid, const char *why) {
     if (module_get_export_func(KERNEL_PID, "SceSysmem", TAI_ANY_LIBRARY,
                                0x605275F8, (uintptr_t *)&g_copy_pid) < 0)
       g_copy_pid = NULL;
+    if (module_get_export_func(KERNEL_PID, "SceSysmem", TAI_ANY_LIBRARY,
+                               0xA78755EB, (uintptr_t *)&g_guid_name) < 0)
+      g_guid_name = NULL;
+    if (module_get_export_func(KERNEL_PID, "SceIofilemgr", TAI_ANY_LIBRARY,
+                               0xA1EF2648, (uintptr_t *)&g_file_info) < 0)
+      g_file_info = NULL;
     snprintf(line, sizeof(line), "    thread registers %s, debug "
              "suspend %s, module lookup %s, memory of the process %s\r\n",
              g_thread_regs ? "available" : "NOT available",
@@ -2577,6 +2606,7 @@ static void thread_dump(SceUID pid, const char *why) {
   }
   memset(tid, 0, sizeof(tid));
   ksceKernelGetProcessTitleId(pid, tid, sizeof(tid));
+  int64_t t_list = ksceKernelGetSystemTimeWide();
   int res = ksceKernelGetThreadIdList(pid, ids, 96, &n);
   snprintf(line, sizeof(line), "    threads of %s (pid 0x%08X), %s: %d "
            "(list %s0x%08X)\r\n", tid, (unsigned)pid, why, n,
@@ -2592,11 +2622,13 @@ static void thread_dump(SceUID pid, const char *why) {
       snprintf(line, sizeof(line), "      0x%08X: no info\r\n",
                (unsigned)ids[i]);
     } else {
+      char wn[40];
       info.name[sizeof(info.name) - 1] = '\0';
+      wait_name((info.status & 8) ? info.waitId : -1, wn, sizeof(wn));
       snprintf(line, sizeof(line), "      %-24s status %3u wait type %2u "
-               "id 0x%08X prio %3d cpu %d\r\n", info.name,
+               "id 0x%08X%s prio %3d cpu %d\r\n", info.name,
                (unsigned)info.status, (unsigned)info.waitType,
-               (unsigned)info.waitId, (int)info.currentPriority,
+               (unsigned)info.waitId, wn, (int)info.currentPriority,
                (int)info.currentCpuId);
       memset(&act0[i], 0, sizeof(act0[i]));
       memcpy(&act0[i].run, &info.runClocks,
@@ -2630,10 +2662,30 @@ static void thread_dump(SceUID pid, const char *why) {
           }
           where_is(pid, r.entry[e].pc, pc, sizeof(pc));
           where_is(pid, r.entry[e].lr, lr, sizeof(lr));
+          if (!r.entry[e].pc && !r.entry[e].sp)
+            continue; /* no such set */
           snprintf(line, sizeof(line), "        set %d: pc %s lr %s sp "
-                   "0x%08X mode 0x%02X\r\n", e, pc, lr,
-                   (unsigned)r.entry[e].sp, (unsigned)(r.entry[e].cpsr & 0x1F));
+                   "0x%08X mode 0x%02X r0-r3 %08X %08X %08X %08X\r\n", e, pc,
+                   lr, (unsigned)r.entry[e].sp,
+                   (unsigned)(r.entry[e].cpsr & 0x1F),
+                   (unsigned)r.entry[e].r[0], (unsigned)r.entry[e].r[1],
+                   (unsigned)r.entry[e].r[2], (unsigned)r.entry[e].r[3]);
           log_queue(line);
+          /* in a call of the system with a file descriptor as its first
+           * argument: which file */
+          if (g_file_info && (r.entry[e].cpsr & 0x1F) == 0x10 &&
+              (r.entry[e].r[0] & 0xF0000000u) == 0x40000000u &&
+              !strncmp(pc, "SceLibKernel", 12)) {
+            static JvFileInfo fi;
+            memset(&fi, 0, sizeof(fi));
+            if (g_file_info((SceUID)r.entry[e].r[0], pid, &fi) >= 0) {
+              fi.path[sizeof(fi.path) - 1] = '\0';
+              fi.path2[sizeof(fi.path2) - 1] = '\0';
+              snprintf(line, sizeof(line), "          r0 is the file %.70s "
+                       "(%.70s)\r\n", fi.path, fi.path2);
+              log_queue(line);
+            }
+          }
         }
       }
     }
@@ -2662,18 +2714,8 @@ static void thread_dump(SceUID pid, const char *why) {
       JvThreadRegs r;
       if (thread_regs(active[a], &r) >= 0)
         for (int e = 0; e < 2; e++)
-          if ((r.entry[e].cpsr & 0x1F) == 0x10) {
-            char mod[48];
-            uint32_t own = thread_stack_scan(pid, info.name, r.entry[e].sp,
-                                             r.entry[e].pc);
-            /* the code it is in if that is the game's own, and the code
-             * that called it */
-            where_is(pid, r.entry[e].pc, mod, sizeof(mod));
-            if (mod[0] != '0' && strncmp(mod, "Sce", 3) != 0)
-              thread_code_calls(pid, info.name, r.entry[e].pc + 0x40);
-            if (own)
-              thread_code_calls(pid, info.name, own);
-          }
+          if ((r.entry[e].cpsr & 0x1F) == 0x10)
+            thread_stack_scan(pid, info.name, r.entry[e].sp, 0);
     }
   }
   for (int a = 0; a < n_extra && g_thread_regs; a++) {
@@ -2687,13 +2729,14 @@ static void thread_dump(SceUID pid, const char *why) {
       continue;
     for (int e = 0; e < 2; e++)
       if ((r.entry[e].cpsr & 0x1F) == 0x10) {
-        uint32_t own[2];
+        /* (the code dumps of 2ad3589 and 440d292 pushed the first
+         * minute of a run out of log.old: only on request now, with
+         * data/JamaisVu/codedump on the card) */
+        uint32_t own;
         thread_stack_scan(pid, info.name, r.entry[e].sp, 0);
-        own[0] = g_scan_own[0];
-        own[1] = g_scan_own[1];
-        for (int k = 0; k < 2; k++)
-          if (own[k])
-            thread_code_calls(pid, info.name, own[k]);
+        own = g_scan_own[0];
+        if (own && jv_switch_file("codedump"))
+          thread_code_calls(pid, info.name, own);
       }
   }
   if (main_sp)
@@ -2704,6 +2747,10 @@ static void thread_dump(SceUID pid, const char *why) {
    * gave the cpu up to wait, how often it was pushed off. A thread that
    * should tick 60 times a second and shows nothing is asleep for good. */
   ksceKernelDelayThread(1000000);
+  snprintf(line, sizeof(line), "      what the threads did in the %d ms "
+           "since their lines above:\r\n",
+           (int)((ksceKernelGetSystemTimeWide() - t_list) / 1000));
+  log_queue(line);
   for (int i = 0; i < n && i < 96; i++) {
     SceKernelThreadInfo info;
     uint64_t run = 0;
