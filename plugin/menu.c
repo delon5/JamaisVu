@@ -2835,6 +2835,148 @@ static void read_probe(SceUID pid, const JvReadProbe *p, const char *why) {
   log_queue_drain();
 }
 
+/* Is this thread's user-mode register set a read at a position? Then the
+ * read's arguments go to *p. */
+static int read_args(SceUID pid, const JvThreadRegs *r, JvReadProbe *p) {
+  for (int e = 0; e < 2; e++) {
+    uint64_t off = 0;
+    if ((r->entry[e].cpsr & 0x1F) != 0x10 ||
+        (r->entry[e].r[0] & 0xF0000000u) != 0x40000000u ||
+        r->entry[e].r[1] < 0x80000000u || !r->entry[e].r[2] ||
+        r->entry[e].r[2] > 0x4000000u || r->entry[e].r[3] != r->entry[e].sp ||
+        !g_copy_pid || g_copy_pid(pid, &off, r->entry[e].r[3], 8) < 0)
+      continue;
+    p->fd = (SceUID)r->entry[e].r[0];
+    p->size = r->entry[e].r[2];
+    p->off = off;
+    return 1;
+  }
+  return 0;
+}
+
+/* Every file the process holds open, read at fixed places (the same in
+ * every run: they follow from the file's size) - unaligned, 222,024 bytes
+ * like the read the stuck game repeats, and once more in whole sectors.
+ * After a load and after a normal start the same descriptors are the same
+ * files (the game opens its archives in the same order), so the two logs
+ * can be laid side by side: a checksum that differs, or a read that fails
+ * after a load only, is JamaisVu's refresh of open files. */
+typedef struct {
+  SceUID fd;
+  SceUID pid;
+} JvFdInfo;
+static int (*g_fd_list)(int vis, JvFdInfo *dst, SceSize max, SceSize *res);
+
+#define FILES_PROBE_LEN 222024u
+#define FILES_PROBE_MAX 40
+
+static void files_probe(SceUID pid) {
+  static JvFdInfo list[1024];
+  static JvFileInfo fi;
+  static char line[420];
+  SceSize got = 0;
+  uint8_t *buf = NULL;
+  SceUID blk;
+  int total, files = 0, bad = 0;
+  int64_t t_all = ksceKernelGetSystemTimeWide();
+
+  if (!g_fd_list || !g_puid_guid || !g_file_info) {
+    log_queue("    open files: no access to the list of descriptors\r\n");
+    return;
+  }
+  /* the list is written without a limit: its length first */
+  total = g_fd_list(5, NULL, 0, &got);
+  if (total < 0 || total > 900) {
+    snprintf(line, sizeof(line), "    open files: list not usable "
+             "(0x%08X)\r\n", (unsigned)total);
+    log_queue(line);
+    return;
+  }
+  total = g_fd_list(5, list, 1024, &got);
+  if (total < 0 || total > 1024) {
+    snprintf(line, sizeof(line), "    open files: list failed (0x%08X)\r\n",
+             (unsigned)total);
+    log_queue(line);
+    return;
+  }
+  blk = ksceKernelAllocMemBlock("JamaisVuProbe", 0x1020D006, 0x40000, NULL);
+  if (blk < 0 || ksceKernelGetMemBlockBase(blk, (void **)&buf) < 0 || !buf) {
+    snprintf(line, sizeof(line), "    open files: no memory (0x%08X)\r\n",
+             (unsigned)blk);
+    log_queue(line);
+    if (blk >= 0)
+      ksceKernelFreeMemBlock(blk);
+    return;
+  }
+  snprintf(line, sizeof(line), "    open files of the process, read at fixed "
+           "places (%d descriptors in the system):\r\n", total);
+  log_queue(line);
+  log_queue_drain();
+  for (int i = 0; i < total && files < FILES_PROBE_MAX; i++) {
+    uint64_t size, at[5];
+    SceUID guid;
+    int n_at = 0, len, wrong = 0;
+    if (list[i].pid != pid)
+      continue;
+    memset(&fi, 0, sizeof(fi));
+    if (g_file_info(list[i].fd, pid, &fi) < 0 || fi.rest[4])
+      continue; /* not a file, or a folder */
+    size = ((uint64_t)fi.rest[7] << 32) | fi.rest[6];
+    if (!size || (size >> 40))
+      continue; /* a device */
+    guid = g_puid_guid(pid, list[i].fd);
+    if (guid < 0)
+      continue;
+    files++;
+    /* the places: near the start, at each quarter, and where the stuck
+     * read of the earlier logs was */
+    at[n_at++] = size > 0xE0 ? 0xE0 : 0;
+    if (size > 8 * FILES_PROBE_LEN)
+      for (int q = 1; q < 4; q++)
+        at[n_at++] = ((size / 4 * q) & ~0x1FFull) + 0xE0;
+    if (size > 0x180268E0ull + FILES_PROBE_LEN)
+      at[n_at++] = 0x180268E0ull;
+    len = snprintf(line, sizeof(line), "      0x%08X size 0x%X%08X:",
+                   (unsigned)list[i].fd, (unsigned)(size >> 32),
+                   (unsigned)size);
+    for (int k = 0; k < n_at; k++) {
+      uint32_t want = size - at[k] > FILES_PROBE_LEN
+                          ? FILES_PROBE_LEN
+                          : (uint32_t)(size - at[k]);
+      uint32_t head = (uint32_t)(at[k] & 0x1FF), s1 = 0, s2 = 0, ms;
+      int64_t t0 = ksceKernelGetSystemTimeWide();
+      int r1 = ksceIoPread(guid, buf, want, (SceOff)at[k]), r2;
+      ms = (uint32_t)((ksceKernelGetSystemTimeWide() - t0) / 1000);
+      if (r1 > 0)
+        s1 = probe_sum(buf, (uint32_t)r1);
+      r2 = ksceIoPread(guid, buf, (head + want + 0x1FF) & ~0x1FFu,
+                       (SceOff)(at[k] - head));
+      if (r2 > (int)head) {
+        uint32_t n = (uint32_t)r2 - head;
+        s2 = probe_sum(buf + head, n > want ? want : n);
+      }
+      if (r1 != (int)want || s1 != s2)
+        wrong = 1;
+      len += snprintf(line + len, sizeof(line) - len, " [0x%X%08X: 0x%X %08X "
+                      "%s %u ms]", (unsigned)(at[k] >> 32), (unsigned)at[k],
+                      (unsigned)r1, (unsigned)s1,
+                      r1 == (int)want && s1 == s2 ? "ok" : "WRONG",
+                      (unsigned)ms);
+    }
+    snprintf(line + len, sizeof(line) - len, "\r\n");
+    log_queue(line);
+    log_queue_drain();
+    if (wrong && bad++ < 3)
+      probe_file_state(pid, list[i].fd, guid);
+  }
+  ksceKernelFreeMemBlock(blk);
+  snprintf(line, sizeof(line), "    open files: %d read, %d with a read that "
+           "failed or differed between the two ways, %u ms\r\n", files, bad,
+           (unsigned)((ksceKernelGetSystemTimeWide() - t_all) / 1000));
+  log_queue(line);
+  log_queue_drain();
+}
+
 static void thread_dump(SceUID pid, const char *why) {
   static SceUID ids[96];
   static char line[200];
@@ -2849,6 +2991,8 @@ static void thread_dump(SceUID pid, const char *why) {
   int n = 0;
   int probe_found = 0;
   SceUID probe_thid = 0;
+  SceUID busy[4];
+  int n_busy = 0;
   uint32_t main_sp = 0, main_pc = 0;
   if (!looked_up) {
     looked_up = 1;
@@ -2880,6 +3024,9 @@ static void thread_dump(SceUID pid, const char *why) {
     if (module_get_export_func(KERNEL_PID, "SceSysmem", TAI_ANY_LIBRARY,
                                0x45D22597, (uintptr_t *)&g_puid_guid) < 0)
       g_puid_guid = NULL;
+    if (module_get_export_func(KERNEL_PID, "SceIofilemgr", TAI_ANY_LIBRARY,
+                               0x0D493274, (uintptr_t *)&g_fd_list) < 0)
+      g_fd_list = NULL;
     if (module_get_export_func(KERNEL_PID, "SceSysmem", TAI_ANY_LIBRARY,
                                0x0F5C84B7, (uintptr_t *)&g_guid_refer) < 0 ||
         module_get_export_func(KERNEL_PID, "SceSysmem", TAI_ANY_LIBRARY,
@@ -2976,19 +3123,11 @@ static void thread_dump(SceUID pid, const char *why) {
               /* a read at a position: buffer, size, and the position's
                * address, which the library's wrapper keeps at its stack
                * pointer */
-              uint64_t off = 0;
-              if (!probe_found && g_copy_pid &&
-                  r.entry[e].r[1] >= 0x80000000u && r.entry[e].r[2] &&
-                  r.entry[e].r[2] <= 0x4000000u &&
-                  r.entry[e].r[3] == r.entry[e].sp &&
-                  g_copy_pid(pid, &off, r.entry[e].r[3], 8) >= 0) {
+              if (!probe_found && read_args(pid, &r, &g_probe)) {
                 probe_found = 1;
                 probe_thid = ids[i];
-                memset(&g_probe, 0, sizeof(g_probe));
+                memset(g_probe.title, 0, sizeof(g_probe.title));
                 memcpy(g_probe.title, tid, sizeof(g_probe.title) - 1);
-                g_probe.fd = (SceUID)r.entry[e].r[0];
-                g_probe.size = r.entry[e].r[2];
-                g_probe.off = off;
               }
             }
           }
@@ -3075,6 +3214,31 @@ static void thread_dump(SceUID pid, const char *why) {
                         act0[i].preempted));
     log_queue(line);
     log_queue_drain();
+    /* a thread that waits this often may be reading */
+    if (n_busy < 4 &&
+        (uint32_t)info.threadReleaseCount - act0[i].released >= 20)
+      busy[n_busy++] = ids[i];
+  }
+  /* no thread was in a read at the moment of its line: the busy ones are
+   * looked at for a second and a half more */
+  if (!probe_found && n_busy && g_thread_regs) {
+    JvReadProbe found;
+    memset(&found, 0, sizeof(found));
+    for (int k = 0; k < 30 && !probe_found; k++) {
+      ksceKernelDelayThread(50000);
+      for (int b = 0; b < n_busy && !probe_found; b++) {
+        JvThreadRegs r;
+        if (thread_regs(busy[b], &r) >= 0 && read_args(pid, &r, &found)) {
+          probe_found = 1;
+          probe_thid = busy[b];
+          memcpy(found.title, tid, sizeof(found.title) - 1);
+          g_probe = found;
+        }
+      }
+    }
+    snprintf(line, sizeof(line), "      %d busy threads watched for a read: "
+             "%s\r\n", n_busy, probe_found ? "found" : "none seen");
+    log_queue(line);
   }
   /* the read a thread was found in, or the one remembered from an
    * earlier dump of this game */
@@ -3084,6 +3248,7 @@ static void thread_dump(SceUID pid, const char *why) {
   }
   else if (g_probe.size && !strncmp(g_probe.title, tid, sizeof(g_probe.title)))
     read_probe(pid, &g_probe, "the read remembered from an earlier dump");
+  files_probe(pid);
   /* the process's modules */
   {
     static SceUID mods[64];
