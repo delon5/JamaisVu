@@ -2671,6 +2671,68 @@ static void probe_file_state(SceUID pid, SceUID fd, SceUID guid) {
   log_queue_drain();
 }
 
+/* Is it one read again and again, or a file being read through? The
+ * thread's read arguments, looked at 20 times over a second. */
+static void read_watch(SceUID pid, SceUID thid) {
+  static char line[400];
+  struct {
+    uint32_t fd, size, buf, n;
+    uint64_t off;
+  } seen[5];
+  int n_seen = 0, other = 0, more = 0, len;
+  if (!g_thread_regs || !g_copy_pid)
+    return;
+  memset(seen, 0, sizeof(seen));
+  for (int k = 0; k < 20; k++) {
+    JvThreadRegs r;
+    int hit = 0;
+    if (k)
+      ksceKernelDelayThread(50000);
+    if (thread_regs(thid, &r) < 0)
+      continue;
+    for (int e = 0; e < 2 && !hit; e++) {
+      uint64_t off = 0;
+      int i;
+      if ((r.entry[e].cpsr & 0x1F) != 0x10 ||
+          (r.entry[e].r[0] & 0xF0000000u) != 0x40000000u ||
+          r.entry[e].r[1] < 0x80000000u || r.entry[e].r[3] != r.entry[e].sp ||
+          g_copy_pid(pid, &off, r.entry[e].r[3], 8) < 0)
+        continue;
+      hit = 1;
+      for (i = 0; i < n_seen; i++)
+        if (seen[i].fd == r.entry[e].r[0] && seen[i].size == r.entry[e].r[2] &&
+            seen[i].off == off)
+          break;
+      if (i == n_seen) {
+        if (n_seen == 5) {
+          more++;
+          continue;
+        }
+        seen[i].fd = r.entry[e].r[0];
+        seen[i].buf = r.entry[e].r[1];
+        seen[i].size = r.entry[e].r[2];
+        seen[i].off = off;
+        n_seen++;
+      }
+      seen[i].n++;
+    }
+    if (!hit)
+      other++;
+  }
+  len = snprintf(line, sizeof(line), "        the thread's reads, looked at "
+                 "20 times over a second:");
+  for (int i = 0; i < n_seen && len < (int)sizeof(line) - 90; i++)
+    len += snprintf(line + len, sizeof(line) - len, " [%ux 0x%08X %u bytes "
+                    "at 0x%08X%08X into 0x%08X]", (unsigned)seen[i].n,
+                    (unsigned)seen[i].fd, (unsigned)seen[i].size,
+                    (unsigned)(seen[i].off >> 32), (unsigned)seen[i].off,
+                    (unsigned)seen[i].buf);
+  snprintf(line + len, sizeof(line) - len, " other reads %d, not in a read "
+           "%d\r\n", more, other);
+  log_queue(line);
+  log_queue_drain();
+}
+
 static void read_probe(SceUID pid, const JvReadProbe *p, const char *why) {
   static char line[240];
   uint32_t size = p->size > PROBE_MAX ? PROBE_MAX : p->size;
@@ -2776,6 +2838,7 @@ static void thread_dump(SceUID pid, const char *why) {
   char tid[16];
   int n = 0;
   int probe_found = 0;
+  SceUID probe_thid = 0;
   uint32_t main_sp = 0, main_pc = 0;
   if (!looked_up) {
     looked_up = 1;
@@ -2910,6 +2973,7 @@ static void thread_dump(SceUID pid, const char *why) {
                   r.entry[e].r[3] == r.entry[e].sp &&
                   g_copy_pid(pid, &off, r.entry[e].r[3], 8) >= 0) {
                 probe_found = 1;
+                probe_thid = ids[i];
                 memset(&g_probe, 0, sizeof(g_probe));
                 memcpy(g_probe.title, tid, sizeof(g_probe.title) - 1);
                 g_probe.fd = (SceUID)r.entry[e].r[0];
@@ -3004,8 +3068,10 @@ static void thread_dump(SceUID pid, const char *why) {
   }
   /* the read a thread was found in, or the one remembered from an
    * earlier dump of this game */
-  if (probe_found)
+  if (probe_found) {
+    read_watch(pid, probe_thid);
     read_probe(pid, &g_probe, "a thread is in this read");
+  }
   else if (g_probe.size && !strncmp(g_probe.title, tid, sizeof(g_probe.title)))
     read_probe(pid, &g_probe, "the read remembered from an earlier dump");
   /* the process's modules */
