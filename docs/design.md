@@ -72,7 +72,7 @@ A corrupted or tampered state is rejected with nothing changed.
 
 ## Memory after a wake-up
 
-A kernel that cannot find a free page panics, and the console restarts. In a game that leaves the system almost nothing, the menu's memory partly comes from the kernel's own pool. So nothing of it is held across a wake-up for longer than needed: it is given back as soon as the system is awake (the new slot's picture is kept in a block taken for the save only), and for 20 s after a wake-up the result banner takes kernel-pool memory only while a megabyte stays free there. If it cannot, the banner is skipped; `log.txt` has the result either way.
+A kernel that cannot find a free page panics, and the console restarts. In a game that leaves the system almost nothing, the menu's memory partly comes from the kernel's own pool. So nothing of it is held across a save or load: it is given back before the sleep is requested, and again as soon as the system is awake if a banner took some meanwhile (the new slot's picture is kept in a block taken for the save only), and for 20 s after a wake-up the result banner takes kernel-pool memory only while a megabyte stays free there. If it cannot, the banner is skipped; `log.txt` has the result either way.
 
 ## The plugin's own share of the kernel's pool
 

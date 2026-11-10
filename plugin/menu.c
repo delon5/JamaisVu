@@ -5458,6 +5458,15 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     log_append(line);
   }
 
+  /* The menu's memory goes back now, before the sleep - it used to be
+   * held until the wake-up (after_resume). Nothing of it is used from
+   * here on: the menu is closed, the new slot's picture has its own block
+   * and the payload draws its own screen. What it took of the kernel's
+   * pool (64 KB in the LiveArea, 152 KB in FAHRENEIT on the PCH-1000) is
+   * free again while the system goes to sleep, and a state saved now
+   * wakes up after a load with none of it held. */
+  overlay_release();
+
   if (debug_mode == JV_TEST_NONE)
     canary_fill(mode == JAMAISVU_MODE_LOAD ? 0xB5000000u : 0x5A000000u);
   if (jv_request(mode, slot, nonce, debug_mode, trel,
