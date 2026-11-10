@@ -1,5 +1,7 @@
 # Publishes a draft release made by release.yml (its tag is created on
-# publish). Run by hand with the tag, e.g. v2.0.0-rc1.
+# publish). Run by hand with the tag, e.g. v2.0.0-rc1. If CHANGELOG.md
+# has a section for the version and the draft's notes do not carry it
+# yet, the section is put in front of them first.
 name: Publish release
 
 on:
@@ -21,6 +23,14 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
         run: |
-          gh release edit "${{ inputs.tag }}" --draft=false
-          gh release view "${{ inputs.tag }}" --json tagName,isDraft,url
+          if python3 tools/release_notes.py "${TAG#v}" > notes.md; then
+            gh release view "$TAG" --json body --jq .body > body.md
+            if ! grep -qF -- "$(head -n 1 notes.md | cut -c1-60)" body.md; then
+              { echo; cat body.md; } >> notes.md
+              gh release edit "$TAG" --notes-file notes.md
+            fi
+          fi
+          gh release edit "$TAG" --draft=false
+          gh release view "$TAG" --json tagName,isDraft,url

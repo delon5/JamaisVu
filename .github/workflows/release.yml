@@ -106,5 +106,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # a manual run has no tag yet: the release creates it on this commit
-          gh release create "$TAG" "JamaisVu-$VERSION.zip" --target "$GITHUB_SHA" \
-            --draft --generate-notes --title "JamaisVu $VERSION"
+          # the version's section of CHANGELOG.md in front of the generated notes
+          if python3 tools/release_notes.py "$VERSION" > notes.md; then
+            gh release create "$TAG" "JamaisVu-$VERSION.zip" --target "$GITHUB_SHA" \
+              --draft --generate-notes --notes-file notes.md --title "JamaisVu $VERSION"
+          else
+            gh release create "$TAG" "JamaisVu-$VERSION.zip" --target "$GITHUB_SHA" \
+              --draft --generate-notes --title "JamaisVu $VERSION"
+          fi
