@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 2.0.0-rc3 - 2026-11-10
+
+States saved with earlier versions still load. A state holds the whole
+system as it was saved, JamaisVu included, so the fixes to what happens
+*after* a load only apply to states saved with this version: after
+updating, reboot and save new states.
+
+### Fixed
 
 - **"The memory card has been removed" and a restart right after a save
   or load, with ux0 on a USB drive** (PCH-1000 with usbmc). About a
@@ -10,7 +17,6 @@
   loads (about a minute and more). The unmount is now refused in the 15
   seconds after JamaisVu's own wake-ups, as it already was for the card
   itself.
-
 - **A console restart right after a save in a game that leaves the system
   almost no memory** (PCH-1000, a homebrew title). JamaisVu's menu had to
   take part of its memory from the kernel's own pool there and kept it
@@ -20,19 +26,13 @@
   console's own kernel crash dump). The menu's memory is now given back
   as soon as the system is awake, and for 20 seconds after a wake-up the
   banner only takes kernel-pool memory if a megabyte stays free;
-  otherwise the banner is skipped and the log says so.
+  otherwise the banner is skipped.
+
+### Changed
 
 - After a load on 3.60, files that were open keep their cluster cache in
   the exFAT driver (it was dropped by the re-read of the drive and not
   recreated), so reads in large files do not get slower.
-- The log of a load says whether any file had data written to it that
-  was not yet on the drive when the state was saved, and in which files.
-- The value written for an open file's unknown position now matches the
-  driver's own on 3.60 (no change in behaviour).
-- The steps a save takes after the wake-up are recorded in `trace.bin`
-  again (they had not been since an earlier change to the record of
-  loads), so a console that restarts right after a save shows how far it
-  got in the next start's log.
 
 ## 2.0.0-rc2 - 2026-11-10
 
