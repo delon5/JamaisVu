@@ -67,6 +67,7 @@ static void *(* UVFAT_GetParentFnode)(void *sharedResource, void *fileSystem,
 static int (* UVFAT_ReleaseFnode)(void *sharedResource, void *fnode);
 static int (* cleanup_cluster_cache_area)(void *drive);
 static int (* invalidate_cluster_cache_data)(void *fnode);
+static int (* init_cluster_cache_data)(void *fnode); /* optional */
 static int (* FreeFpCache)(void *filep); /* resolved, no longer called:
                                             see invalidate_file_caches() */
 static int (* sfree)(void *p, int size);
@@ -249,7 +250,12 @@ static void invalidate_file_caches(uint32_t only) {
       if (filep->buf && filep->alignedBuf)
         g_fs_notes.fp_bufs++;
       filep->Cluster = -2;
-      filep->ClusterIndex = -1;
+      /* (the driver's own value where it is known: 0x0FFFFFFF on 3.60,
+       * which its seek routine at text+0xcb28 treats like dejavu's -1 -
+       * both are above every index a file can have) */
+      filep->ClusterIndex = g_off->exfat_fp_index_unknown
+                                ? (int)g_off->exfat_fp_index_unknown
+                                : -1;
       filep->CacheIndex = -1;
       filep->CachedCluster = -2;
       filep->unk_34 = -1;
@@ -267,6 +273,15 @@ static void invalidate_file_caches(uint32_t only) {
  * simply looked up twice, as before. */
 #define FNODE_DONE_MAX 4096
 static uint32_t g_fnode_done[FNODE_DONE_MAX / 32];
+
+/* Which fnodes had a cluster cache table when their drive was dropped for
+ * the remount (cleanup_cluster_cache_area gives every table of the drive
+ * back and zeroes fnode+0x27c; the invalidate that dejavu calls after the
+ * look-up only clears a table that is there). Those fnodes get one again
+ * after their look-up, where the firmware's own function for it is known:
+ * without a table every seek in the file walks its cluster chain from the
+ * handle's last position or from the start. */
+static uint32_t g_fnode_cc[FNODE_DONE_MAX / 32];
 
 static int fnode_index(const void *fnode) {
   uintptr_t base = (uintptr_t)g_shared_resource + g_off->sr_fnodes;
@@ -359,7 +374,19 @@ static int update_fnode(void *fnode, int *looked_up) {
   int64_t t2 = ksceKernelGetSystemTimeWide();
   UVFAT_ReleaseFnode(g_shared_resource, temp);
 
-  invalidate_cluster_cache_data(fnode);
+  {
+    int idx = fnode_index(fnode);
+    if (init_cluster_cache_data && res >= 0 && idx >= 0 &&
+        (g_fnode_cc[idx / 32] & (1u << (idx % 32))) &&
+        *(uintptr_t **)(fnode + 0x20c)) {
+      init_cluster_cache_data(fnode); /* resets it, with a table again */
+      g_fnode_cc[idx / 32] &= ~(1u << (idx % 32));
+      if (*(uintptr_t **)(fnode + 0x27c))
+        g_fs_notes.cc_back++;
+    } else {
+      invalidate_cluster_cache_data(fnode);
+    }
+  }
   *(uint32_t *)(fnode + 0x280) = -2;
   *(uint32_t *)(fnode + 0x284) = -2;
   *(uint32_t *)(fnode + 0x288) = 0;
@@ -583,6 +610,56 @@ static int update_vnodes(uint32_t only) {
   return stale_open;
 }
 
+static int kernel_ptr(uintptr_t p) {
+  return p >= 0x00100000u && p < 0x40000000u && !(p & 3);
+}
+
+/* Before a file's buffer is marked as holding nothing: did it hold data
+ * that was written into it and not yet onto the drive (state <= 7 with
+ * bit 1: the I/O manager sets it after copying a write in and clears it
+ * when the buffer has been written, 3.60 text+0x12042 / +0x126e4)? Such
+ * data exists in the restored memory only. Counted and named for the
+ * log; nothing is changed here. */
+static void note_unwritten(void *file, void *vp, void *fnode, int exfat) {
+  FsLoadNotes *n = &g_fs_notes;
+  uint32_t st = *(uint32_t *)(file + 0xc);
+  int found = 0;
+  if (st <= 7 && (st & 2)) {
+    n->unwritten_windows++;
+    n->unwritten_bytes += *(uint32_t *)(file + 0x8);
+    found = 1;
+  }
+  if (g_off->iofilemgr_buff_lists) {
+    uint32_t per = *(uint8_t *)(file + 0x18), lists = *(uint8_t *)(file + 0x19);
+    for (uint32_t l = 0; l < lists && l < 16; l++) {
+      uintptr_t e = *(uintptr_t *)(file + 0x38 + 4 * l);
+      for (uint32_t k = 0; k < per && k < 16 && kernel_ptr(e); k++) {
+        uint32_t es = *(uint32_t *)(e + 4);
+        if (es <= 7 && (es & 2)) {
+          n->unwritten_sectors++;
+          found = 1;
+        }
+        e = *(uintptr_t *)(e + 0x10);
+      }
+    }
+  }
+  if (found && n->unwritten_names < 3) {
+    char *out = n->unwritten_name[n->unwritten_names++];
+    uint32_t k = 0;
+    if (exfat) {
+      const char *nm = fs_name(fnode_fs(fnode));
+      const uint16_t *w = (const uint16_t *)fnode; /* UTF-16 path */
+      for (; nm && nm[k] && k < 8; k++)
+        out[k] = nm[k];
+      for (uint32_t i = 0; k < 79 && i < 0x208 / 2 && w[i]; i++)
+        out[k++] = w[i] < 0x80 && w[i] >= 0x20 ? (char)w[i] : '?';
+      out[k] = '\0';
+    } else {
+      snprintf(out, 80, "(not an exFAT file, entry 0x%08X)", (unsigned)vp);
+    }
+  }
+}
+
 static void invalidate_buff_caches(uint32_t only) {
   int num = *g_num_vnodes;
   for (int i = 0; i < num; i++) {
@@ -595,6 +672,7 @@ static void invalidate_buff_caches(uint32_t only) {
     if (exfat && !fs_wanted(fnode_fs(fnode), only))
       continue; /* a drive left alone (see check_devices) */
     if (file) {
+      note_unwritten(file, vp, fnode, exfat);
       invalidate_buff_cache(file, vp);
       *(uint32_t *)(file + 0xc) = 8;
     }
@@ -620,6 +698,21 @@ static int remount_one(uint32_t i) {
     *(uintptr_t **)(fileSystem + 0x114) = NULL;
   }
 
+  {
+    int num = *(int *)(g_shared_resource + g_off->sr_num_fnodes);
+    for (int k = 0; k < num && k < FNODE_DONE_MAX; k++) {
+      void *fnode = (void *)(g_shared_resource + g_off->sr_fnodes +
+                             k * g_off->fnode_size);
+      if (*(uintptr_t **)(fnode + 0x20c) != fileSystem)
+        continue;
+      if (*(uintptr_t **)(fnode + 0x27c)) {
+        g_fnode_cc[k / 32] |= 1u << (k % 32);
+        g_fs_notes.cc_had++;
+      } else {
+        g_fnode_cc[k / 32] &= ~(1u << (k % 32));
+      }
+    }
+  }
   cleanup_cluster_cache_area(drive);
 
   if (*(uintptr_t **)(fileSystem + 0x12c)) {
@@ -769,6 +862,7 @@ int update_filesystem(void) {
   tm->vnodes = (uint32_t)*g_num_vnodes;
   memset(g_fnode_done, 0, sizeof(g_fnode_done));
   memset(&g_fs_notes, 0, sizeof(g_fs_notes));
+  memset(g_fnode_cc, 0, sizeof(g_fnode_cc));
   g_ro_n = 0;
   g_skip_mask = 0;
   g_late_mask = 0;
@@ -1010,6 +1104,11 @@ int fs_init(const FwOffsets *o) {
   res |= get_offset(ex_info.modid, 0, o->exfat_invalidate_cluster_cache,
                     &invalidate_cluster_cache_data);
   res |= get_offset(ex_info.modid, 0, o->exfat_free_fp_cache, &FreeFpCache);
+  init_cluster_cache_data = NULL;
+  if (o->exfat_init_cluster_cache &&
+      get_offset(ex_info.modid, 0, o->exfat_init_cluster_cache,
+                 &init_cluster_cache_data) < 0)
+    init_cluster_cache_data = NULL; /* optional: the tables stay away */
   res |= get_offset(ex_info.modid, 0, o->exfat_sfree, &sfree);
   res |= get_offset(ex_info.modid, 1, o->exfat_shared_resource,
                     &g_shared_resource);

@@ -124,6 +124,18 @@ typedef struct {
   uint32_t kept_parent;   /* no parent, or its lock was taken */
   uint32_t fp_files;      /* open exFAT files whose caches were reset */
   uint32_t fp_bufs;       /* of them, with their sector buffer (kept) */
+  /* data a program had written into a file's buffer that was not on the
+   * drive yet when the state was saved: it is in the restored memory
+   * only, and the refresh forgets what the buffers hold */
+  uint32_t unwritten_windows; /* 32 KB windows with such data */
+  uint32_t unwritten_bytes;   /* bytes in them */
+  uint32_t unwritten_sectors; /* single-sector buffers with such data */
+  uint32_t unwritten_names;
+  char unwritten_name[3][80];
+  /* cluster caches of the files' fnodes: the remount gives every table
+   * back to the drive */
+  uint32_t cc_had;        /* fnodes with a table before the remount */
+  uint32_t cc_back;       /* of them, with a table again afterwards */
   uint32_t looked_up;     /* entries looked up on their drive */
   uint32_t dirs;             /* distinct folders seen (table may be full) */
   uint32_t parent_us, search_us; /* all lookups: folder part, file part */

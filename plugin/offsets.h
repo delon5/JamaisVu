@@ -65,6 +65,17 @@ typedef struct {
   uint32_t fnode_size;
   uint32_t fs_stride;       /* size of one fileSystem in shared resource */
   uint32_t fs_count;        /* number of fileSystems */
+
+  /* Optional (0 = not known for this firmware, the step is left as dejavu
+   * had it): read off a module dump, see invalidate_file_caches() and
+   * update_fnode() in fs.c. */
+  uint32_t exfat_init_cluster_cache; /* SceExfatfs text: resets an fnode's
+                                        cluster cache and allocates its
+                                        table if it has none */
+  uint32_t exfat_fp_index_unknown;   /* the driver's own "position in the
+                                        chain unknown" for an open file */
+  uint32_t iofilemgr_buff_lists;     /* 1: the file buffer's sector lists
+                                        have the layout fs.c walks */
 } FwOffsets;
 
 /* How much an entry has been checked */

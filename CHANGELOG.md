@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- After a load on 3.60, files that were open keep their cluster cache in
+  the exFAT driver (it was dropped by the re-read of the drive and not
+  recreated), so reads in large files do not get slower.
+- The log of a load says whether any file had data written to it that
+  was not yet on the drive when the state was saved, and in which files.
+- The value written for an open file's unknown position now matches the
+  driver's own on 3.60 (no change in behaviour).
+
 ## 2.0.0-rc2 - 2026-11-10
 
 States saved with 2.0.0-rc1 still load. A state holds the whole system as

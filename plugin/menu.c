@@ -5082,6 +5082,26 @@ static void fs_notes_log(void) {
            "%u of them with their sector buffer (kept; its contents "
            "forgotten)\r\n", (unsigned)f->fp_files, (unsigned)f->fp_bufs);
   log_append(line);
+  snprintf(line, sizeof(line), "    cluster caches: %u file entries had "
+           "one before the drives were read again; %u of those looked up "
+           "again have one once more\r\n",
+           (unsigned)f->cc_had, (unsigned)f->cc_back);
+  log_append(line);
+  if (f->unwritten_windows || f->unwritten_sectors) {
+    snprintf(line, sizeof(line), "    data written to files but not yet on "
+             "the drive when the state was saved: %u buffers (%u bytes) "
+             "and %u single sectors - not on the drive now either\r\n",
+             (unsigned)f->unwritten_windows, (unsigned)f->unwritten_bytes,
+             (unsigned)f->unwritten_sectors);
+    log_append(line);
+    for (uint32_t i = 0; i < f->unwritten_names && i < 3; i++) {
+      snprintf(line, sizeof(line), "      in: %s\r\n", f->unwritten_name[i]);
+      log_append(line);
+    }
+  } else {
+    log_append("    data written to files but not yet on the drive when the "
+               "state was saved: none\r\n");
+  }
   snprintf(line, sizeof(line), "    entries nothing held open: %u files "
            "and %u folders given back without a lookup (as the kernel's "
            "reclaim does); kept and looked up: %u folders with cached "

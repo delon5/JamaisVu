@@ -64,6 +64,19 @@ static const FwOffsets g_table[] = {
                                               data+0x1a90 comparing id */
     IOFILEMGR_DATA_365,
     EXFAT_365,
+    /* from the same dump:
+     * - text+0x2118 sets fnode+0x280..0x28f like text+0x2190 (the
+     *   invalidate above) and, where +0x2190 only clears a table that is
+     *   there, allocates one of 0x200 bytes from the drive (text+0xdd0)
+     *   when fnode+0x27c is 0 and the file system has bit 10 of +0xb0;
+     * - a handle's set-up (text+0x80d8) and reset (text+0x7e64) put
+     *   0x0FFFFFFF into its cluster index;
+     * - SceIofilemgr text+0x12654 walks a file buffer's lists: count per
+     *   list at +0x18, lists at +0x19, heads from +0x38, an entry's state
+     *   at +4 and next at +0x10. */
+    .exfat_init_cluster_cache = 0x2119,
+    .exfat_fp_index_unknown = 0x0FFFFFFF,
+    .iofilemgr_buff_lists = 1,
   },
   {
     .name = "3.65",
