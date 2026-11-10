@@ -9,6 +9,10 @@
   was not yet on the drive when the state was saved, and in which files.
 - The value written for an open file's unknown position now matches the
   driver's own on 3.60 (no change in behaviour).
+- The steps a save takes after the wake-up are recorded in `trace.bin`
+  again (they had not been since an earlier change to the record of
+  loads), so a console that restarts right after a save shows how far it
+  got in the next start's log.
 
 ## 2.0.0-rc2 - 2026-11-10
 

@@ -638,6 +638,15 @@ void trace_wake_keep(int on) {
     g_wake_on = 0;
 }
 
+/* Only says whether the record stays open after the result is logged; a
+ * record that is being written is left alone. (trace_wake_keep(0) before
+ * after_resume() ended it there and then: since f900412 a save's steps
+ * after the wake-up were never recorded, and a console that restarted
+ * right after a save - PCH-1000, 5aa35b0 log - left nothing to go by.) */
+void trace_wake_keep_after_report(int on) {
+  g_wake_keep = on;
+}
+
 int trace_wake_end(int *last_ret) {
   int n = g_wake_on ? g_wake_writes : -1;
   if (last_ret)

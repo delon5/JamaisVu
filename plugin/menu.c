@@ -5233,7 +5233,8 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
    * taken. after_resume() looks only at the payload's result. */
   /* loads: the step record stays open until 10 s after the timing lines */
   g_trace_keep = g_res_debug == JV_TEST_NONE && g_res_mode == JAMAISVU_MODE_LOAD;
-  trace_wake_keep(g_trace_keep);
+  /* saves: recorded up to the result's line and closed there */
+  trace_wake_keep_after_report(g_trace_keep);
   after_resume();
   int64_t t_after = ksceKernelGetSystemTimeWide();
 
