@@ -2,8 +2,8 @@
 # (the tag is then created by the release itself, on the commit the run
 # was started from) -> release build (no Diagnostics, the version in
 # status.txt), the same checks as build.yml, a zip with the plugin, the
-# Japanese font and the README, and a draft GitHub Release with generated
-# notes to edit before publishing.
+# Japanese font, the README and the changelog, and a draft GitHub Release
+# with generated notes to edit before publishing.
 name: Release
 
 on:
@@ -97,7 +97,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p "JamaisVu-$VERSION"
-          cp build/JamaisVu.skprx plugin/gui/jpfont.bin README.md LICENSE "JamaisVu-$VERSION/"
+          cp build/JamaisVu.skprx plugin/gui/jpfont.bin README.md CHANGELOG.md LICENSE "JamaisVu-$VERSION/"
           (cd "JamaisVu-$VERSION" && sha256sum JamaisVu.skprx jpfont.bin > SHA256SUMS.txt && cat SHA256SUMS.txt)
           zip -r "JamaisVu-$VERSION.zip" "JamaisVu-$VERSION"
 

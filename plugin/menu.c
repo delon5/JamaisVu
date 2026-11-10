@@ -382,6 +382,7 @@ static volatile int64_t g_lockskip_until; /* 0 = no patch to remove */
 /* a finished load's record, kept open until then (heartbeat thread) */
 static volatile int64_t g_alive_until;
 static void alive_stop(void);
+static void io_watch_install(void);
 /* diagnostics: kernel object counts (see counts_text) */
 #define COUNTS_MAX 16
 static int counts_text(char *out, int len, int *vals);
@@ -3939,9 +3940,13 @@ static int input_thread(SceSize args, void *argp) {
         last_frames = frames;
         last_t = tn;
         next_alive = tn + 10000000;
+        /* (the dump with its file reads holds this thread for ~10 s: it
+         * found what it was for - b1e81fa - and is on request now, with
+         * data/JamaisVu/loaddump on the card; Diagnostics still has it) */
         if (!dumped && since >= 30000000 && game) {
           dumped = 1;
-          thread_dump(game, "30 s after the load");
+          if (jv_switch_file("loaddump"))
+            thread_dump(game, "30 s after the load");
         }
       }
     }
@@ -5154,6 +5159,7 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   }
   /* the switch files, read now while the card is readable (after the
    * wake-up it is not until it has been mounted again) */
+  io_watch_install();
   g_card_in_place = jv_switch_file("cardinplace");
   if (g_card_in_place) {
     log_append("    data/JamaisVu/cardinplace: the card will be re-read in "
@@ -6173,6 +6179,11 @@ static void io_events_log(void) {
   }
 }
 
+/* On request only (data/JamaisVu/iowatch on the card, looked for before a
+ * save or a load while the card is readable): seven hooks in every
+ * process's file calls are not something to carry for nothing. A state
+ * holds the system as it was saved, hooks included: to watch the file
+ * calls after a load, the state has to be saved with the file in place. */
 static void io_watch_install(void) {
   static const uint32_t nids[5] = {0xCC67B6FD, 0xE6E614B5, 0x8E7E11F2,
                                    0x8F1ACC32, 0x78955C65};
@@ -6180,7 +6191,11 @@ static void io_watch_install(void) {
                                      io_getstat_hook, io_mkdir_hook,
                                      io_remove_hook};
   static char line[160];
+  static int installed;
   int ok = 0;
+  if (installed || !jv_switch_file("iowatch"))
+    return;
+  installed = 1;
   for (int i = 0; i < 5; i++) {
     g_io_hooks[i] = taiHookFunctionExportForKernel(
         KERNEL_PID, &g_io_refs[i], "SceIofilemgr", 0xF2FF276E, nids[i],
@@ -6483,7 +6498,6 @@ int menu_init(const char *status_text) {
   g_io_evf = ksceKernelCreateEventFlag("JamaisVuIoEvf", 0, 0, NULL);
   g_logq_mtx = ksceKernelCreateMutex("JamaisVuLogQ", 0, 0, NULL);
   mount_watch_install(); /* logs through the queue: after it exists */
-  io_watch_install();
   g_log_mtx = ksceKernelCreateMutex("JamaisVuLog", 0, 0, NULL);
   g_evf = ksceKernelCreateEventFlag("JamaisVuEvf", 0, 0, NULL);
   g_mtx = ksceKernelCreateMutex("JamaisVuMenu", 0, 0, NULL);
