@@ -379,6 +379,10 @@ int64_t g_ev_t[JV_EV_MAX];     /* first time of a run of the same event */
 int64_t g_ev_last[JV_EV_MAX];  /* last time of that run */
 uint32_t g_ev_cnt[JV_EV_MAX];  /* how often in a row (0x401 repeats every
                                 * 10 ms: ac9acfb filled the list at 280 ms) */
+/* the kernel pool's free KB at the first event of each run and the lowest
+ * seen in it (JV_EV_NO_POOL: not read) - suspend events of a save or load
+ * up to 0x1000, i.e. before the devices are suspended */
+uint32_t g_ev_pool[JV_EV_MAX], g_ev_pool_min[JV_EV_MAX];
 
 /* recording state: open from the request (or, for a sleep JamaisVu did not
  * ask for, the first suspend event) until the 0x100000 resume event */
@@ -415,13 +419,23 @@ static int savestate_system_event(int resume, int eventid,
         g_ev_normal_ready = 1;
     }
     uint32_t n = g_ev_n;
-    if (n && g_ev_id[n - 1] == id) {
+    uint32_t pool = JV_EV_NO_POOL, pool_total;
+    int same = n && g_ev_id[n - 1] == id;
+    /* 0x401 comes every 10 ms for seconds: read at every 8th of a run */
+    if (!resume && pargs.mode != JAMAISVU_MODE_NONE && eventid <= 0x1000 &&
+        (!same || (g_ev_cnt[n - 1] & 7) == 0) &&
+        jv_kernel_pool(&pool, &pool_total, NULL, 0) < 0)
+      pool = JV_EV_NO_POOL;
+    if (same) {
       g_ev_cnt[n - 1]++;
       g_ev_last[n - 1] = now;
+      if (pool < g_ev_pool_min[n - 1])
+        g_ev_pool_min[n - 1] = pool;
     } else if (n < JV_EV_MAX) {
       g_ev_id[n] = id;
       g_ev_t[n] = g_ev_last[n] = now;
       g_ev_cnt[n] = 1;
+      g_ev_pool[n] = g_ev_pool_min[n] = pool;
       g_ev_n = n + 1;
     }
     if (resume && eventid == 0x100000)
@@ -518,6 +532,57 @@ static void resolve_hw_fns(void) {
       module_get_export_func(KERNEL_PID, "SceSysmem", 0x2ED7F97A, 0x46E72428,
                              (uintptr_t *)&g_hw_flags_fn) < 0)
     g_hw_flags_fn = NULL;
+}
+
+/* The kernel's own memory pool (ScePhyMemPartKD): what is free in it,
+ * read with the kernel's own two calls (SceSysmemForKernel on 3.60: the
+ * kernel partition, and its info - under the partition's lock, nothing is
+ * allocated). Two consoles' own crash dumps (PCH-1000: FAHRENEIT after a
+ * wake-up, 5aa35b0; a save in PCSE00120 on the way into the sleep,
+ * bc8c15c) end in "Cannot allocate physical memory from [ScePhyMemPartKD]"
+ * - and no log said how much of it was left before. The name is read from
+ * the partition (+0x8C, what the kernel prints in that message), so the
+ * log shows which pool the numbers are of. */
+typedef struct {
+  uint32_t base, total, free, pieces;
+  uint32_t spare[4];
+} JvPhyPartInfo;
+static void *(*g_kpool_part_fn)(void);
+static int (*g_kpool_info_fn)(void *part, JvPhyPartInfo *info);
+static int g_kpool_tried;
+
+int jv_kernel_pool(uint32_t *free_kb, uint32_t *total_kb, char *name,
+                   int name_len) {
+  if (!g_kpool_tried) {
+    g_kpool_tried = 1;
+    if (!g_fw || !g_fw->kernel_pool_info ||
+        module_get_export_func(KERNEL_PID, "SceSysmem", 0x63A519E5,
+                               0x4D38F861,
+                               (uintptr_t *)&g_kpool_part_fn) < 0 ||
+        module_get_export_func(KERNEL_PID, "SceSysmem", 0x63A519E5,
+                               0x3650963F,
+                               (uintptr_t *)&g_kpool_info_fn) < 0) {
+      g_kpool_part_fn = NULL;
+      g_kpool_info_fn = NULL;
+    }
+  }
+  if (!g_kpool_part_fn || !g_kpool_info_fn)
+    return -1;
+  void *part = g_kpool_part_fn();
+  JvPhyPartInfo info;
+  memset(&info, 0, sizeof(info));
+  if (!part || g_kpool_info_fn(part, &info) < 0)
+    return -1;
+  *free_kb = info.free >> 10;
+  *total_kb = info.total >> 10;
+  if (name && name_len > 0) {
+    const char *n = (const char *)part + 0x8C;
+    int i = 0;
+    for (; i < name_len - 1 && n[i] >= 0x20 && n[i] < 0x7F; i++)
+      name[i] = n[i];
+    name[i] = '\0';
+  }
+  return 0;
 }
 
 void jv_set_appdb_changed(uint32_t v) {
@@ -786,6 +851,11 @@ int module_start(SceSize args, void *argp) {
   memset(&pargs, 0, sizeof(PayloadArguments));
 
   g_armed = (arm() == 0);
+  {
+    /* resolved now, not at the first system event of a sleep */
+    uint32_t f, t;
+    jv_kernel_pool(&f, &t, NULL, 0);
+  }
 
   snprintf(g_status, sizeof(g_status),
            "JamaisVu " JV_VERSION "\n"

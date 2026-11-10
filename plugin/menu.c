@@ -455,6 +455,27 @@ static void format_events(char *buf, int cap, const char *title) {
   snprintf(buf + m, cap - m, "\r\n");
 }
 
+/* The kernel pool's free KB at the suspend events of a save or load (the
+ * first of each run of the same event, and the lowest seen in the run). */
+static int format_event_pool(char *buf, int cap, const char *title) {
+  int m = snprintf(buf, cap, "%s", title);
+  int any = 0;
+  uint32_t cnt = g_ev_n < JV_EV_MAX ? g_ev_n : JV_EV_MAX;
+  for (uint32_t i = 0; i < cnt && m < cap - 48; i++) {
+    uint32_t id = g_ev_id[i];
+    if ((id & 0x80000000u) || g_ev_pool[i] == JV_EV_NO_POOL)
+      continue;
+    any = 1;
+    m += snprintf(buf + m, cap - m, " S%X %u", (unsigned)id,
+                  (unsigned)g_ev_pool[i]);
+    if (g_ev_pool_min[i] < g_ev_pool[i] && m < cap - 24)
+      m += snprintf(buf + m, cap - m, " (lowest %u)",
+                    (unsigned)g_ev_pool_min[i]);
+  }
+  snprintf(buf + m, cap - m, "\r\n");
+  return any;
+}
+
 static int read_small(const char *path, void *buf, int cap) {
   SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
   if (fd < 0)
@@ -5044,7 +5065,7 @@ static const char *const k_obj_classes[][2] = {
   { "SceUIDMutexClass", "mutexes" },
 };
 #define N_OBJ_CLASSES (sizeof(k_obj_classes) / sizeof(k_obj_classes[0]))
-_Static_assert(N_OBJ_CLASSES + 2 <= COUNTS_MAX, "COUNTS_MAX too small");
+_Static_assert(N_OBJ_CLASSES + 3 <= COUNTS_MAX, "COUNTS_MAX too small");
 
 static int counts_text(char *out, int len, int *vals) {
   int n = 0;
@@ -5078,6 +5099,22 @@ static int counts_text(char *out, int len, int *vals) {
     n += snprintf(out + n, len - n, "; file table: %u of %u entries with a "
                   "file, %u held open", (unsigned)with_file, (unsigned)tot,
                   (unsigned)held);
+  {
+    /* what the kernel has left for itself (see jv_kernel_pool) */
+    uint32_t kfree, ktotal;
+    char kname[32];
+    if (n < len - 1 &&
+        jv_kernel_pool(&kfree, &ktotal, kname, sizeof(kname)) == 0) {
+      n += snprintf(out + n, len - n, "; kernel pool %s: %u KB free of %u",
+                    kname, (unsigned)kfree, (unsigned)ktotal);
+      /* the periodic line is written when a count changed: for the pool,
+       * a change of 256 KB */
+      if (vals)
+        vals[N_OBJ_CLASSES + 2] = (int)(kfree >> 8);
+    }
+    if (n > len - 1)
+      n = len - 1;
+  }
   return n;
 }
 
@@ -5353,6 +5390,9 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
       format_events(el, sizeof(el), "    system events (S: ms after the "
                     "request, R: ms after the first resume event):");
       log_append(el);
+      if (format_event_pool(el, sizeof(el), "    kernel pool free while "
+                            "going to sleep (KB, at each step):"))
+        log_append(el);
     }
     if (g_t_fs_done) {
       const FsUpdateTiming *f = &g_fs_update_timing;

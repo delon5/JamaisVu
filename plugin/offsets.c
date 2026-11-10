@@ -77,6 +77,13 @@ static const FwOffsets g_table[] = {
     .exfat_init_cluster_cache = 0x2119,
     .exfat_fp_index_unknown = 0x0FFFFFFF,
     .iofilemgr_buff_lists = 1,
+    /* SceSysmem 3.60 (0x3380B323): text+0x14510 returns the partition the
+     * kernel's "Cannot allocate physical page" message names, text+0x13E4C
+     * (-> +0x13D70) fills four words under the partition's lock: lowest
+     * base, total bytes, free bytes (the free sections plus every page
+     * bucket, text+0x1297C), pieces; text+0x12410 prints the name from
+     * the partition + 0x8C. */
+    .kernel_pool_info = 1,
   },
   {
     .name = "3.65",

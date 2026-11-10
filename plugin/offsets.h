@@ -76,6 +76,13 @@ typedef struct {
                                         chain unknown" for an open file */
   uint32_t iofilemgr_buff_lists;     /* 1: the file buffer's sector lists
                                         have the layout fs.c walks */
+  uint32_t kernel_pool_info;         /* 1: SceSysmemForKernel's kernel
+                                        partition (0x4D38F861) and its
+                                        info call (0x3650963F: base,
+                                        total, free, pieces) and the
+                                        partition's name at +0x8C are as
+                                        main.c's jv_kernel_pool() uses
+                                        them */
 } FwOffsets;
 
 /* How much an entry has been checked */

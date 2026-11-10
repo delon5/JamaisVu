@@ -68,6 +68,12 @@ extern volatile uint32_t g_ev_n;
 extern uint32_t g_ev_id[JV_EV_MAX];
 extern int64_t g_ev_t[JV_EV_MAX], g_ev_last[JV_EV_MAX];
 extern uint32_t g_ev_cnt[JV_EV_MAX];
+#define JV_EV_NO_POOL 0xFFFFFFFFu
+extern uint32_t g_ev_pool[JV_EV_MAX], g_ev_pool_min[JV_EV_MAX];
+/* the kernel's own memory pool: free and total KB, and the pool's name as
+ * the kernel has it; < 0 when the firmware's calls for it are not known */
+int jv_kernel_pool(uint32_t *free_kb, uint32_t *total_kb, char *name,
+                   int name_len);
 /* loads: the snapshot's own frame (slotN.jvf), drawn into once the memory
  * restore starts; 0 = none */
 void jv_set_display_frame2(uint32_t paddr, uint32_t pitch);
