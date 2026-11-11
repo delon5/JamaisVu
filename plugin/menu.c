@@ -1259,7 +1259,16 @@ static void set_message(MenuMode mode, const char *msg, int progress,
  * main 0 - the menu needs 848 KB): the common-dialog pool (idle while the
  * game shows no system dialog), VRAM through its CPU-cached mapping, the
  * game and tmp partitions. Taken only while the menu is shown. */
+/* The last one, "tmp" (0x6020D006), is not a pool of its own: it gives
+ * the kernel's pool under another mapping. What it had to give followed
+ * the kernel pool's free memory on both consoles (PCH-2000: 1-2 MB;
+ * PCH-1000: 256 KB, 0 with the pool at 112 KB), and a kernel dump named
+ * ScePhyMemPartKD for requests only its probes made. It was asked last,
+ * without the margin the kernel's pool has under its own name, and tried
+ * with up to 32 MB at each app's first opening. It is no longer asked
+ * (pool_usable). */
 #define OVL_POOLS 7
+#define TMP_POOL 6
 static const SceKernelMemBlockType k_ovl_types[OVL_POOLS] = {
   0x1020D006, /* KERNEL_ROOT_RW (= KERNEL_RW) */
   0x1080D006, /* KERNEL_ROOT_PHYCONT_RW (2 MB worked in Dead Nation) */
@@ -1362,12 +1371,10 @@ static int root_margin_free(void) {
   int64_t since = g_t_resume ? ksceKernelGetSystemTimeWide() - g_t_resume : -1;
   uint32_t margin = since >= 0 && since < OVL_WAKE_WINDOW_US
                         ? OVL_ROOT_MARGIN_WAKE : OVL_ROOT_MARGIN;
-  SceUID t = ksceKernelAllocMemBlock("JamaisVuMargin", k_ovl_types[0],
-                                     margin, NULL);
-  if (t < 0)
-    return 0;
-  ksceKernelFreeMemBlock(t);
-  return 1;
+  /* read from the pool (workmem.h), not tried by taking it: a megabyte
+   * of the kernel's pool taken for an instant is a megabyte every other
+   * module is short of in that instant */
+  return jv_kernel_pool_has(margin);
 }
 
 /* The contiguous pools (root contiguous, VRAM) are where a game keeps its
@@ -1394,6 +1401,10 @@ static int pool_is_contiguous(int i) {
 }
 
 static int pool_has(int i, uint32_t size) {
+  if (i == TMP_POOL)
+    return 0; /* the kernel's pool by another name: see k_ovl_types */
+  if (i == 0)
+    return jv_kernel_pool_has(size); /* read, not tried */
   SceUID u = ksceKernelAllocMemBlock("JamaisVuProbe", k_ovl_types[i], size,
                                      NULL);
   if (u < 0)
@@ -1436,14 +1447,13 @@ static SceUID g_spare_pid;   /* the app the log line below was written in */
 
 static void spare_log(SceUID pid) {
   static char line[240];
-  static const struct { int pool; const char *name; } k[3] = {
+  static const struct { int pool; const char *name; } k[2] = {
     { SPARE_POOL, "outside every budget (pool \"game\")" },
     { 3, "common dialog" },
-    { 6, "tmp" },
   };
   int n = snprintf(line, sizeof(line), "    memory no game is using - "
                    "largest block each pool gives now:");
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 2; i++) {
     uint32_t got = 0;
     for (uint32_t kb = 32768; kb >= 256 && !got; kb /= 2)
       if (pool_has(k[i].pool, kb << 10))
@@ -1483,6 +1493,10 @@ static void *ovl_alloc(int k, uint32_t size) {
     if (o >= 0 && ((i == SPARE_POOL && g_spare_ok) ||
                    (i == DIALOG_POOL && g_dialog_ok)))
       continue; /* asked already */
+    if (i == TMP_POOL) {
+      g_ovl_fail_ret[i] = -1; /* the kernel's pool by another name */
+      continue;
+    }
     if (pool_is_contiguous(i) && g_hole_pid) {
       if (g_pool_off[i]) {
         g_ovl_fail_ret[i] = -1;
@@ -1559,6 +1573,19 @@ static void ovl_block_free(int k) {
 static void ovl_pieces_free(void) {
   for (int k = 0; k < OVL_PIECES; k++)
     ovl_block_free(k);
+}
+
+static uint32_t ovl_largest_free(SceKernelMemBlockType t);
+/* for the refusal's line: the kernel's pool is read (what it has free in
+ * all, up to "2048"), never tried; "tmp" is that pool again */
+static uint32_t pool_diag_kb(int i) {
+  if (i == 0 || i == TMP_POOL) {
+    uint32_t free_kb = 0, total_kb = 0;
+    if (i == TMP_POOL || jv_kernel_pool(&free_kb, &total_kb, NULL, 0) < 0)
+      return 0;
+    return free_kb > 2048 ? 2048 : free_kb;
+  }
+  return ovl_largest_free(k_ovl_types[i]) >> 10;
 }
 
 /* diagnostics, only after a refusal: the largest block each pool would
@@ -4164,7 +4191,7 @@ static int open_menu(void) {
       for (int i = 0; i < OVL_POOLS && n < (int)sizeof(line) - 40; i++)
         n += snprintf(line + n, sizeof(line) - n, "%s %s %u KB",
                       i ? "," : "", k_ovl_pool_names[i],
-                      (unsigned)(ovl_largest_free(k_ovl_types[i]) >> 10));
+                      (unsigned)(pool_diag_kb(i)));
       snprintf(line + n, sizeof(line) - n, "\r\n");
     } else {
       snprintf(line + n, sizeof(line) - n, "\r\n");
@@ -5233,6 +5260,7 @@ typedef struct {
   char name[28];
   uint32_t kb;
   uint32_t group; /* index of its drive */
+  uint32_t base;  /* where its code is loaded */
 } JvModRow;
 #define MODS_MAX 512
 
@@ -5316,6 +5344,7 @@ static void modules_log(void) {
     row->name[sizeof(row->name) - 1] = '\0';
     row->kb = kb;
     row->group = g;
+    row->base = (uint32_t)info->seg[0].vaddr;
     all_kb += kb;
   }
   /* largest first */
@@ -5363,6 +5392,25 @@ static void modules_log(void) {
     snprintf(line + m, sizeof(line) - m, "%s\r\n",
              sys && cnt > 16 ? ", ..." : "");
     log_append(line);
+    /* the plugins: where each is loaded, so an address in a kernel crash
+     * dump names its module (a dump of 9a36247's day ended in a module at
+     * 0x01800000 that nothing on the console could name) */
+    if (!sys && strcmp(drv[g], "bootfs") != 0) {
+      m = snprintf(line, sizeof(line), "      loaded at:");
+      for (uint32_t i = 0; i < n; i++) {
+        if (rows[i].group != g)
+          continue;
+        if (m > (int)sizeof(line) - 56) {
+          snprintf(line + m, sizeof(line) - m, "\r\n");
+          log_append(line);
+          m = snprintf(line, sizeof(line), "       ");
+        }
+        m += snprintf(line + m, sizeof(line) - m, " %s 0x%08X,",
+                      rows[i].name, (unsigned)rows[i].base);
+      }
+      snprintf(line + m - 1, sizeof(line) - m + 1, "\r\n");
+      log_append(line);
+    }
   }
   jv_work_free(&blk);
 }

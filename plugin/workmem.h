@@ -22,6 +22,24 @@
 #include <psp2kern/kernel/sysmem.h>
 #include <stdint.h>
 
+/* main.c (not main.h here: slots.c is also built for the host tests) */
+int jv_kernel_pool(uint32_t *free_kb, uint32_t *total_kb, char *name,
+                   int name_len);
+
+/* The kernel's own pool has this much free, read from the pool itself
+ * (jv_kernel_pool) - nothing is allocated to find out. It used to be
+ * tried: half a megabyte taken and given back at once, which for that
+ * instant left the pool that much short for every other module (the
+ * PCH-1000 has had 700 KB of it free in a game; a kernel dump of
+ * 9a36247's day showed these probes as the pool's failed requests). 0 if
+ * the pool cannot be read. */
+static inline int jv_kernel_pool_has(uint32_t bytes) {
+  uint32_t free_kb = 0, total_kb = 0;
+  if (jv_kernel_pool(&free_kb, &total_kb, NULL, 0) < 0)
+    return 0;
+  return free_kb >= (bytes + 1023) / 1024;
+}
+
 static inline int jv_work_pool_has(SceKernelMemBlockType type,
                                    uint32_t size) {
   SceUID u = ksceKernelAllocMemBlock("JamaisVuProbe", type, size, NULL);
@@ -82,7 +100,7 @@ static inline void *jv_work_alloc(const char *name, uint32_t size,
     SceUID u = ksceKernelAllocMemBlock(name, types[i], size, NULL);
     if (u < 0)
       continue;
-    if ((i == 0 && !jv_work_pool_has(types[i], 0x80000)) ||
+    if ((i == 0 && !jv_kernel_pool_has(0x80000)) ||
         (i == 4 && !jv_work_pool_has(types[i], 0x200000))) {
       ksceKernelFreeMemBlock(u);
       continue;

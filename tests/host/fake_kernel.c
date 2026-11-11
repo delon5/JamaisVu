@@ -410,6 +410,17 @@ JvIoMountPoint *fk_find_mount_point(int id) {
 
 static void *g_blocks[64];
 
+/* the kernel pool's free memory, as plugin/main.c reads it on the console
+ * (workmem.h asks before it takes work memory from that pool) */
+int jv_kernel_pool(uint32_t *free_kb, uint32_t *total_kb, char *name,
+                   int name_len) {
+  *free_kb = 4096;
+  *total_kb = 36864;
+  if (name && name_len > 0)
+    name[0] = '\0';
+  return 0;
+}
+
 SceUID ksceKernelAllocMemBlock(const char *name, SceKernelMemBlockType type,
                                SceSize size,
                                SceKernelAllocMemBlockKernelOpt *opt) {
