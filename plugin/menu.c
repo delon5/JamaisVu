@@ -754,9 +754,16 @@ static int plane_alloc(void) {
     return -1;
   }
   /* memory no game is using, before any pool a game uses: the system's
-   * spare memory (8 MB more must stay), then the common dialog pool (4 MB
-   * more must stay) */
-  for (int k = 0; k < 2; k++) {
+   * spare memory (8 MB more must stay).
+   *
+   * Not the common dialog pool (k = 1, as a46e534 and ec8dc1b did): a
+   * save data dialog was measured to take 7.9 MB of it and a trophy
+   * dialog 6.9 MB (PCSG00488, ec8dc1b), and with the save dialog open
+   * its largest free block was 512 KB - a dialog needs nearly all of the
+   * pool. The plane's 2 MB stays after the menu closed, until something
+   * else is on the plane, and cannot step aside as the menu's pieces do:
+   * held there, it would leave the next dialog too little. */
+  for (int k = 0; k < 1; k++) {
     static const char *last_why[2];
     static const char *const kname[2] = { "the system's spare memory",
                                           "the common dialog pool" };
@@ -1318,7 +1325,14 @@ static int pool_has(int i, uint32_t size) {
  * dialog pool 8 MB and not 16. The common dialog pool is what the
  * system's own dialogs in a game are given (keyboard, save data, message
  * boxes): a game touches it only while such a dialog is open. It is asked
- * second, while it has DIALOG_MARGIN more to give for such a dialog. */
+ * second, while it has DIALOG_MARGIN more to give.
+ *
+ * Measured since (PCSG00488, ec8dc1b): a save data dialog asks for 7.9 MB
+ * of that pool in 14 blocks and a trophy dialog for 6.9 MB, so no margin
+ * makes holding memory there safe by itself: what the menu takes from it
+ * is given back before a dialog's first request goes on (see
+ * alloc_user_hook), and the display plane's block, which cannot be, is
+ * not taken from it. */
 #define DIALOG_POOL 3
 #define DIALOG_MARGIN 0x400000
 static int g_spare_ok;       /* this opening: asked first */
@@ -4231,6 +4245,33 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         snprintf(tm, sizeof(tm), "menu drawing time set to: %s\r\n",
                  k_draw_timing[g_draw_timing]);
         log_queue(tm);
+#ifndef JV_RELEASE
+      } else if (pressed & SCE_CTRL_DOWN) {
+        /* Test: is the plane invisible with the overlay's alpha at 0,
+         * whatever its buffer holds? If so the buffer can be given back
+         * the moment the menu closes (alpha 0 first), instead of staying
+         * until the system next sets the plane. Nothing else is touched:
+         * no NULL layer, blending stays on, the owner stays (those blacked
+         * the screen, c1f7862 / ed04ef3 / 6a687e3). */
+        static char tm[220];
+        if (g_plane_mode && g_plane_shown && g_set_merge) {
+          int head = ksceDisplayGetPrimaryHead();
+          int r0 = g_set_merge(head, 0, 0);
+          ksceKernelDelayThread(3000 * 1000);
+          int r1 = g_set_merge(head, 0, 0x100);
+          snprintf(tm, sizeof(tm), "overlay alpha test: alpha 0 for 3 s "
+                   "(0x%08X), then the pixels' own again (0x%08X) - the "
+                   "menu should have vanished with the game visible, and "
+                   "come back\r\n", (unsigned)r0, (unsigned)r1);
+          log_queue(tm);
+          set_message(MV_MESSAGE, "Did the menu vanish for 3 s?", -1, 0);
+        } else {
+          log_queue("overlay alpha test: not run - the menu is not on the "
+                    "display plane here\r\n");
+          set_message(MV_MESSAGE, "Only with the menu on the overlay", -1,
+                      0);
+        }
+#endif
       } else if (pressed & SCE_CTRL_LEFT) {
         SceUID game = g_l0_pid ? g_l0_pid : fg_reader();
         if (game)
