@@ -74,9 +74,15 @@ A corrupted or tampered state is rejected with nothing changed.
 
 A kernel that cannot find a free page panics, and the console restarts. In a game that leaves the system almost nothing, the menu's memory partly comes from the kernel's own pool. So nothing of it is held across a save or load: it is given back before the sleep is requested, and again as soon as the system is awake if a banner took some meanwhile (the new slot's picture is kept in a block taken for the save only), and for 20 s after a wake-up the result banner takes kernel-pool memory only while a megabyte stays free there. If it cannot, the banner is skipped; `log.txt` has the result either way.
 
-## The display plane's memory
+## Memory a game has given up for a moment
 
-In games the menu is shown on the display's second layer, which needs a 2 MB buffer from video memory or the contiguous pool - the pools a game takes its own memory from. It is taken only while 1 MB more stays free in the same pool, and a game that had no room for it once is not asked again while it runs: Dead Nation had nothing free at one menu opening and exactly 2 MB half a minute later, the plane took them, and the game was gone three seconds after. Without the plane the menu is drawn into the game's frames.
+Video memory and the contiguous pool are where a game keeps its frame-sized buffers. Dead Nation shows what happens when JamaisVu takes from them at the wrong moment: with nothing free there the menu took its memory from the kernel's pool and the game ran on; at every later opening that found room there - the 2 MB of the display plane, or just 336 KB of the menu's own pieces - the game's last frame came two to three seconds later and its process was ended. What had become free was a block the game had given up for a moment, and it could not have it back in one piece. So:
+
+- the display plane's 2 MB are taken only while as much again stays free in the same pool, and a game that had no room for the plane once is not asked again while it runs;
+- the menu's pieces leave a contiguous pool alone, for as long as the game runs, once it had no 2 MB block there, or once a piece left it without the 2 MB block it had;
+- buffers taken for a moment (`plugin/workmem.h`) come from the kernel's pool while half a megabyte more stays free in it, then from the game's ordinary memory, and from the contiguous pool only last and under the same 2 MB rule.
+
+Without the plane the menu is drawn into the game's frames. Development builds log how a game's process ended and what JamaisVu held at that moment.
 
 ## The plugin's own share of the kernel's pool
 

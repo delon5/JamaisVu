@@ -659,8 +659,9 @@ static void plane_clear(uint32_t y0, uint32_t rows) {
   plane_flush(y0, rows);
 }
 
-/* what must stay free in a pool after the plane's block was taken from it */
-#define PLANE_MARGIN 0x100000
+/* what must stay free in a pool after the plane's block was taken from
+ * it: as much again (a frame-sized block, see HOLE_BYTES) */
+#define PLANE_MARGIN 0x200000
 
 /* 0 once the buffer and the driver's two functions are there (kept) */
 static int plane_alloc(void) {
@@ -748,26 +749,6 @@ static int plane_alloc(void) {
         log_queue("overlay plane: no 2 MB block in VRAM or root contiguous "
                   "- the menu is drawn into the game's frames\r\n");
       }
-      /* what there is instead (Dead Nation, PCSA00151: the menu drawn
-       * into its frames is torn by the game's own drawing): the largest
-       * block each of the three pools gives, in steps of 256 KB - whether
-       * a smaller plane would fit */
-      int n = snprintf(line, sizeof(line), "    largest block now:");
-      for (int i = 0; i < 3; i++) {
-        uint32_t got = 0;
-        for (uint32_t kb = 1792; kb >= 256 && !got; kb -= 256) {
-          SceUID u = ksceKernelAllocMemBlock("JamaisVuProbe", types[i],
-                                             kb << 10, NULL);
-          if (u >= 0) {
-            ksceKernelFreeMemBlock(u);
-            got = kb;
-          }
-        }
-        n += snprintf(line + n, sizeof(line) - n, "%s %s %u KB",
-                      i ? "," : "", names[i], (unsigned)got);
-      }
-      snprintf(line + n, sizeof(line) - n, " (0: less than 256 KB)\r\n");
-      log_queue(line);
     }
   }
   return -1;
@@ -1198,13 +1179,76 @@ static int root_margin_free(void) {
   return 1;
 }
 
+/* The contiguous pools (root contiguous, VRAM) are where a game keeps its
+ * frame-sized buffers. Dead Nation (PCSA00151, PCH-2000): with nothing
+ * free there the menu took its 400 KB from the kernel's pool and the game
+ * ran on (25 s, 49 s); whenever a later opening found room there - the
+ * 2 MB of the display plane (6e68f54), or 336 KB of the menu's pieces with
+ * the plane left alone (27d100b, 70d2491) - the game's last frame came
+ * 2-3 s after it and its process was ended (three times out of three).
+ * What had become free was a block the game had given up for a moment,
+ * and it could not have it back in one piece. So, per app:
+ *  - a contiguous pool that once had no 2 MB block is not used again
+ *    while that app runs, whatever is free there later;
+ *  - a piece that leaves a pool without the 2 MB block it had before is
+ *    given back, and the pool is not used again either. */
+#define HOLE_BYTES 0x200000
+static SceUID g_hole_pid;             /* the app these two are about */
+static uint8_t g_pool_off[OVL_POOLS]; /* not used again in this app */
+static int8_t g_pool_had2[OVL_POOLS]; /* this opening: -1 not looked yet */
+static uint32_t g_hole_kept;          /* pieces given back for the rule */
+
+static int pool_is_contiguous(int i) {
+  return i == 1 || i == 4;
+}
+
+static int pool_has(int i, uint32_t size) {
+  SceUID u = ksceKernelAllocMemBlock("JamaisVuProbe", k_ovl_types[i], size,
+                                     NULL);
+  if (u < 0)
+    return 0;
+  ksceKernelFreeMemBlock(u);
+  return 1;
+}
+
+/* at the start of every taking of menu memory */
+static void pool_rules_begin(void) {
+  SceUID pid = fg_reader();
+  if (pid != g_hole_pid) {
+    g_hole_pid = pid;
+    memset(g_pool_off, 0, sizeof(g_pool_off));
+  }
+  memset(g_pool_had2, -1, sizeof(g_pool_had2));
+}
+
 static void *ovl_alloc(int k, uint32_t size) {
   size = (size + 0xfff) & ~0xfffu;
   const int *order = is_panel_piece(k) ? k_panel_order : k_ovl_order;
   for (int o = 0; o < OVL_POOLS; o++) {
     int i = order[o];
+    if (pool_is_contiguous(i) && g_hole_pid) {
+      if (g_pool_off[i]) {
+        g_ovl_fail_ret[i] = -1;
+        continue;
+      }
+      if (g_pool_had2[i] < 0) {
+        g_pool_had2[i] = (int8_t)pool_has(i, HOLE_BYTES);
+        if (!g_pool_had2[i]) {
+          g_pool_off[i] = 1; /* the game has this pool full */
+          g_ovl_fail_ret[i] = -1;
+          continue;
+        }
+      }
+    }
     SceUID uid = ksceKernelAllocMemBlock("JamaisVuMenu", k_ovl_types[i], size,
                                          NULL);
+    if (uid >= 0 && pool_is_contiguous(i) && g_hole_pid &&
+        !pool_has(i, HOLE_BYTES)) {
+      ksceKernelFreeMemBlock(uid); /* it broke the pool's 2 MB block */
+      uid = -1;
+      g_pool_off[i] = 1;
+      g_hole_kept++;
+    }
     g_ovl_fail_ret[i] = uid;
     if (uid >= 0 && i == 0 && !root_margin_free()) {
       ksceKernelFreeMemBlock(uid); /* would leave the kernel too little */
@@ -1296,6 +1340,7 @@ static int overlay_acquire(void) {
      * picture, and replacing it blanked the screen (Splinter Cell). */
     int plane = 0;
     g_plane_why = NULL;
+    pool_rules_begin();
     if (ksceAppMgrIsExclusiveProcessRunning() && g_render_sema >= 0) {
       SceUID fg = fg_reader();
       int64_t tn = now_us();
@@ -3778,6 +3823,14 @@ static int open_menu(void) {
              g_plane_why ? "; composed into the frames: " : "",
              g_plane_why ? g_plane_why : "");
     log_queue(line);
+    if (g_pool_off[1] || g_pool_off[4]) {
+      snprintf(line, sizeof(line), "    contiguous memory left to the "
+               "game:%s%s (it had no 2 MB block there, or a piece of the "
+               "menu would have broken one up; %u pieces given back so "
+               "far)\r\n", g_pool_off[1] ? " root contiguous" : "",
+               g_pool_off[4] ? " VRAM" : "", (unsigned)g_hole_kept);
+      log_queue(line);
+    }
   }
   g_capture_ok = 0;
   g_fb_rec = 0;
