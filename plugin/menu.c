@@ -35,6 +35,18 @@ int ksceAppMgrIsExclusiveProcessRunning(void); /* used before its later declarat
 #include "fs.h"
 #include "md5.h"
 #include "payload_id.h"
+
+/* Most of this file runs once per button press, per save or per log line:
+ * it is compiled for size. The two parts that run per frame or per pixel
+ * row (the image rows; the display section: compose, draw_overlays, the
+ * display hook, the panel's rendering) keep the command line's options,
+ * -O3 without the compiler's NEON vector code, untouched: the size
+ * setting is switched off before them (pop_options) and on again after.
+ * The other way round - the file for size, those parts marked -O3 - did
+ * not give the same code for them (compose 3652 bytes instead of 5400,
+ * build_row565 394 instead of 1586). */
+#pragma GCC push_options /* JV_COLD: for size, see the top of the file */
+#pragma GCC optimize("Os")
 #include "gui/menu_view.h"
 #include "gui/rle16.h"
 
@@ -175,6 +187,7 @@ static inline int img_edge(const Img16 *im, int y) {
     return y - (im->h - 2 * MENU_EDGE_ROWS);
   return -1;
 }
+#pragma GCC pop_options /* JV_HOT: the command line's -O3 from here */
 /* row y of an image as 16-bit pixels. A compressed row is decoded into
  * one buffer (the display hook is the only reader) and kept while the
  * same row of the same copy is asked for again - compose asks twice per
@@ -235,6 +248,9 @@ static const uint16_t *img_row16(const Img16 *im, int y) {
   g_dec_ver = st->version;
   return g_dec_row;
 }
+#pragma GCC push_options /* JV_COLD: for size, see the top of the file */
+#pragma GCC optimize("Os")
+
 /* The apps that read the controller lately (JamaisVu's controller hooks
  * run inside the reading app): two places, the oldest is replaced. Used at
  * START + UP to tell which app is in front - no process-event hook (4cf1f86
@@ -1654,6 +1670,7 @@ static void toast(const char *msg, int is_error) {
 /* ------------------------------------------------------------------------ */
 /* Display hook: thumbnail capture and overlay                              */
 /* ------------------------------------------------------------------------ */
+#pragma GCC pop_options /* JV_HOT: the command line's -O3 from here */
 
 static tai_hook_ref_t g_display_ref;
 static SceUID g_display_hook = -1;
@@ -2603,6 +2620,8 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
     return hret;
   return TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
 }
+#pragma GCC push_options /* JV_COLD: for size, see the top of the file */
+#pragma GCC optimize("Os")
 
 #ifndef JV_RELEASE
 /* How a game ended, for log.txt. Dead Nation was reported crashed twice
@@ -7768,3 +7787,4 @@ int menu_init(const char *status_text) {
 
   return 0;
 }
+#pragma GCC pop_options /* JV_COLD */

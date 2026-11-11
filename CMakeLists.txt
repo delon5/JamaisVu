@@ -65,6 +65,19 @@ add_executable(JamaisVu
 )
 target_include_directories(JamaisVu PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
+# Everything that does not draw is built for size: it runs once per button
+# press, per save or per log line, and its code sits in the kernel's pool
+# for as long as the console runs (measured: 19 KB less for these files;
+# plugin/menu.c does the same for all but its display section with a
+# pragma, 26 KB less). The drawing code (plugin/gui/, the display section
+# of menu.c) keeps -O3.
+set_source_files_properties(
+  plugin/main.c plugin/fs.c plugin/fs_policy.c plugin/offsets.c
+  plugin/slots.c plugin/md5.c plugin/remap.c plugin/lockskip.c
+  plugin/appdb.c plugin/slot_policy.c plugin/storage.c plugin/trace.c
+  plugin/hwdump.c payload/crc32.c
+  PROPERTIES COMPILE_OPTIONS "-Os")
+
 # Set -DJAMAISVU_ALLOW_UNVERIFIED_FW=ON to arm on firmware whose offsets
 # have not been verified on hardware (see plugin/offsets.c). Testing only.
 option(JAMAISVU_ALLOW_UNVERIFIED_FW "Arm on unverified firmware" OFF)
