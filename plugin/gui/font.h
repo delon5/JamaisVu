@@ -22,8 +22,19 @@ typedef struct {
   int ascent;
   int first, last;
   const FontGlyph *glyphs;
-  const uint8_t *bitmap; /* 8-bit coverage */
+  /* 4-bit coverage (0..15), two pixels a byte, the left one in the low
+   * half; every row of a glyph starts on a byte. It was 8 bits a pixel,
+   * 48 KB for the three sizes; the Japanese glyphs (jpfont.bin) have
+   * always been stored with these 16 levels. */
+  const uint8_t *bitmap;
 } Font;
+
+/* coverage 0..255 of pixel i in a glyph row of the packed bitmap */
+static inline uint32_t font_cov4(const uint8_t *row, int i) {
+  uint32_t b = row[i >> 1];
+  return ((i & 1) ? b >> 4 : b & 15) * 17;
+}
+#define FONT_ROW_BYTES(w) (((w) + 1) / 2)
 
 extern const Font font_large;  /* titles */
 extern const Font font_medium; /* header */

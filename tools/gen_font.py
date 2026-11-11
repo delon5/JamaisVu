@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Rasterise ASCII 0x20-0x7e of a TTF/OTF font into an anti-aliased 8-bit
-alpha atlas and emit C source for the in-game menu (plugin/gui/font_data.c).
+"""Rasterise ASCII 0x20-0x7e of a TTF/OTF font into an anti-aliased alpha
+atlas and emit C source for the in-game menu (plugin/gui/font_data.c):
+4-bit coverage, two pixels a byte (the left one in the low half), every
+row of a glyph starting on a byte - see plugin/gui/font.h.
 
 usage: tools/gen_font.py <font.otf> <name>:<pixel size> [...] > font_data.c
 The default build uses Inter (SIL Open Font License 1.1), see
@@ -26,7 +28,13 @@ def emit(path, name, size):
         if w and h:
             img = Image.new("L", (w, h), 0)
             ImageDraw.Draw(img).text((-bbox[0], -bbox[1]), ch, font=font, fill=255)
-            data += img.tobytes()
+            raw = img.tobytes()
+            for r in range(h):
+                row = raw[r * w:(r + 1) * w]
+                for i in range(0, w, 2):
+                    lo = (row[i] * 15 + 127) // 255
+                    hi = (row[i + 1] * 15 + 127) // 255 if i + 1 < w else 0
+                    data.append(lo | (hi << 4))
         glyphs.append((adv, bbox[0], bbox[1], w, h, off))
     out = []
     # each font can be left out (the payload only needs some of them)

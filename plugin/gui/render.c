@@ -243,12 +243,14 @@ int cv_text(Canvas *c, const Font *f, int x, int y, const char *s,
       j0 = c->y0 - gy;
     if (j1 > c->y0 + c->h - gy)
       j1 = c->y0 + c->h - gy;
-    for (int j = j0; j < j1; j++)
+    for (int j = j0; j < j1; j++) {
+      const uint8_t *row = bm + j * FONT_ROW_BYTES(g->w);
       for (int i = 0; i < g->w; i++) {
-        uint32_t cov = bm[j * g->w + i];
+        uint32_t cov = font_cov4(row, i);
         if (cov)
           put(c, pen + g->x_off + i, y + g->y_off + j, color, cov);
       }
+    }
     pen += g->advance;
   }
   return pen - x;
@@ -300,20 +302,24 @@ static const FontGlyph *glyph_utf8(const Font *f, const ExtGlyphs *ext,
   return g;
 }
 
+/* packed: the built-in font's 4-bit rows; otherwise 8-bit coverage, as the
+ * Japanese glyphs are held once read */
 static void draw_glyph(Canvas *c, const FontGlyph *g, const uint8_t *bitmap,
-                       int pen, int y, uint32_t color) {
+                       int packed, int pen, int y, uint32_t color) {
   const uint8_t *bm = bitmap + g->offset;
   int gy = y + g->y_off, j0 = 0, j1 = g->h;
   if (j0 < c->y0 - gy)
     j0 = c->y0 - gy;
   if (j1 > c->y0 + c->h - gy)
     j1 = c->y0 + c->h - gy;
-  for (int j = j0; j < j1; j++)
+  for (int j = j0; j < j1; j++) {
+    const uint8_t *row = bm + j * (packed ? FONT_ROW_BYTES(g->w) : g->w);
     for (int i = 0; i < g->w; i++) {
-      uint32_t cov = bm[j * g->w + i];
+      uint32_t cov = packed ? font_cov4(row, i) : row[i];
       if (cov)
         put(c, pen + g->x_off + i, gy + j, color, cov);
     }
+  }
 }
 
 int cv_text_width_utf8(const Font *f, const ExtGlyphs *ext, const char *s) {
@@ -337,7 +343,7 @@ int cv_text_utf8(Canvas *c, const Font *f, const ExtGlyphs *ext, int x, int y,
     const FontGlyph *g = glyph_utf8(f, ext, cp, &bm);
     if (!g)
       continue;
-    draw_glyph(c, g, bm, pen, y, color);
+    draw_glyph(c, g, bm, bm == f->bitmap, pen, y, color);
     pen += g->advance;
   }
   return pen - x;
