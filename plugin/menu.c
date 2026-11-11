@@ -355,39 +355,6 @@ static void close_menu(void); /* defined below, used by render_panel */
 /* when the menu was last opened and closed (for the line about how a
  * game ended, see proc_ended) */
 static volatile int64_t g_menu_opened_us, g_menu_closed_us;
-
-/* Pausing the game while the menu is open - an experiment, switched with
- * L in Diagnostics (development builds), off by default.
- *
- * Everything that went wrong in Dead Nation came from the game running on
- * under the menu: it drew over the menu, and it wanted memory back that
- * the menu was holding. The PS button stops a game; the same is done here:
- * JamaisVu hooks the process manager's suspend and resume, so the log
- * shows what the system itself does at a PS button press, and it uses the
- * very status value the system passed for a game (none seen yet: no
- * pause). The game is suspended once the menu as it is now has been on
- * the screen for 50 ms, and resumed whenever the menu changes (until the
- * changed menu is on the screen again), when it closes, and before a save
- * or load. */
-static volatile int g_pause_mode;       /* L in Diagnostics */
-static volatile SceUID g_paused_pid;    /* the game JamaisVu suspended */
-static uint32_t g_paused_seq;           /* the menu it was suspended at */
-static volatile uint32_t g_shown_seq;   /* the menu last put on the screen */
-static volatile int64_t g_shown_us;     /* ... and when it first was */
-static volatile int g_sys_susp_status = -1; /* what the system passed */
-static volatile int g_own_susp;         /* JamaisVu's own call in progress */
-static uint32_t g_pause_n, g_pause_fail, g_resume_n;
-static int g_pause_last_ret;
-static int (*g_proc_suspend)(SceUID pid, int status);
-static int (*g_proc_resume)(SceUID pid);
-static int (*g_proc_status)(SceUID pid, int *status);
-#ifndef JV_RELEASE
-static void game_resume(void);
-static void game_pause_tick(void);
-#endif
-/* the module an address belongs to (resolved where the hooks are set up) */
-static int (*g_mod_by_addr)(SceUID pid, const void *addr, uint32_t *nid,
-                            const void **text, void *name);
 static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
 static volatile int g_plane_toast;  /* the message box is drawn in it */
 static volatile int g_render_active;
@@ -2129,10 +2096,6 @@ static void render_panel(void) {
     g_panel_seq = s1;
     __sync_synchronize();
     g_panel_gen = gen; /* the panel is complete: it may be shown */
-    if (g_plane_mode && g_shown_seq != s1) { /* it is on the plane now */
-      g_shown_us = now_us();
-      g_shown_seq = s1;
-    }
   }
   __sync_synchronize();
   __sync_fetch_and_sub(&g_overlay_users, 1);
@@ -2204,10 +2167,6 @@ static void draw_overlays(const SceDisplayFrameBuf *p) {
       uint32_t t0 = prof_now();
       compose(p, &g_panel_img, g_panel_blend, MENU_X, MENU_Y, 1);
       prof_add(PROF_COMPOSE, t0);
-      if (g_shown_seq != g_panel_seq) {
-        g_shown_us = now_us();
-        g_shown_seq = g_panel_seq;
-      }
     }
   } else if (g_menu_open) { /* no render thread: draw here */
     uint32_t s1 = g_model_seq;
@@ -2538,156 +2497,6 @@ static void proc_ended(SceUID pid, const char *how) {
   __sync_lock_release(&busy);
 }
 
-/* any thread: the game JamaisVu suspended runs again */
-static void game_resume(void) {
-  SceUID pid = __sync_lock_test_and_set(&g_paused_pid, 0);
-  if (!pid || !g_proc_resume)
-    return;
-  g_own_susp = 1;
-  int r = g_proc_resume(pid);
-  g_own_susp = 0;
-  g_resume_n++;
-  if (r < 0) {
-    static char line[120];
-    snprintf(line, sizeof(line), "pause under the menu: RESUME of process "
-             "0x%08X failed (0x%08X)\r\n", (unsigned)pid, (unsigned)r);
-    log_queue(line);
-  }
-}
-
-/* input thread, every 16 ms */
-static void game_pause_tick(void) {
-  if (g_paused_pid) {
-    if (!g_menu_open || g_busy || g_capture_req ||
-        g_model_seq != g_paused_seq)
-      game_resume();
-    return;
-  }
-  if (!g_pause_mode || !g_menu_open || g_busy || g_capture_req ||
-      g_sys_susp_status < 0 || !g_proc_suspend || !g_proc_resume)
-    return;
-  SceUID pid = g_l0_pid;
-  if (!pid || pid != fg_reader())
-    return; /* not a game's frames on the screen */
-  uint32_t seq = g_model_seq;
-  if ((seq & 1) || g_shown_seq != seq || now_us() - g_shown_us < 50000)
-    return; /* the menu as it is now is not on the screen yet */
-  g_own_susp = 1;
-  int r = g_proc_suspend(pid, g_sys_susp_status);
-  g_own_susp = 0;
-  g_pause_last_ret = r;
-  if (r >= 0) {
-    g_paused_seq = seq;
-    g_paused_pid = pid;
-    g_pause_n++;
-  } else if (g_pause_fail++ == 0) {
-    static char line[120];
-    snprintf(line, sizeof(line), "pause under the menu: suspend of process "
-             "0x%08X failed (0x%08X)\r\n", (unsigned)pid, (unsigned)r);
-    log_queue(line);
-  }
-}
-
-/* The process manager's suspend and resume, hooked: what the system does
- * to a game (the PS button, the LiveArea) is logged - who called, with
- * which status, what the process's status was before and after - and the
- * status it passed for a game is the one JamaisVu's own pause uses. */
-static tai_hook_ref_t g_susp_ref, g_resm_ref;
-static uint32_t g_susp_logged;
-
-/* the module the call came from, and its code's start */
-static void susp_caller(uintptr_t lr, char name[0x1C + 4],
-                        const void **text) {
-  memset(name, 0, 0x1C + 4);
-  *text = NULL;
-  if (!g_mod_by_addr ||
-      g_mod_by_addr(0x10005, (const void *)lr, NULL, text, name) < 0) {
-    strcpy(name, "?");
-    *text = NULL;
-  }
-}
-
-static void susp_log(int resume, SceUID pid, int status, int ret, int before,
-                     int after, uintptr_t lr) {
-  static char line[320];
-  static volatile int busy;
-  char name[0x1C + 4], tid[16];
-  const void *text = NULL;
-  if (g_susp_logged >= 80 || __sync_lock_test_and_set(&busy, 1))
-    return;
-  g_susp_logged++;
-  susp_caller(lr, name, &text);
-  memset(tid, 0, sizeof(tid));
-  if (ksceKernelGetProcessTitleId(pid, tid, sizeof(tid)) < 0 || !tid[0])
-    snprintf(tid, sizeof(tid), "?");
-  tid[sizeof(tid) - 1] = '\0';
-  snprintf(line, sizeof(line), "process manager: %s of 0x%08X (%s)%s, "
-           "status argument 0x%X -> 0x%08X, called from %s+0x%X; the "
-           "process's status 0x%X before, 0x%X after\r\n",
-           resume ? "resume" : "suspend", (unsigned)pid, tid,
-           g_own_susp ? " by JamaisVu" : "", (unsigned)status, (unsigned)ret,
-           name, (unsigned)(lr - (uintptr_t)text), (unsigned)before,
-           (unsigned)after);
-  log_queue(line);
-  __sync_lock_release(&busy);
-}
-
-static int proc_suspend_hook(SceUID pid, int status) {
-  uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-  int before = -1, after = -1;
-  if (g_proc_status)
-    g_proc_status(pid, &before);
-  int r = TAI_CONTINUE(int, g_susp_ref, pid, status);
-  if (g_proc_status)
-    g_proc_status(pid, &after);
-  /* what the system does to a game when it leaves the screen: the app
-   * manager's call (not the power manager's at a sleep, not a job's) */
-  if (!g_own_susp && !g_busy && r >= 0 && pid &&
-      (pid == g_l0_pid || pid == fg_reader())) {
-    char name[0x1C + 4];
-    const void *text;
-    susp_caller(lr, name, &text);
-    if (strncmp(name, "SceAppMgr", 9) == 0)
-      g_sys_susp_status = status;
-  }
-  susp_log(0, pid, status, r, before, after, lr);
-  return r;
-}
-
-static int proc_resume_hook(SceUID pid) {
-  uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-  int before = -1, after = -1;
-  if (g_proc_status)
-    g_proc_status(pid, &before);
-  int r = TAI_CONTINUE(int, g_resm_ref, pid);
-  if (g_proc_status)
-    g_proc_status(pid, &after);
-  if (!g_own_susp && pid && pid == g_paused_pid)
-    g_paused_pid = 0; /* the system took it over */
-  susp_log(1, pid, 0, r, before, after, lr);
-  return r;
-}
-
-static void pause_install(void) {
-  /* SceProcessmgrForKernel 3.60; another firmware: nothing is hooked and
-   * the switch does nothing */
-  if (module_get_export_func(KERNEL_PID, "SceProcessmgr", 0x7A69DE86,
-                             0x6AECE4CD, (uintptr_t *)&g_proc_suspend) < 0)
-    g_proc_suspend = NULL;
-  if (module_get_export_func(KERNEL_PID, "SceProcessmgr", 0x7A69DE86,
-                             0x080CDC59, (uintptr_t *)&g_proc_resume) < 0)
-    g_proc_resume = NULL;
-  if (module_get_export_func(KERNEL_PID, "SceProcessmgr", 0x746EC971,
-                             0x65B120B8, (uintptr_t *)&g_proc_status) < 0)
-    g_proc_status = NULL;
-  if (!g_proc_suspend || !g_proc_resume)
-    return;
-  taiHookFunctionExportForKernel(KERNEL_PID, &g_susp_ref, "SceProcessmgr",
-                                 0x7A69DE86, 0x6AECE4CD, proc_suspend_hook);
-  taiHookFunctionExportForKernel(KERNEL_PID, &g_resm_ref, "SceProcessmgr",
-                                 0x7A69DE86, 0x080CDC59, proc_resume_hook);
-}
-
 static int proc_exit_cb(SceUID pid, void *a2, int a3) {
   (void)a2;
   (void)a3;
@@ -2698,15 +2507,12 @@ static int proc_exit_cb(SceUID pid, void *a2, int a3) {
 static int proc_kill_cb(SceUID pid, void *a2, int a3) {
   (void)a2;
   (void)a3;
-  if (pid && pid == g_paused_pid)
-    g_paused_pid = 0;
   proc_ended(pid, "it was ended from outside (the system or the user)");
   return 0;
 }
 
 static void proc_watch_install(void) {
   static JvProcEvents ev;
-  pause_install();
   SceUID (*reg)(const char *name, const JvProcEvents *h, int a3) = NULL;
   if (module_get_export_func(KERNEL_PID, "SceSysmem", 0x887F19D0, 0x2A43912D,
                              (uintptr_t *)&reg) < 0 || !reg)
@@ -3823,9 +3629,6 @@ static void thread_dump(SceUID pid, const char *why) {
 static volatile int g_next_op = OP_NONE, g_next_slot;
 
 static void start_op(int op, int slot) {
-#ifndef JV_RELEASE
-  game_resume(); /* a job needs the game running (its frames, its files) */
-#endif
   ksceKernelLockMutex(g_mtx, 1, NULL);
   if (g_busy) {
     if (g_next_op == OP_NONE && op != OP_REFRESH) {
@@ -3923,16 +3726,6 @@ static void perf_report(void) {
              (unsigned)g_fbd.fl_ret0, (unsigned)g_fbd.fl_ret1,
              (unsigned)g_fbd.fl_other, (unsigned)g_fbd.fl_other_val);
     log_queue(line);
-    if (g_pause_mode || g_pause_n || g_pause_fail) {
-      snprintf(line, sizeof(line), "    pause under the menu: %s (L in "
-               "Diagnostics); the game was suspended %u times and resumed "
-               "%u times so far with status 0x%X, %u suspends failed (last "
-               "result 0x%08X)\r\n", g_pause_mode ? "on" : "off",
-               (unsigned)g_pause_n, (unsigned)g_resume_n,
-               (unsigned)(g_sys_susp_status < 0 ? 0 : g_sys_susp_status),
-               (unsigned)g_pause_fail, (unsigned)g_pause_last_ret);
-      log_queue(line);
-    }
     if (!g_plane_mode || g_fbd.late_draws) {
       snprintf(line, sizeof(line), "    menu drawing time: %s (R in "
                "Diagnostics); frames drawn after the hand-over %u, drawn "
@@ -4271,23 +4064,6 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_DISPLAY, sel);
       } else if (pressed & SCE_CTRL_RIGHT) {
         start_op(OP_TEST_WRITE, sel);
-      } else if (pressed & SCE_CTRL_LTRIGGER) {
-        static char pm[128];
-        g_pause_mode = !g_pause_mode;
-        if (!g_pause_mode)
-          snprintf(pm, sizeof(pm), "Game runs on under the menu");
-        else if (g_sys_susp_status < 0)
-          snprintf(pm, sizeof(pm), "Pause under the menu: on - press the PS "
-                   "button once in the game first");
-        else
-          snprintf(pm, sizeof(pm), "Game pauses while the menu is open");
-        set_message(MV_MESSAGE, pm, -1, 0);
-        snprintf(pm, sizeof(pm), "pause under the menu set to: %s (the "
-                 "system's own suspend status: %s0x%X)\r\n",
-                 g_pause_mode ? "on" : "off",
-                 g_sys_susp_status < 0 ? "none seen yet, " : "",
-                 (unsigned)(g_sys_susp_status < 0 ? 0 : g_sys_susp_status));
-        log_queue(pm);
       } else if (pressed & SCE_CTRL_RTRIGGER) {
         static char tm[96];
         g_draw_timing = (g_draw_timing + 1) % 3;
@@ -4440,10 +4216,6 @@ static int input_thread(SceSize args, void *argp) {
       lockskip_release();
       log_queue("lock screen skip: off again (normal sleep locks)\r\n");
     }
-
-#ifndef JV_RELEASE
-    game_pause_tick();
-#endif
 
     /* nothing shown and nothing running: give the overlay memory back */
     if (g_overlay_ready && !g_menu_open && !g_busy && !g_capture_req &&
@@ -6007,10 +5779,6 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
     snprintf(line, sizeof(line), "    %s\r\n", ls);
     log_append(line);
   }
-
-#ifndef JV_RELEASE
-  game_resume(); /* a game paused under the menu runs again first */
-#endif
 
   /* The menu's memory goes back now, before the sleep - it used to be
    * held until the wake-up (after_resume). Nothing of it is used from
