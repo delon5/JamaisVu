@@ -682,6 +682,26 @@ static int plane_alloc(void) {
       failed_pid = pid;
       log_queue("overlay plane: no 2 MB block in VRAM or root contiguous - "
                 "the menu is drawn into the game's frames\r\n");
+      /* what there is instead (Dead Nation, PCSA00151: the menu drawn
+       * into its frames is torn by the game's own drawing): the largest
+       * block each of the three pools gives, in steps of 256 KB - whether
+       * a smaller plane would fit */
+      int n = snprintf(line, sizeof(line), "    largest block now:");
+      for (int i = 0; i < 3; i++) {
+        uint32_t got = 0;
+        for (uint32_t kb = 1792; kb >= 256 && !got; kb -= 256) {
+          SceUID u = ksceKernelAllocMemBlock("JamaisVuProbe", types[i],
+                                             kb << 10, NULL);
+          if (u >= 0) {
+            ksceKernelFreeMemBlock(u);
+            got = kb;
+          }
+        }
+        n += snprintf(line + n, sizeof(line) - n, "%s %s %u KB",
+                      i ? "," : "", names[i], (unsigned)got);
+      }
+      snprintf(line + n, sizeof(line) - n, " (0: less than 256 KB)\r\n");
+      log_queue(line);
     }
   }
   return -1;
@@ -4376,8 +4396,10 @@ static void window_load(void) {
 
 #ifndef JV_RELEASE
 /* Once after a start: what every kernel module holds of memory (its
- * segments as the module manager has them, in whole pages), the modules
- * that are not from the system's own drives - the plugins - by name. The
+ * segments as the module manager has them, in whole pages), grouped by
+ * the drive it was loaded from - the plugins are the ur0: and ux0: ones
+ * (0a5793f told them apart by "not os0: or vs0:", which counted 58 of 88
+ * on the PCH-2000: most system modules carry another drive name). The
  * kernel's pool is 36 MB and had 3 MB free when JamaisVu started on the
  * PCH-1000 (0c01255): this says where the rest is. Own layout of the
  * module info (0x1B8 bytes on 3.60 and 3.65), the two calls by NID. */
@@ -4397,7 +4419,7 @@ _Static_assert(sizeof(JvModInfo) == 0x1B8, "module info layout");
 typedef struct {
   char name[28];
   uint32_t kb;
-  uint32_t plugin;
+  uint32_t group; /* index of its drive */
 } JvModRow;
 #define MODS_MAX 512
 
@@ -4445,7 +4467,9 @@ static void modules_log(void) {
     jv_work_free(&blk);
     return;
   }
-  uint32_t n = 0, all_kb = 0, plug_kb = 0, plug_n = 0;
+  /* by the drive a module was loaded from ("" for the boot image's) */
+  static char drv[8][8];
+  uint32_t ndrv = 0, n = 0, all_kb = 0;
   for (uint32_t i = 0; i < num; i++) {
     memset(info, 0, sizeof(*info));
     info->size = sizeof(*info);
@@ -4456,18 +4480,30 @@ static void modules_log(void) {
       if (info->seg[k].vaddr && info->seg[k].memsz < 0x10000000u)
         kb += ((info->seg[k].memsz + 0xfff) >> 12) * 4;
     info->path[sizeof(info->path) - 1] = '\0';
+    char d[8];
+    int dl = 0;
+    while (dl < 7 && info->path[dl] && info->path[dl] != ':') {
+      d[dl] = info->path[dl];
+      dl++;
+    }
+    if (info->path[dl] != ':')
+      dl = 0; /* no drive in the path */
+    d[dl] = '\0';
+    uint32_t g = 0;
+    while (g < ndrv && strcmp(drv[g], d) != 0)
+      g++;
+    if (g == ndrv) {
+      if (ndrv == 8)
+        g = 7; /* more than eight drives: counted with the last */
+      else
+        memcpy(drv[ndrv++], d, sizeof(d));
+    }
     JvModRow *row = &rows[n++];
     memcpy(row->name, info->name, sizeof(row->name));
     row->name[sizeof(row->name) - 1] = '\0';
     row->kb = kb;
-    /* the system's own: os0: and vs0: (and the boot image: no path) */
-    row->plugin = info->path[0] && strncmp(info->path, "os0:", 4) != 0 &&
-                  strncmp(info->path, "vs0:", 4) != 0;
+    row->group = g;
     all_kb += kb;
-    if (row->plugin) {
-      plug_kb += kb;
-      plug_n++;
-    }
   }
   /* largest first */
   for (uint32_t i = 0; i + 1 < n; i++)
@@ -4478,19 +4514,27 @@ static void modules_log(void) {
         rows[k] = tmp;
       }
   snprintf(line, sizeof(line), "kernel modules: %u, %u KB of code and data "
-           "in all; %u of them not from the system's own drives (plugins), "
-           "%u KB\r\n", (unsigned)n, (unsigned)all_kb, (unsigned)plug_n,
-           (unsigned)plug_kb);
+           "in all (the kernel's pool is 36864 KB); by the drive they were "
+           "loaded from, largest first, KB:\r\n", (unsigned)n,
+           (unsigned)all_kb);
   log_append(line);
-  for (int pass = 0; pass < 2; pass++) {
-    /* every plugin; the system's 16 largest */
-    int m = snprintf(line, sizeof(line), "    %s:", pass == 0
-                         ? "plugins (KB)" : "the system's largest (KB)");
+  for (uint32_t g = 0; g < ndrv; g++) {
+    uint32_t cnt = 0, kb = 0;
+    for (uint32_t i = 0; i < n; i++)
+      if (rows[i].group == g) {
+        cnt++;
+        kb += rows[i].kb;
+      }
+    /* the system's own drives: the 16 largest; any other: every module */
+    int sys = !drv[g][0] || !strcmp(drv[g], "os0") || !strcmp(drv[g], "vs0");
+    int m = snprintf(line, sizeof(line), "    %s%s %u modules, %u KB:",
+                     drv[g][0] ? drv[g] : "boot image", drv[g][0] ? ":" : "",
+                     (unsigned)cnt, (unsigned)kb);
     int shown = 0;
     for (uint32_t i = 0; i < n; i++) {
-      if ((int)rows[i].plugin != (pass == 0))
+      if (rows[i].group != g)
         continue;
-      if (pass == 1 && shown >= 16)
+      if (sys && shown >= 16)
         break;
       if (m > (int)sizeof(line) - 48) {
         snprintf(line + m, sizeof(line) - m, "\r\n");
@@ -4501,11 +4545,10 @@ static void modules_log(void) {
                     (unsigned)rows[i].kb);
       shown++;
     }
-    if (shown) {
-      line[m - 1] = '\0'; /* the last comma */
-      m--;
-    }
-    snprintf(line + m, sizeof(line) - m, "%s\r\n", shown ? "" : " none");
+    if (shown)
+      m--; /* the last comma */
+    snprintf(line + m, sizeof(line) - m, "%s\r\n",
+             sys && cnt > 16 ? ", ..." : "");
     log_append(line);
   }
   jv_work_free(&blk);
