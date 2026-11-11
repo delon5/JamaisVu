@@ -84,7 +84,7 @@ Video memory and the contiguous pool are where a game keeps its frame-sized buff
 
 Without the plane the menu is drawn into the game's frames. Development builds log how a game's process ended and what JamaisVu held at that moment.
 
-An experiment in development builds (L in Diagnostics, off by default): the game is suspended while the menu is open, the way the system suspends it at a PS button press - JamaisVu logs the process manager's suspend and resume calls and uses the status value the app manager passed for a game. A suspended game neither draws over the menu nor asks for memory the menu holds. It is resumed whenever the menu changes, when it closes and before a save or load.
+An experiment in development builds (L in Diagnostics, off by default): the game is suspended while the menu is open, the way the system suspends it at a PS button press - JamaisVu logs the process manager's suspend and resume calls (the system's own pair and the debugger's) and uses the pair and the status value the app manager used for a game. A suspended game neither draws over the menu nor asks for memory the menu holds. It is resumed whenever the menu changes, when it closes and before a save or load.
 
 ## The plugin's own share of the kernel's pool
 
