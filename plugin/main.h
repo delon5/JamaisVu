@@ -72,6 +72,8 @@ extern uint32_t g_ev_cnt[JV_EV_MAX];
 extern uint32_t g_ev_pool[JV_EV_MAX], g_ev_pool_min[JV_EV_MAX];
 /* the kernel's own memory pool: free and total KB, and the pool's name as
  * the kernel has it; < 0 when the firmware's calls for it are not known */
+/* the checked payload for the next jv_request (NULL: none) */
+void jv_payload_set(const void *src, uint32_t len);
 int jv_kernel_pool(uint32_t *free_kb, uint32_t *total_kb, char *name,
                    int name_len);
 /* loads: the snapshot's own frame (slotN.jvf), drawn into once the memory

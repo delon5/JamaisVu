@@ -155,11 +155,15 @@ const char *jv_build_id(void) {
 
 extern int resume_function(void);
 
-extern uint8_t _binary_payload_JamaisVu_payload_bin_start;
-extern uint8_t _binary_payload_JamaisVu_payload_bin_size;
-
-/* The payload resume.S copies to PAYLOAD_PADDR (see jv_request). */
+/* The payload resume.S copies to PAYLOAD_PADDR: where it is in memory
+ * for this save or load (menu.c reads it from the Memory Card and checks
+ * it, see payload_get), and its length, a multiple of 4. */
 uint32_t payload_src, payload_len;
+
+void jv_payload_set(const void *src, uint32_t len) {
+  payload_src = (uint32_t)src;
+  payload_len = src ? (len + 3) & ~3u : 0;
+}
 
 int (* _ksceKernelFindClassByName)(const char *name, SceClass **cls);
 int (* _ksceGUIDGetUIDVectorByClass)(SceClass *cls, int vis_level,
@@ -636,9 +640,8 @@ int jv_request(int mode, int slot, const uint8_t *nonce, int debug_mode,
 
   /* resume_memcpy copies whole words until the length reaches 0 */
   (void)payload_variant;
-  payload_src = (uint32_t)&_binary_payload_JamaisVu_payload_bin_start;
-  payload_len = (uint32_t)&_binary_payload_JamaisVu_payload_bin_size;
-  payload_len = (payload_len + 3) & ~3u;
+  if (!payload_src || !payload_len)
+    return -1; /* no checked payload in memory: nothing is started */
 
   pargs.slot = slot;
   slot_payload_path(pargs.path, sizeof(pargs.path), slot);

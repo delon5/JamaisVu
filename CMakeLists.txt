@@ -16,11 +16,19 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu17 -Wl,-q -Wall -O3 -nostdlib")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -fno-exceptions")
 
-set(JamaisVu_payload_object "${CMAKE_CURRENT_BINARY_DIR}/payload/JamaisVu_payload.bin.o")
-add_custom_command(OUTPUT ${JamaisVu_payload_object}
-  COMMAND ${CMAKE_LINKER} -r -b binary -o ${JamaisVu_payload_object} payload/JamaisVu_payload.bin
+# The payload is not linked into the plugin (it was: 149 KB of the kernel's
+# pool for as long as the console runs). It is a file on the Memory Card,
+# read into memory taken for the save or load only, and used only if its
+# size and MD5 are the ones recorded here at build time (payload_id.h).
+set(JamaisVu_payload_id "${CMAKE_CURRENT_BINARY_DIR}/payload_id.h")
+add_custom_command(OUTPUT ${JamaisVu_payload_id}
+  COMMAND ${CMAKE_COMMAND}
+          -DIN=${CMAKE_CURRENT_BINARY_DIR}/payload/JamaisVu_payload.bin
+          -DOUTDIR=${CMAKE_CURRENT_BINARY_DIR}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/payload_id.cmake
   DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/payload/JamaisVu_payload.bin
-  COMMENT "Building payload object"
+          ${CMAKE_CURRENT_SOURCE_DIR}/cmake/payload_id.cmake
+  COMMENT "Recording the payload's size and MD5"
 )
 
 # No NEON vector code in the kernel plugin: in kernel context the Vita runs
@@ -53,8 +61,9 @@ add_executable(JamaisVu
   plugin/gui/jpfont.c
   payload/crc32.c
   plugin/resume.S
-  ${JamaisVu_payload_object}
+  ${JamaisVu_payload_id}
 )
+target_include_directories(JamaisVu PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 # Set -DJAMAISVU_ALLOW_UNVERIFIED_FW=ON to arm on firmware whose offsets
 # have not been verified on hardware (see plugin/offsets.c). Testing only.

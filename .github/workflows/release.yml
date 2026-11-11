@@ -97,8 +97,8 @@ jobs:
       - name: Package
         run: |
           mkdir -p "JamaisVu-$VERSION"
-          cp build/JamaisVu.skprx plugin/gui/jpfont.bin README.md CHANGELOG.md LICENSE "JamaisVu-$VERSION/"
-          (cd "JamaisVu-$VERSION" && sha256sum JamaisVu.skprx jpfont.bin > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          cp build/JamaisVu.skprx build/JamaisVu_payload_*.bin plugin/gui/jpfont.bin README.md CHANGELOG.md LICENSE "JamaisVu-$VERSION/"
+          (cd "JamaisVu-$VERSION" && sha256sum JamaisVu.skprx JamaisVu_payload_*.bin jpfont.bin > SHA256SUMS.txt && cat SHA256SUMS.txt)
           zip -r "JamaisVu-$VERSION.zip" "JamaisVu-$VERSION"
 
       - name: Draft release

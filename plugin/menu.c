@@ -33,6 +33,8 @@ int ksceAppMgrIsExclusiveProcessRunning(void); /* used before its later declarat
 #include "lockskip.h"
 #include "appdb.h"
 #include "fs.h"
+#include "md5.h"
+#include "payload_id.h"
 #include "gui/menu_view.h"
 #include "gui/rle16.h"
 
@@ -3996,6 +3998,17 @@ static void fg_title(char *tid, int len) {
   tid[len - 1] = '\0';
 }
 
+/* the payload file is on the card with the right length (its contents
+ * are checked when it is used, see payload_get) */
+static int payload_on_card(void) {
+  static char path[160];
+  SceIoStat st;
+  jv_file_path(path, sizeof(path), JV_PAYLOAD_FILE);
+  memset(&st, 0, sizeof(st));
+  return ksceIoGetstat(path, &st) >= 0 &&
+         (uint32_t)st.st_size == JV_PAYLOAD_SIZE;
+}
+
 static int open_menu(void) {
   int had = g_overlay_ready;
   char tid[16];
@@ -4179,6 +4192,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
       snprintf(msg, sizeof(msg), "Preview only - save/load disabled: %s",
                jv_disabled_reason());
       toast(msg, 1);
+    } else if (!payload_on_card()) {
+      toast("Copy " JV_PAYLOAD_FILE " to data/JamaisVu", 1);
     } else if (jv_armed_untested()) {
       toast("TEST BUILD - firmware not hardware-tested, back up your card",
             1);
@@ -6129,6 +6144,97 @@ static void fs_notes_log(void) {
   }
 }
 
+/* The payload - the program that runs during the reset and does the
+ * save or load - is not part of the plugin's module (it was: 149 KB of
+ * the kernel's pool for as long as the console runs). It is the file
+ * JV_PAYLOAD_FILE in data/JamaisVu on the Memory Card, read here into
+ * memory taken for this one save or load (workmem.h: not the kernel's
+ * pool while another has room) and given back after the wake-up.
+ *
+ * It is used only if it is exactly the payload this plugin was built
+ * with: its size and its MD5 are recorded at build time (payload_id.h)
+ * and checked on what was read, every time. Anything else - no file,
+ * another length, one different byte - and nothing is started.
+ *
+ * The name carries the first 8 digits of that MD5. After a load the
+ * plugin in memory is the one from the moment of the save; if that was
+ * an older build with another payload, it looks for its own file, and
+ * both can lie on the card side by side. */
+static SceUID g_payload_uid = -1;
+
+/* NULL: in memory, checked and handed to jv_request. Otherwise what is
+ * wrong, for the message; detail for the log. */
+static const char *payload_get(char *detail, int dlen) {
+  static const uint8_t want[16] = JV_PAYLOAD_MD5;
+  static char path[160];
+  static Md5 md;
+  uint8_t got[16];
+  SceIoStat st;
+  uint32_t len = (JV_PAYLOAD_SIZE + 3) & ~3u;
+
+  detail[0] = '\0';
+  jv_payload_set(NULL, 0);
+  jv_work_free(&g_payload_uid);
+  jv_file_path(path, sizeof(path), JV_PAYLOAD_FILE);
+  memset(&st, 0, sizeof(st));
+  int r = ksceIoGetstat(path, &st);
+  if (r < 0) {
+    snprintf(detail, dlen, "%s: not found (0x%08X)", path, (unsigned)r);
+    return "Copy " JV_PAYLOAD_FILE " to data/JamaisVu";
+  }
+  if ((uint32_t)st.st_size != JV_PAYLOAD_SIZE) {
+    snprintf(detail, dlen, "%s: %u bytes, this build's has %u", path,
+             (unsigned)st.st_size, (unsigned)JV_PAYLOAD_SIZE);
+    return JV_PAYLOAD_FILE " is damaged - copy it again";
+  }
+  uint8_t *p = jv_work_alloc("JamaisVuPayload", len, &g_payload_uid, 1);
+  if (!p) {
+    snprintf(detail, dlen, "no %u KB of memory for the payload",
+             (unsigned)(len >> 10));
+    return "Could not start - no memory for it right now";
+  }
+  memset(p, 0, len);
+  SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+  uint32_t have = 0;
+  r = fd;
+  while (fd >= 0 && have < JV_PAYLOAD_SIZE) {
+    uint32_t want_n = JV_PAYLOAD_SIZE - have;
+    r = ksceIoRead(fd, p + have, want_n > 0x8000 ? 0x8000 : want_n);
+    if (r <= 0)
+      break;
+    have += r;
+  }
+  if (fd >= 0)
+    ksceIoClose(fd);
+  if (have != JV_PAYLOAD_SIZE) {
+    snprintf(detail, dlen, "%s: read %u of %u bytes (0x%08X)", path,
+             (unsigned)have, (unsigned)JV_PAYLOAD_SIZE, (unsigned)r);
+    jv_work_free(&g_payload_uid);
+    return "Could not read " JV_PAYLOAD_FILE;
+  }
+  md5_init(&md);
+  md5_update(&md, p, JV_PAYLOAD_SIZE);
+  md5_final(&md, got);
+  if (memcmp(got, want, 16) != 0) {
+    snprintf(detail, dlen, "%s: MD5 %02x%02x%02x%02x..., this build's is "
+             "%02x%02x%02x%02x...", path, got[0], got[1], got[2], got[3],
+             want[0], want[1], want[2], want[3]);
+    jv_work_free(&g_payload_uid);
+    return JV_PAYLOAD_FILE " is damaged - copy it again";
+  }
+  snprintf(detail, dlen, "%s: %u bytes, MD5 as built", JV_PAYLOAD_FILE,
+           (unsigned)JV_PAYLOAD_SIZE);
+  jv_payload_set(p, len);
+  return NULL;
+}
+
+/* after the wake-up - also by the worker of an image a load restored,
+ * for the block that image had taken for its save */
+static void payload_put(void) {
+  jv_payload_set(NULL, 0);
+  jv_work_free(&g_payload_uid);
+}
+
 static void run_and_wait(int mode, int slot, const uint8_t *nonce,
                          int debug_mode, int variant) {
   ksceKernelClearEventFlag(g_evf, ~EVF_RESUMED);
@@ -6205,10 +6311,26 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
    * wakes up after a load with none of it held. */
   overlay_release();
 
+  /* the payload, from the card into memory, checked (see payload_get) */
+  {
+    static char pd[240], pl[280];
+    const char *bad = payload_get(pd, sizeof(pd));
+    snprintf(pl, sizeof(pl), "    payload: %s%s\r\n", pd,
+             bad ? " - NOT STARTED" : "");
+    log_append(pl);
+    if (bad) {
+      lockskip_release();
+      trace_consumed(); /* no run: the request's header is not left behind */
+      toast(bad, 1);
+      return;
+    }
+  }
+
   if (debug_mode == JV_TEST_NONE)
     canary_fill(mode == JAMAISVU_MODE_LOAD ? 0xB5000000u : 0x5A000000u);
   if (jv_request(mode, slot, nonce, debug_mode, trel,
                  tok ? tnonce : NULL, variant) < 0) {
+    payload_put();
     lockskip_release();
     trace_consumed(); /* no run: the request's header is not left behind */
     toast("Could not start - the system refused to reset", 1);
@@ -6225,6 +6347,7 @@ static void run_and_wait(int mode, int slot, const uint8_t *nonce,
   ksceKernelWaitEventFlag(g_evf, EVF_RESUMED,
                           SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
                           &out, NULL);
+  payload_put();
 
   /* the shell has decided on the lock screen by then; afterwards normal
    * sleep/wake locks again (removed by the input thread) */
@@ -6904,6 +7027,16 @@ static int worker_thread(SceSize args, void *argp) {
   static char prev[2000];
 
   write_status();
+  {
+    /* the payload file: said at the start, not only at the first save */
+    static char pl[200];
+    snprintf(pl, sizeof(pl), "payload file %s (%u bytes): %s\r\n",
+             JV_PAYLOAD_FILE, (unsigned)JV_PAYLOAD_SIZE,
+             payload_on_card() ? "on the card"
+             : "NOT ON THE CARD (data/JamaisVu) - no save or load until it "
+               "is");
+    log_append(pl);
+  }
   /* a run that never got back to the system: its trace is in trace.bin */
   int left = trace_collect(prev, sizeof(prev) - 120);
   if (left == 1) {

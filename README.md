@@ -27,10 +27,11 @@ JamaisVu writes **only to the official Memory Card**: slot files, slot info, thu
    ux0:tai/JamaisVu.skprx
    ```
 
-3. Optional, for Japanese game names: copy `jpfont.bin` to `ux0:data/JamaisVu/jpfont.bin` (or `uma0:data/JamaisVu/` if the card is uma0).
-4. Reboot. `data/JamaisVu/status.txt` on the Memory Card says `status: armed` when the plugin is active, or why it is not.
+3. Copy `JamaisVu_payload_xxxxxxxx.bin` (the name ends in eight digits that differ between versions) to `ux0:data/JamaisVu/` (or `uma0:data/JamaisVu/` if the card is uma0). It is the program that runs during a save or load; without it the menu opens and says so, and nothing is saved or loaded.
+4. Optional, for Japanese game names: copy `jpfont.bin` to the same folder.
+5. Reboot. `data/JamaisVu/status.txt` on the Memory Card says `status: armed` when the plugin is active, or why it is not.
 
-**Updating:** a snapshot contains the whole system, JamaisVu included. After an update, reboot and save new slots; loading an older slot brings the older JamaisVu back until the next reboot.
+**Updating:** a snapshot contains the whole system, JamaisVu included. After an update, reboot and save new slots; loading an older slot brings the older JamaisVu back until the next reboot. Copy the new version's `JamaisVu_payload_xxxxxxxx.bin` next to the old one and leave the old one there: a JamaisVu brought back by an older slot looks for its own.
 
 ## Usage
 

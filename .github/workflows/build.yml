@@ -105,9 +105,12 @@ jobs:
           cp tools/jvdump/build/jvdump.skprx out/
           # Japanese game names (copy to ux0:data/JamaisVu/)
           cp plugin/gui/jpfont.bin out/
+          # the payload this plugin build runs (copy to data/JamaisVu/ on the
+          # Memory Card; the plugin checks its size and MD5 before every use)
+          cp build/JamaisVu_payload_*.bin out/
           # payload ELF with symbols: maps a crash address from log.txt
           cp build/payload/JamaisVu_payload out/JamaisVu_payload.elf
-          sha256sum out/*.skprx | tee out/SHA256SUMS.txt
+          (cd out && sha256sum *.skprx JamaisVu_payload_*.bin | tee SHA256SUMS.txt)
 
       - uses: actions/upload-artifact@v4
         with:
