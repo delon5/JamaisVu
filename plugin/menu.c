@@ -366,10 +366,9 @@ static volatile int64_t g_menu_opened_us, g_menu_closed_us;
  * shows what the system itself does at a PS button press, and it uses the
  * very status value the system passed for a game (none seen yet: no
  * pause). The game is suspended once the menu as it is now has been on
- * the screen for 50 ms, and resumed when the menu closes and before a save
- * or load - and, only where the menu is drawn into the game's frames (no
- * display plane), whenever the menu changes, until the changed menu is on
- * the screen again. */
+ * the screen for 50 ms, and resumed whenever the menu changes (until the
+ * changed menu is on the screen again), when it closes, and before a save
+ * or load. */
 static volatile int g_pause_mode;       /* L in Diagnostics */
 static volatile SceUID g_paused_pid;    /* the game JamaisVu suspended */
 static uint32_t g_paused_seq;           /* the menu it was suspended at */
@@ -2573,12 +2572,8 @@ static void game_resume(void) {
 /* input thread, every 16 ms */
 static void game_pause_tick(void) {
   if (g_paused_pid) {
-    /* On the display plane JamaisVu draws the menu itself: the game stays
-     * suspended while the menu changes. Drawn into the game's frames, a
-     * changed menu needs a new frame from the game: it runs until that
-     * frame is on the screen. */
     if (!g_menu_open || g_busy || g_capture_req ||
-        (!g_plane_mode && g_model_seq != g_paused_seq))
+        g_model_seq != g_paused_seq)
       game_resume();
     return;
   }
