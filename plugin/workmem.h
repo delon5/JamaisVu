@@ -32,6 +32,8 @@ static inline int jv_work_pool_has(SceKernelMemBlockType type,
 }
 
 /* size bytes (rounded up to pages), from, in this order:
+ *  - the system's spare memory, outside every game's budget, while it
+ *    has 8 MB more to give;
  *  - the kernel's own pool, while half a megabyte more stays free in it
  *    (plenty on a console with few plugins; on the PCH-1000 it rarely
  *    has that, and the next ones are used);
@@ -45,6 +47,21 @@ static inline int jv_work_pool_has(SceKernelMemBlockType type,
  * NULL (*uid < 0) when none has it. */
 static inline void *jv_work_alloc(const char *name, uint32_t size,
                                   SceUID *uid, int kernel_too) {
+  /* first of all the system's spare memory - outside every game's budget
+   * (menu.c, SPARE_POOL) - while it has 8 MB more to give */
+  size = (size + 0xfff) & ~0xfffu;
+  {
+    void *sb = NULL;
+    SceUID su = ksceKernelAllocMemBlock(name, 0x1050D006, size, NULL);
+    if (su >= 0) {
+      if (jv_work_pool_has(0x1050D006, 0x800000) &&
+          ksceKernelGetMemBlockBase(su, &sb) >= 0 && sb) {
+        *uid = su;
+        return sb;
+      }
+      ksceKernelFreeMemBlock(su);
+    }
+  }
   static const SceKernelMemBlockType types[] = {
     0x1020D006, /* KERNEL_ROOT_RW: the kernel's own, with the margin */
     0x10C0D006, /* KERNEL_ROOT_UMAIN_RW */
@@ -54,7 +71,6 @@ static inline void *jv_work_alloc(const char *name, uint32_t size,
     0x1020D006, /* KERNEL_ROOT_RW again: whatever is left */
   };
   int n = (int)(sizeof(types) / sizeof(types[0])) - (kernel_too ? 0 : 1);
-  size = (size + 0xfff) & ~0xfffu;
   for (int i = 0; i < n; i++) {
     void *base = NULL;
     int had2 = i == 4 ? jv_work_pool_has(types[i], 0x200000) : 0;

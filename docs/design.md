@@ -82,7 +82,11 @@ Video memory and the contiguous pool are where a game keeps its frame-sized buff
 - the menu's pieces leave a contiguous pool alone, for as long as the game runs, once it had no 2 MB block there, or once a piece left it without the 2 MB block it had;
 - buffers taken for a moment (`plugin/workmem.h`) come from the kernel's pool while half a megabyte more stays free in it, then from the game's ordinary memory, and from the contiguous pool only last and under the same 2 MB rule.
 
+Before any of these pools, JamaisVu asks the system's spare memory: what the system's memory for apps has left outside every budget (a game is given its budget when it starts and cannot go past it; the DMR plugin hands this same memory to games that ask to grow). The menu's pieces, the buffers taken for a moment and - as one block checked to be physically contiguous - the display plane's 2 MB come from there while 8 MB more stay free in it. No game is short of anything for it. What each such pool gives is logged once per app.
+
 Without the plane the menu is drawn into the game's frames. Development builds log how a game's process ended and what JamaisVu held at that moment.
+
+A pause of the game under the menu, done with the process manager's suspend calls, was tried and taken out again: the only suspend the system itself makes with them is the one before it ends an app, and a game suspended that way did not come back (the console restarted).
 
 ## The plugin's own share of the kernel's pool
 

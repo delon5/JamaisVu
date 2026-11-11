@@ -663,6 +663,56 @@ static void plane_clear(uint32_t y0, uint32_t rows) {
  * it: as much again (a frame-sized block, see HOLE_BYTES) */
 #define PLANE_MARGIN 0x200000
 
+/* The plane's buffer from the system's spare memory (see SPARE_POOL): one
+ * block asked to be physically contiguous - the display reads it by its
+ * physical address - and checked page by page to be so; taken only while
+ * the pool has 8 MB more to give. base, or NULL with *why set. */
+static int (*g_va2pa_hw)(const void *va, uintptr_t *pa); /* VAtoPA */
+static void *plane_spare_alloc(uint32_t size, SceUID *out, const char **why) {
+  struct {
+    uint32_t size, f4, attr, fC, paddr, alignment, rest[16];
+  } opt;
+  _Static_assert(sizeof(opt) == 0x58, "3.60 option size");
+  void *base = NULL;
+  memset(&opt, 0, sizeof(opt));
+  opt.size = sizeof(opt);
+  opt.attr = 0x00200000; /* physically contiguous */
+  SceUID uid = ksceKernelAllocMemBlock("JamaisVuPlane", 0x1050D006, size,
+                                       (void *)&opt);
+  if (uid < 0) {
+    *why = "the pool gave no contiguous 2 MB";
+    return NULL;
+  }
+  if (ksceKernelGetMemBlockBase(uid, &base) < 0 || !base) {
+    ksceKernelFreeMemBlock(uid);
+    *why = "the block had no address";
+    return NULL;
+  }
+  SceUID more = ksceKernelAllocMemBlock("JamaisVuMargin", 0x1050D006,
+                                        0x800000, NULL);
+  if (more < 0) {
+    ksceKernelFreeMemBlock(uid);
+    *why = "the pool had no 8 MB more";
+    return NULL;
+  }
+  ksceKernelFreeMemBlock(more);
+  uintptr_t pa0 = 0;
+  int ok = g_va2pa_hw && g_va2pa_hw(base, &pa0) >= 0 && pa0 &&
+           !(pa0 & 0xfff);
+  for (uint32_t off = 0x1000; ok && off < size; off += 0x1000) {
+    uintptr_t pa = 0;
+    ok = g_va2pa_hw((const uint8_t *)base + off, &pa) >= 0 &&
+         pa == pa0 + off;
+  }
+  if (!ok) {
+    ksceKernelFreeMemBlock(uid);
+    *why = "the block was not physically contiguous";
+    return NULL;
+  }
+  *out = uid;
+  return base;
+}
+
 /* 0 once the buffer and the driver's two functions are there (kept) */
 static int plane_alloc(void) {
   static const SceKernelMemBlockType types[3] = {
@@ -696,6 +746,31 @@ static int plane_alloc(void) {
               "were not found - the menu is drawn into the game's frames"
               "\r\n");
     return -1;
+  }
+  {
+    /* the system's spare memory before any pool a game uses */
+    static const char *last_why;
+    const char *why = NULL;
+    SceUID uid = -1;
+    void *base = plane_spare_alloc(size, &uid, &why);
+    if (base) {
+      g_plane_uid = uid;
+      g_plane_px = base;
+      g_plane_pool = "the system's spare memory";
+      plane_clear(0, PLANE_H);
+      snprintf(line, sizeof(line), "overlay plane: %u KB in the system's "
+               "spare memory (outside every game's budget) - the menu is "
+               "shown on the display's second layer; given back once the "
+               "system sets the plane again\r\n", (unsigned)(size >> 10));
+      log_queue(line);
+      return 0;
+    }
+    if (why != last_why) { /* once per reason, not per opening */
+      last_why = why;
+      snprintf(line, sizeof(line), "overlay plane: not from the system's "
+               "spare memory - %s\r\n", why);
+      log_queue(line);
+    }
   }
   for (int i = 0; i < 3; i++) {
     void *base = NULL;
@@ -1211,6 +1286,45 @@ static int pool_has(int i, uint32_t size) {
   return 1;
 }
 
+/* The system's spare memory. A game is given a budget when it starts -
+ * so much main memory, so much contiguous, so much video memory - and
+ * cannot go past it; what the system's memory for apps has left outside
+ * every budget is what an app is given when it asks to grow (the DMR
+ * plugin opens that to games: "download more RAM", up to 125 MB more).
+ * The kernel can take blocks straight from there (pool 5, "game" in
+ * k_ovl_types: KERNEL_ROOT_GAME), and no game is short of anything for
+ * it. So that pool is asked first - for the menu's pieces and, as one
+ * physically contiguous block, for the display plane - while it still
+ * has SPARE_MARGIN to give afterwards (the system starts its own apps
+ * from it). Suggested by the user; what it gives is logged once per app. */
+#define SPARE_POOL 5
+#define SPARE_MARGIN 0x800000
+static int g_spare_ok;       /* this opening: asked first */
+static SceUID g_spare_pid;   /* the app the log line below was written in */
+
+static void spare_log(SceUID pid) {
+  static char line[240];
+  static const struct { int pool; const char *name; } k[3] = {
+    { SPARE_POOL, "outside every budget (pool \"game\")" },
+    { 3, "common dialog" },
+    { 6, "tmp" },
+  };
+  int n = snprintf(line, sizeof(line), "    memory no game is using - "
+                   "largest block each pool gives now:");
+  for (int i = 0; i < 3; i++) {
+    uint32_t got = 0;
+    for (uint32_t kb = 32768; kb >= 256 && !got; kb /= 2)
+      if (pool_has(k[i].pool, kb << 10))
+        got = kb;
+    n += snprintf(line + n, sizeof(line) - n, "%s %s %u KB", i ? "," : "",
+                  k[i].name, (unsigned)got);
+  }
+  snprintf(line + n, sizeof(line) - n, " (32768: that or more; 0: less "
+           "than 256)\r\n");
+  log_queue(line);
+  g_spare_pid = pid;
+}
+
 /* at the start of every taking of menu memory */
 static void pool_rules_begin(void) {
   SceUID pid = fg_reader();
@@ -1219,13 +1333,21 @@ static void pool_rules_begin(void) {
     memset(g_pool_off, 0, sizeof(g_pool_off));
   }
   memset(g_pool_had2, -1, sizeof(g_pool_had2));
+  if (pid != g_spare_pid || !g_spare_pid)
+    spare_log(pid);
+  g_spare_ok = pool_has(SPARE_POOL, SPARE_MARGIN + 0x80000);
 }
 
 static void *ovl_alloc(int k, uint32_t size) {
   size = (size + 0xfff) & ~0xfffu;
   const int *order = is_panel_piece(k) ? k_panel_order : k_ovl_order;
-  for (int o = 0; o < OVL_POOLS; o++) {
-    int i = order[o];
+  for (int o = -1; o < OVL_POOLS; o++) {
+    /* the system's spare memory first, while it has plenty (see above) */
+    int i = o < 0 ? SPARE_POOL : order[o];
+    if (o < 0 && !g_spare_ok)
+      continue;
+    if (o >= 0 && i == SPARE_POOL && g_spare_ok)
+      continue; /* asked already */
     if (pool_is_contiguous(i) && g_hole_pid) {
       if (g_pool_off[i]) {
         g_ovl_fail_ret[i] = -1;
