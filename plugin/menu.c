@@ -126,6 +126,10 @@ static uint32_t g_mem_kb[OVL_PIECES];
 static int g_mem_pool[OVL_PIECES]; /* k_ovl_types index each piece came from */
 static volatile int g_held_blocks;
 static volatile uint32_t g_held_kb, g_taken_total, g_freed_total;
+static volatile uint32_t g_cd_held_kb; /* of it, in the common dialog pool */
+/* a game's requests for dialog memory (see alloc_user_hook) */
+static volatile uint32_t g_dlg_n, g_dlg_kb, g_dlg_max_kb, g_dlg_failed;
+static volatile uint32_t g_dlg_stepped; /* times the menu stepped aside */
 static volatile int g_free_errs, g_free_err_last;
 
 /* one compressed copy of the menu image: where each row lies in the
@@ -333,6 +337,7 @@ static SceUID g_render_sema = -1;
 static SceUID g_plane_uid = -1;
 static uint32_t *g_plane_px; /* JV_SCREEN_W x JV_SCREEN_H ARGB */
 static const char *g_plane_pool;
+static volatile int g_plane_in_cd; /* the buffer is in the common dialog pool */
 static int g_plane_fail; /* no driver functions: compose for good */
 static volatile int g_plane_mode;   /* this overlay generation uses it */
 static volatile int g_plane_shown;  /* the plane is set up with the buffer */
@@ -763,6 +768,7 @@ static int plane_alloc(void) {
       g_plane_uid = uid;
       g_plane_px = base;
       g_plane_pool = kname[k];
+      g_plane_in_cd = k;
       plane_clear(0, PLANE_H);
       snprintf(line, sizeof(line), "overlay plane: %u KB in %s (memory no "
                "game is using) - the menu is shown on the display's second "
@@ -804,6 +810,7 @@ static int plane_alloc(void) {
       g_plane_uid = uid;
       g_plane_px = base;
       g_plane_pool = names[i];
+      g_plane_in_cd = 0;
       plane_clear(0, PLANE_H);
       snprintf(line, sizeof(line), "overlay plane: %u KB in %s - the menu "
                "is shown on the display's second layer; given back once the "
@@ -902,6 +909,7 @@ static void plane_free_if_unused(void) {
   ksceKernelFreeMemBlock(g_plane_uid);
   g_plane_uid = -1;
   g_plane_px = NULL;
+  g_plane_in_cd = 0;
   log_queue("overlay plane: buffer given back (the system set the plane)"
             "\r\n");
 }
@@ -1404,6 +1412,8 @@ static void *ovl_alloc(int k, uint32_t size) {
       g_held_kb += size >> 10;
       g_taken_total++;
       g_ovl_pool_kb[i] += size >> 10;
+      if (i == DIALOG_POOL)
+        g_cd_held_kb += size >> 10;
       return base;
     }
     if (uid >= 0)
@@ -1429,6 +1439,8 @@ static void ovl_block_free(int k) {
   } else {
     g_held_blocks--;
     g_held_kb -= g_mem_kb[k];
+    if (g_mem_pool[k] == DIALOG_POOL)
+      g_cd_held_kb -= g_mem_kb[k];
     g_freed_total++;
   }
   g_mem_blks[k] = 0;
@@ -2598,7 +2610,7 @@ typedef struct {
 static void proc_ended(SceUID pid, const char *how) {
   /* not on the stack (the thread that ends a process is not ours, its
    * kernel stack may be 4 KB): one buffer, one caller at a time */
-  static char line[400];
+  static char line[640];
   static volatile int busy;
   char tid[16];
   if (!pid || (pid != g_l0_pid && pid != fg_reader()))
@@ -2632,6 +2644,12 @@ static void proc_ended(SceUID pid, const char *how) {
   if (kp == 0)
     n += snprintf(line + n, sizeof(line) - n, "; kernel pool %u KB free",
                   (unsigned)kfree);
+  n += snprintf(line + n, sizeof(line) - n, "; dialog memory requests "
+                "since the start: %u (%u KB given, largest %u KB, %u "
+                "refused), menu stepped aside %u times",
+                (unsigned)g_dlg_n, (unsigned)g_dlg_kb,
+                (unsigned)g_dlg_max_kb, (unsigned)g_dlg_failed,
+                (unsigned)g_dlg_stepped);
   snprintf(line + n, sizeof(line) - n, "\r\n");
   log_queue(line);
   __sync_lock_release(&busy);
@@ -4254,6 +4272,144 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
   }
 }
 
+/* A game's system dialogs (on-screen keyboard, message box, save data
+ * list) take their memory from the common dialog pool - the pool the menu
+ * now asks before the ones a game lives in. The menu must never be the
+ * reason such a dialog finds too little: when the game in front asks for
+ * dialog memory while the menu holds some of it, the menu closes and
+ * gives its memory back first, and only then does the game's request go
+ * on. Nothing waits on the user: the request is held for the few
+ * milliseconds the input thread needs (300 ms at most, then it goes on
+ * as it is).
+ *
+ * The game's own call for a memory block is watched (SceSysmem's
+ * sceKernelAllocMemBlock, which treats the two dialog types 0x0CA0D060
+ * and 0x0CA08060 on their own). Whether every dialog takes its memory
+ * through it is not known yet: each request is logged with its size, and
+ * the totals with the process's end, so a dialog that showed without a
+ * line here took another way.
+ *
+ * The display plane's 2 MB is not given back here: it can only go once
+ * something else is on the plane (see plane_free_if_unused). The line
+ * says whether it was held. */
+static tai_hook_ref_t g_alloc_user_ref;
+static SceUID g_alloc_user_hook = -1;
+static volatile int g_dlg_wanted;   /* asked of the input thread */
+static volatile int g_dlg_done;     /* 1 closed and given back, 2 left: busy */
+
+static int dialog_type(uint32_t type) {
+  return (type & 0xFFF00000u) == 0x0CA00000u || /* the two the call names */
+         (type & 0xFF000000u) == 0x0E000000u || /* the dialog's own space */
+         (type & 0x0FF00000u) == 0x03A00000u;   /* shared, dialog pool */
+}
+
+static SceUID alloc_user_hook(const char *name, uint32_t type, uint32_t size,
+                              void *opt) {
+  if (!dialog_type(type))
+    return TAI_CONTINUE(SceUID, g_alloc_user_ref, name, type, size, opt);
+
+  SceUID pid = ksceKernelGetProcessId();
+  uint32_t held = g_cd_held_kb;
+  int was_open = g_menu_open, plane = g_plane_px && g_plane_in_cd;
+  int waited = -1, done = 0;
+  if (held && pid == g_l0_pid && pid != ksceKernelSysrootGetShellPid()) {
+    int64_t t0 = now_us();
+    g_dlg_done = 0;
+    g_dlg_wanted = 1;
+    for (int i = 0; i < 150 && g_dlg_wanted; i++)
+      ksceKernelDelayThread(2000);
+    waited = (int)((now_us() - t0) / 1000);
+    done = g_dlg_done;
+  }
+
+  SceUID ret = TAI_CONTINUE(SceUID, g_alloc_user_ref, name, type, size, opt);
+
+  (void)was_open;
+  (void)plane;
+  (void)done;
+  (void)waited;
+  uint32_t kb = size >> 10;
+  g_dlg_n++;
+  if (ret < 0)
+    g_dlg_failed++;
+  else
+    g_dlg_kb += kb;
+  if (kb > g_dlg_max_kb)
+    g_dlg_max_kb = kb;
+#ifndef JV_RELEASE
+  {
+    /* one buffer, one caller at a time; the first 40 requests of a boot,
+     * and every one the menu stepped aside for or the system refused */
+    static char line[420];
+    static volatile int busy;
+    static uint32_t logged;
+    if ((logged < 40 || waited >= 0 || ret < 0) &&
+        !__sync_lock_test_and_set(&busy, 1)) {
+      char tid[16], nm[32];
+      logged++;
+      memset(tid, 0, sizeof(tid));
+      if (ksceKernelGetProcessTitleId(pid, tid, sizeof(tid)) < 0 || !tid[0])
+        snprintf(tid, sizeof(tid), "?");
+      tid[sizeof(tid) - 1] = '\0';
+      memset(nm, 0, sizeof(nm));
+      if (!name || ksceKernelStrncpyUserToKernel(nm, name, sizeof(nm) - 1) < 0)
+        snprintf(nm, sizeof(nm), "?");
+      for (int i = 0; nm[i]; i++)
+        if (nm[i] < 0x20 || nm[i] > 0x7e)
+          nm[i] = '.';
+      int n = snprintf(line, sizeof(line), "dialog memory: %s (0x%08X) asks "
+                       "for %u KB (\"%s\", type 0x%08X) -> 0x%08X; JamaisVu "
+                       "held %u KB of that pool, menu %s, display plane's "
+                       "2 MB there: %s", tid, (unsigned)pid, (unsigned)kb,
+                       nm, (unsigned)type, (unsigned)ret, (unsigned)held,
+                       was_open ? "open" : "closed", plane ? "yes" : "no");
+      if (waited >= 0)
+        n += snprintf(line + n, sizeof(line) - n, " - %s, the request "
+                      "waited %d ms; JamaisVu now holds %u KB there",
+                      done == 1 ? "the menu closed and gave its memory back "
+                                  "first"
+                      : done == 2 ? "a save or load was running: left as "
+                                    "it was"
+                                  : "NO ANSWER from the input thread",
+                      waited, (unsigned)g_cd_held_kb);
+      snprintf(line + n, sizeof(line) - n, "\r\n");
+      log_queue(line);
+      __sync_lock_release(&busy);
+    }
+  }
+#endif
+  return ret;
+}
+
+/* input thread: a dialog asks for the pool the menu holds memory in */
+static void overlay_release(void);
+static void dialog_step_aside(void) {
+  if (!g_dlg_wanted)
+    return;
+  if (g_busy || g_capture_req) {
+    g_dlg_done = 2;
+  } else {
+    close_menu();
+    g_toast_until = 0;
+    overlay_release();
+    g_dlg_stepped++;
+    g_dlg_done = 1;
+  }
+  __sync_synchronize();
+  g_dlg_wanted = 0;
+}
+
+static void dialog_watch_install(void) {
+  g_alloc_user_hook = taiHookFunctionExportForKernel(
+      KERNEL_PID, &g_alloc_user_ref, "SceSysmem", 0x37FE725A, 0xB9D5EBDE,
+      alloc_user_hook);
+  static char line[160];
+  snprintf(line, sizeof(line), "dialog memory: requests are %s (0x%08X)\r\n",
+           g_alloc_user_hook >= 0 ? "watched" : "NOT watched",
+           (unsigned)g_alloc_user_hook);
+  log_queue(line);
+}
+
 static int input_thread(SceSize args, void *argp) {
   uint32_t prev = 0xffffffff; /* require a release before the first press */
   SceCtrlData pad;
@@ -4323,6 +4479,7 @@ static int input_thread(SceSize args, void *argp) {
                   "- the menu closed\r\n");
       }
     }
+    dialog_step_aside();
     plane_free_if_unused();
     /* on the plane the panel is drawn by the render thread; asked from
      * here too, not only from the display hook, which a screen that is
@@ -7314,6 +7471,7 @@ int menu_init(const char *status_text) {
 #ifndef JV_RELEASE
   proc_watch_install();
 #endif
+  dialog_watch_install();
 
   /* 16 KB stacks for every thread that calls into SceIofilemgr / exFAT /
    * SceSdstor: the heartbeat had 4 KB while writing trace.bin for a minute
