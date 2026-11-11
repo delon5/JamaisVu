@@ -38,7 +38,7 @@ void jv_last_savedata(uint32_t *selected, uint32_t *files, uint32_t *folders,
                       uint32_t *rewritten);
 /* number of kernel objects of a class (e.g. "SceUIDProcessClass"), < 0 if
  * the class is unknown (diagnostics: counted, nothing changed) */
-int jv_count_class(const char *name);
+int jv_count_class(const char *name, SceUID *vec, int cap);
 /* clock speeds: record before a save/load, put back after it (see main.c) */
 void jv_clocks_remember(char *out, int len);
 /* the console's default clocks (cpu 333, bus 222, gpu 111, xbar 111) for

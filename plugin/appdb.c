@@ -35,8 +35,11 @@ typedef struct {
   uint8_t *page; /* page_size bytes */
 } Db;
 
-static uint8_t g_page[MAX_PAGE];
-static uint32_t g_stack[STACK];
+/* the page and the b-tree stack: in the caller's work memory (they were
+ * 6 KB of the module's own, for a look-up that runs when the slot list is
+ * read) */
+_Static_assert(APPDB_WORK_BYTES >= MAX_PAGE + STACK * 4, "work memory");
+static uint32_t *g_stack;
 
 static uint32_t be16(const uint8_t *p) { return (p[0] << 8) | p[1]; }
 static uint32_t be32(const uint8_t *p) {
@@ -253,12 +256,15 @@ static void icon_row(void *arg, const uint8_t *rec, const uint8_t *end) {
 }
 
 int appdb_names(AdbRead rd, void *ctx, const char *const *ids, int n,
-                char names[][APPDB_NAME_LEN]) {
+                char names[][APPDB_NAME_LEN], void *work) {
   static uint8_t hdr[100];
   Db db;
 
   for (int i = 0; i < n; i++)
     names[i][0] = '\0';
+  if (!work)
+    return -1;
+  g_stack = (uint32_t *)((uint8_t *)work + MAX_PAGE);
   if (rd(ctx, 0, hdr, sizeof(hdr)) != (int)sizeof(hdr) ||
       memcmp(hdr, "SQLite format 3", 16) != 0)
     return -1;
@@ -273,7 +279,7 @@ int appdb_names(AdbRead rd, void *ctx, const char *const *ids, int n,
     return -1;
   db.rd = rd;
   db.ctx = ctx;
-  db.page = g_page;
+  db.page = work;
 
   Master m = { 0, 0 };
   if (scan_table(&db, 1, master_row, &m) < 0 || !m.root || !m.schema_ok)

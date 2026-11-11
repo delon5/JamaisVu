@@ -228,10 +228,11 @@ const char *jv_disabled_reason(void) {
 }
 
 /* Virtual -> physical address of a kernel object (ATS1CPR). 0 on fault. */
-int jv_count_class(const char *name) {
+int jv_count_class(const char *name, SceUID *vec, int cap) {
   /* only the count is used; the largest class counted, memory blocks,
-   * had 1440 (PCH-1000, PCSE00120) */
-  static SceUID vec[2048];
+   * had 1440 (PCH-1000, PCSE00120). The list itself goes into the
+   * caller's memory, taken for the counting (it was 8 KB of the module's
+   * own). */
   SceClass *cls = NULL;
   int n = 0;
   if (!_ksceKernelFindClassByName || !_ksceGUIDGetUIDVectorByClass)
@@ -239,8 +240,7 @@ int jv_count_class(const char *name) {
   int r = _ksceKernelFindClassByName(name, &cls);
   if (r < 0 || !cls)
     return r < 0 ? r : -1;
-  r = _ksceGUIDGetUIDVectorByClass(cls, 8, vec,
-                                   (int)(sizeof(vec) / sizeof(vec[0])), &n);
+  r = _ksceGUIDGetUIDVectorByClass(cls, 8, vec, cap, &n);
   return r < 0 ? r : n;
 }
 

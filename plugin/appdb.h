@@ -27,7 +27,9 @@ typedef int (*AdbRead)(void *ctx, uint32_t off, void *buf, uint32_t len);
 /* For each of the n title IDs, copies the LiveArea name (UTF-8) into
  * names[i], or sets names[i][0] = '\0' if it has none. Returns the number
  * of names found, or < 0 if the file is not a database it understands. */
+/* work: APPDB_WORK_BYTES of the caller's, 4-byte aligned, for the call */
+#define APPDB_WORK_BYTES 0x2000
 int appdb_names(AdbRead rd, void *ctx, const char *const *ids, int n,
-                char names[][APPDB_NAME_LEN]);
+                char names[][APPDB_NAME_LEN], void *work);
 
 #endif

@@ -4887,7 +4887,11 @@ static int livearea_names(const char *const *ids, int n,
       names[i][0] = '\0';
     return -1;
   }
-  int r = appdb_names(jf_read, &fd, ids, n, names);
+  /* the reader's page and stack: 8 KB taken for the look-up (workmem.h) */
+  SceUID wuid = -1;
+  void *work = jv_work_alloc("JamaisVuAppDb", APPDB_WORK_BYTES, &wuid, 1);
+  int r = appdb_names(jf_read, &fd, ids, n, names, work);
+  jv_work_free(&wuid);
   ksceIoClose(fd);
   return r;
 }
@@ -6015,13 +6019,19 @@ static const char *const k_obj_classes[][2] = {
 #define N_OBJ_CLASSES (sizeof(k_obj_classes) / sizeof(k_obj_classes[0]))
 _Static_assert(N_OBJ_CLASSES + 3 <= COUNTS_MAX, "COUNTS_MAX too small");
 
+#define COUNT_VEC 2048 /* the largest class counted had 1440 */
 static int counts_text(char *out, int len, int *vals) {
   int n = 0;
   if (len <= 0)
     return 0;
   out[0] = '\0';
+  /* the kernel hands out the list to be counted: 8 KB taken for the
+   * counting (it was the module's own; without it the counts read "?") */
+  SceUID vuid = -1;
+  SceUID *vec = jv_work_alloc("JamaisVuCounts", COUNT_VEC * sizeof(SceUID),
+                              &vuid, 1);
   for (unsigned i = 0; i < N_OBJ_CLASSES && n < len - 40; i++) {
-    int c = jv_count_class(k_obj_classes[i][0]);
+    int c = vec ? jv_count_class(k_obj_classes[i][0], vec, COUNT_VEC) : -1;
     int r;
     if (vals)
       vals[i] = c;
@@ -6037,6 +6047,7 @@ static int counts_text(char *out, int len, int *vals) {
     }
     n += r;
   }
+  jv_work_free(&vuid); /* before the pool is measured below */
   uint32_t tot, with_file, held;
   fs_vnode_usage(&tot, &with_file, &held);
   if (vals) {
@@ -7015,14 +7026,15 @@ static void do_prepare(int all, int slot) {
   set_message(MV_MESSAGE, msg, -1, 0);
 }
 
-static void write_status(void) {
+/* 0 unchanged, 1 written, -1 no card, else the error */
+static int write_status(void) {
   static char path[64], old[1024];
 
   /* the Memory Card may not be mounted yet when the plugin starts */
   for (int i = 0; i < 60 && !storage_detect(); i++)
     ksceKernelDelayThread(1000 * 1000);
   if (!storage_mc_root() || slots_mkdirs() < 0)
-    return;
+    return -1;
 
   jv_file_path(path, sizeof(path), "status.txt");
   int len = strlen(g_status_text), n = -1;
@@ -7032,20 +7044,33 @@ static void write_status(void) {
     ksceIoClose(fd);
   }
   if (n == len && memcmp(old, g_status_text, len) == 0)
-    return;
+    return 0;
 
   fd = ksceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
   if (fd < 0)
-    return;
-  ksceIoWrite(fd, g_status_text, len);
+    return fd;
+  int w = ksceIoWrite(fd, g_status_text, len);
   ksceIoClose(fd);
   slots_sync();
+  return w == len ? 1 : w < 0 ? w : -2;
 }
 
 static int worker_thread(SceSize args, void *argp) {
   static char prev[2000];
 
-  write_status();
+  {
+    /* status.txt has come back from two consoles naming an older build
+     * than the log beside it: what happened to it at this start */
+    static char sl[120];
+    int ws = write_status();
+    snprintf(sl, sizeof(sl), ws == 0 ? "status.txt: as it was (build %s)\r\n"
+             : ws == 1 ? "status.txt: written for build %s\r\n"
+             : ws == -1 ? "status.txt: no Memory Card to write it to (build "
+                          "%s)\r\n"
+             : "status.txt: COULD NOT BE WRITTEN for build %s (0x%08X)\r\n",
+             jv_build_id(), (unsigned)ws);
+    log_append(sl);
+  }
   {
     /* the payload file: said at the start, not only at the first save */
     static char pl[200];

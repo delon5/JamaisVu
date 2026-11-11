@@ -57,6 +57,7 @@ static const char *ids[] = { "PCSG01179", "PCSE00349", "PCSG00490",
                              "PCSE99999", "PCSB00001", "PCSB00002",
                              "PCSB00003" };
 #define NIDS 7
+static uint32_t g_work[APPDB_WORK_BYTES / 4];
 static char names[NIDS][APPDB_NAME_LEN];
 static const char catherine[] =
   "\xe3\x82\xad\xe3\x83\xa3\xe3\x82\xb5\xe3\x83\xaa\xe3\x83\xb3"
@@ -66,7 +67,7 @@ static int lookup(const char *dir, const char *file) {
   char path[512];
   snprintf(path, sizeof(path), "%s/%s", dir, file);
   Mem m = load(path);
-  int n = m.size ? appdb_names(mem_read, &m, ids, NIDS, names) : -99;
+  int n = m.size ? appdb_names(mem_read, &m, ids, NIDS, names, g_work) : -99;
   free(m.data);
   return n;
 }
@@ -117,7 +118,7 @@ int main(int argc, char **argv) {
       bad.size = (seed >> 5) % good.size; /* cut short */
     else
       bad.size = good.size;
-    appdb_names(mem_read, &bad, ids, NIDS, names);
+    appdb_names(mem_read, &bad, ids, NIDS, names, g_work);
     for (int i = 0; i < NIDS; i++)
       if (memchr(names[i], 0, APPDB_NAME_LEN) == NULL)
         bogus++;
@@ -128,7 +129,7 @@ int main(int argc, char **argv) {
 
   if (argc > 2) { /* the user's own app.db, if given */
     Mem m = load(argv[2]);
-    int n = appdb_names(mem_read, &m, ids, NIDS, names);
+    int n = appdb_names(mem_read, &m, ids, NIDS, names, g_work);
     CHECK(n >= 1 && !strcmp(names[0], catherine),
           "real app.db: Catherine is %s", names[0]);
     free(m.data);
