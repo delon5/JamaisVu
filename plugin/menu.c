@@ -648,6 +648,9 @@ static void plane_clear(uint32_t y0, uint32_t rows) {
   plane_flush(y0, rows);
 }
 
+/* what must stay free in a pool after the plane's block was taken from it */
+#define PLANE_MARGIN 0x100000
+
 /* 0 once the buffer and the driver's two functions are there (kept) */
 static int plane_alloc(void) {
   static const SceKernelMemBlockType types[3] = {
@@ -659,9 +662,15 @@ static int plane_alloc(void) {
                                         "VRAM (uncached)" };
   const uint32_t size = (PLANE_W * PLANE_H * 4 + 0xfffff) & ~0xfffffu;
   static char line[200];
+  /* the app the plane was not taken in: not asked again while it runs */
+  static SceUID no_pid;
+  int last_block = -1;
   if (g_plane_px)
     return 0;
   if (g_plane_fail)
+    return -1;
+  SceUID pid = fg_reader();
+  if (pid && pid == no_pid)
     return -1;
   if (!g_set_merge)
     module_get_export_func(KERNEL_PID, "SceDisplay", 0x9FED47AC, 0x6B198052,
@@ -685,6 +694,20 @@ static int plane_alloc(void) {
       uid = -1;
     }
     if (uid >= 0) {
+      /* Never a pool's last block: these are the pools a game takes its
+       * own memory from. Dead Nation (PCSA00151, 6e68f54): nothing of
+       * 256 KB free in any of them at one opening; 27 s later exactly
+       * 2 MB of root contiguous - the plane took it (the menu's own
+       * pieces found none left there), and 3 s after that the game was
+       * gone and the system's error overlay had the plane. */
+      SceUID more = ksceKernelAllocMemBlock("JamaisVuMargin", types[i],
+                                            PLANE_MARGIN, NULL);
+      if (more < 0) {
+        ksceKernelFreeMemBlock(uid);
+        last_block = i;
+        continue;
+      }
+      ksceKernelFreeMemBlock(more);
       g_plane_uid = uid;
       g_plane_px = base;
       g_plane_pool = names[i];
@@ -697,15 +720,23 @@ static int plane_alloc(void) {
       return 0;
     }
   }
-  /* Not sticky: the pools fill and empty with the game. Logged once per
-   * app, so a game that leaves no 2 MB does not fill the log. */
+  /* Sticky for the app: a game that had no room for the plane once is not
+   * asked again when it has just freed something (it was "not sticky: the
+   * pools fill and empty with the game" - and so the plane took what Dead
+   * Nation was about to take back). Logged once per app. */
   {
-    static SceUID failed_pid;
-    SceUID pid = fg_reader();
-    if (pid != failed_pid) {
-      failed_pid = pid;
-      log_queue("overlay plane: no 2 MB block in VRAM or root contiguous - "
-                "the menu is drawn into the game's frames\r\n");
+    if (pid != no_pid) {
+      no_pid = pid;
+      if (last_block >= 0) {
+        snprintf(line, sizeof(line), "overlay plane: a 2 MB block was there "
+                 "in %s, but not %u KB more - left to the game; the menu is "
+                 "drawn into the game's frames\r\n", names[last_block],
+                 (unsigned)(PLANE_MARGIN >> 10));
+        log_queue(line);
+      } else {
+        log_queue("overlay plane: no 2 MB block in VRAM or root contiguous "
+                  "- the menu is drawn into the game's frames\r\n");
+      }
       /* what there is instead (Dead Nation, PCSA00151: the menu drawn
        * into its frames is torn by the game's own drawing): the largest
        * block each of the three pools gives, in steps of 256 KB - whether
