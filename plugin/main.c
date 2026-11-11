@@ -160,6 +160,16 @@ extern int resume_function(void);
  * it, see payload_get), and its length, a multiple of 4. */
 uint32_t payload_src, payload_len;
 
+/* Built for size, the compiler turns snprintf(buf, n, "text") and
+ * "%s" into calls to strcpy, which the kernel's C library does not
+ * export (the link failed on it, 8a78169). A plain one of our own. */
+char *strcpy(char *dst, const char *src) {
+  char *d = dst;
+  while ((*d++ = *src++) != '\0')
+    ;
+  return dst;
+}
+
 void jv_payload_set(const void *src, uint32_t len) {
   payload_src = (uint32_t)src;
   payload_len = src ? (len + 3) & ~3u : 0;
