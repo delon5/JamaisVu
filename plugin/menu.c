@@ -5394,7 +5394,8 @@ static void modules_log(void) {
     log_append(line);
     /* the plugins: where each is loaded, so an address in a kernel crash
      * dump names its module (a dump of 9a36247's day ended in a module at
-     * 0x01800000 that nothing on the console could name) */
+     * 0x01800000 that nothing on the console could name; with this line
+     * in the next start's log it was taiHEN, kubridge 0x42000 after it) */
     if (!sys && strcmp(drv[g], "bootfs") != 0) {
       m = snprintf(line, sizeof(line), "      loaded at:");
       for (uint32_t i = 0; i < n; i++) {
