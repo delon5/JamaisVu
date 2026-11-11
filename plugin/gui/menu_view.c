@@ -362,6 +362,11 @@ static void draw_details(Canvas *c, const MenuModel *m) {
                        "Dry run and write test use the selected slot; it "
                        "must be empty",
                        C_TEXT_DIM, MENU_W - 48);
+      /* which build this is and whether its log is being written: read
+       * off the screen, not from a copied file */
+      if (m->message[0])
+        cv_text_centered(c, &font_small, MENU_W / 2, INFO_Y + 22,
+                         m->message, C_TEXT_DIM, MENU_W - 48);
       break;
 
     case MV_MESSAGE:

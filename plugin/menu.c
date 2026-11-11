@@ -434,6 +434,14 @@ static char g_capture_tid[16];
 static volatile int g_swap_ox;
 static char g_swap_tid[16]; /* title the current g_swap_ox was decided for */
 static void log_append(const char *text);
+/* how the log is doing since the start: lines written, lines that could
+ * not be (kept in memory for the next that can), and why the last one
+ * could not - shown in Diagnostics (a session in which a game crashed
+ * left no line at all in the log that was sent in) */
+static volatile uint32_t g_log_ok, g_log_fail;
+static volatile int g_log_fail_why; /* 1 no card, 2 card read-only,
+                                     * 3 no folder, else the open's error */
+
 
 /* The input thread never touches the Memory Card: in heavy games (Trails)
  * a log write + sync could block it for seconds, and the menu did not
@@ -3879,7 +3887,18 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         set_message(MV_CONFIRM_LOAD, "", -1, 0);
 #ifndef JV_RELEASE
       } else if (pressed & JV_DIAG_BUTTON) {
-        set_message(MV_DIAG, "", -1, 0); /* development builds only */
+        /* development builds only */
+        static char dm[128];
+        int why = g_log_fail_why;
+        int dn = snprintf(dm, sizeof(dm), "Build %s - log: %u lines "
+                          "written, %u not", jv_build_id(),
+                          (unsigned)g_log_ok, (unsigned)g_log_fail);
+        if (g_log_fail)
+          snprintf(dm + dn, sizeof(dm) - dn,
+                   why == 1 ? " (no Memory Card)" :
+                   why == 2 ? " (card read-only)" :
+                   why == 3 ? " (no folder)" : " (0x%08X)", (unsigned)why);
+        set_message(MV_DIAG, dm, -1, 0);
 #endif
       } else if (pressed & SCE_CTRL_CIRCLE) {
         close_menu();
@@ -4951,6 +4970,8 @@ static void log_append_locked(const char *text) {
   /* no card, or the card's drive is read-only (after a load, until it is
    * mounted afresh): kept in memory, written with the next line */
   if (!root || fs_read_only_has(root) || slots_mkdirs() < 0) {
+    g_log_fail++;
+    g_log_fail_why = !root ? 1 : fs_read_only_has(root) ? 2 : 3;
     log_backlog_add(line, n, text);
     return;
   }
@@ -4974,9 +4995,12 @@ static void log_append_locked(const char *text) {
 
   SceUID fd = ksceIoOpen(path, flags, 0666);
   if (fd < 0) {
+    g_log_fail++;
+    g_log_fail_why = fd;
     log_backlog_add(line, n, text);
     return;
   }
+  g_log_ok++;
   if (tr)
     trace_wake(JV_WAKE_W_OPEN);
   if (g_log_backlog_len) {
