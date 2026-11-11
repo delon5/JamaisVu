@@ -43,6 +43,18 @@ int rle16_encode_row(const uint16_t *src, int w, const Rle16Ref *refs,
 int rle16_decode_row(const uint8_t *src, int srclen, uint16_t *dst, int w,
                      const uint16_t *const *refs, int nrefs, uint32_t refpx);
 
+/* As rle16_decode_row, but straight to 32-bit pixels: every 16-bit value
+ * v becomes r5[v >> 11] | g6[(v >> 5) & 63] | b5[v & 31] | 0xff000000
+ * (render.h's rgb565_to_rgba with its three tables). A repeated stretch
+ * is converted once and filled - the menu is mostly flat colour, and
+ * decoding a row to 16 bits and converting every pixel of it took 15 ms a
+ * frame at 960x544 (PCH-2000, Dead Nation). The rest of a malformed row
+ * is the converted zero (opaque black), what the 16-bit path gives. */
+int rle16_decode_row_rgba(const uint8_t *src, int srclen, uint32_t *dst,
+                          int w, const uint16_t *const *refs, int nrefs,
+                          uint32_t refpx, const uint32_t *r5,
+                          const uint32_t *g6, const uint32_t *b5);
+
 /* the longest encoding of a w-pixel row (all literals) */
 #define RLE16_MAX_BYTES(w) (2 * (w) + ((w) + 127) / 128 + 8)
 

@@ -177,6 +177,37 @@ static inline int img_edge(const Img16 *im, int y) {
 static uint16_t g_dec_row[MENU_W];
 static int g_dec_y = -1, g_dec_s = -1;
 static uint32_t g_dec_ver;
+/* a compressed image's row y in the copy being shown: its bytes, or NULL */
+static const uint8_t *img_row_bytes(const Img16 *im, const RleStream *st,
+                                    int y, int *len) {
+  if (!st || y >= st->rows)
+    return NULL;
+  uint32_t pos = st->pos[y];
+  int ci = (int)(pos / PANEL_CHUNK_BYTES), co = (int)(pos % PANEL_CHUNK_BYTES);
+  *len = st->len[y];
+  if (ci < st->nchunks && im->chunk_mem[st->chunks[ci]] &&
+      co + *len <= PANEL_CHUNK_BYTES)
+    return im->chunk_mem[st->chunks[ci]] + co;
+  return NULL;
+}
+
+/* Row y of a compressed image straight into 32-bit pixels, every pixel
+ * opaque (rle16_decode_row_rgba): 1 if out holds it. For frames as wide
+ * as the image is laid out - no scaling. 0: the caller takes the 16-bit
+ * way (an image that is not compressed, another width, a row not there). */
+static int img_row_rgba(const Img16 *im, int y, uint32_t *out, int fw) {
+  if (!im->rle || fw != im->w)
+    return 0;
+  int sidx = im->rd, len = 0;
+  const RleStream *st = sidx < 0 ? NULL : &im->stream[sidx];
+  const uint8_t *src = img_row_bytes(im, st, y, &len);
+  if (!src)
+    return 0;
+  rle16_decode_row_rgba(src, len, out, im->w, st->refs, JV_NUM_SLOTS,
+                        THUMB_PX, jv_lut_r5, jv_lut_g6, jv_lut_b5);
+  return 1;
+}
+
 static const uint16_t *img_row16(const Img16 *im, int y) {
   if (!im->rle)
     return im->raw + y * im->w;
@@ -184,16 +215,8 @@ static const uint16_t *img_row16(const Img16 *im, int y) {
   const RleStream *st = sidx < 0 ? NULL : &im->stream[sidx];
   if (st && g_dec_y == y && g_dec_s == sidx && g_dec_ver == st->version)
     return g_dec_row;
-  const uint8_t *src = NULL;
   int len = 0;
-  if (st && y < st->rows) {
-    uint32_t pos = st->pos[y];
-    int ci = (int)(pos / PANEL_CHUNK_BYTES), co = (int)(pos % PANEL_CHUNK_BYTES);
-    len = st->len[y];
-    if (ci < st->nchunks && im->chunk_mem[st->chunks[ci]] &&
-        co + len <= PANEL_CHUNK_BYTES)
-      src = im->chunk_mem[st->chunks[ci]] + co;
-  }
+  const uint8_t *src = img_row_bytes(im, st, y, &len);
   if (!src) {
     memset(g_dec_row, 0, im->w * 2);
     g_dec_y = -1;
@@ -566,6 +589,7 @@ static int (*g_dcache_clean_inv)(void *addr, unsigned int size);
  * the system layer (5765736) and holding frames (979e26c, 16d519c) were
  * tried and removed. */
 static struct {
+  uint32_t late_draws, refresh_draws; /* g_draw_timing 1/2 */
   uint32_t frames, same_as_prev, copy_fail, cleans, sync_counts[3];
   int clean_ret;
   uint32_t w, h, pitch, nbases;
@@ -1735,7 +1759,11 @@ static void compose(const SceDisplayFrameBuf *p, const Img16 *c,
        * per image row, written to every frame row it covers (two at
        * 1080p) */
       if (sy != built_sy) {
-        build_row565(g_rowbuf, img_row16(c, sy), xmap, c->w, fw);
+        /* a compressed image at its own width: decoded straight to
+         * 32 bits (17.5 ms a frame in the game's display call otherwise:
+         * PCH-2000, Dead Nation, 0a5793f) */
+        if (!img_row_rgba(c, sy, g_rowbuf, fw))
+          build_row565(g_rowbuf, img_row16(c, sy), xmap, c->w, fw);
         built_sy = sy;
       }
     } else {
@@ -2206,9 +2234,27 @@ static int frame_visible(const SceDisplayFrameBuf *p) {
   return 0;
 }
 
+/* When the menu is drawn into a game's frame (it is not on the display
+ * plane) - an experiment for Dead Nation, which draws into frames that are
+ * on the screen (see g_fbd), switched with R in Diagnostics:
+ *   0  before the frame is handed to the system (as always: the frame is
+ *      complete when it is shown, and the game's call takes that longer);
+ *   1  after it is handed over: the game's frame is not held back;
+ *   2  as 1, and once more right after the next screen refresh starts -
+ *      when the frame is on the screen, over whatever was drawn into it
+ *      in between.
+ * Only for frames set for the next refresh (sync 1). */
+static volatile int g_draw_timing;
+static const char *const k_draw_timing[3] = {
+  "before the frame is handed over",
+  "after the frame is handed over",
+  "after, and again at the screen refresh",
+};
+
 static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
                         int sync) {
   uint32_t t0 = prof_now();
+  int handed = 0, hret = 0;
   if (p && p->base && head == ksceDisplayGetPrimaryHead()) {
     if (index == 0) {
       g_l0_pid = ksceKernelGetProcessId();
@@ -2279,13 +2325,27 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
           if (!g_fb_rec)
             record_frame(p);
         }
+        int timing = g_menu_open && !g_plane_mode && sync == 1
+                         ? g_draw_timing : 0;
+        if (timing) {
+          hret = TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
+          handed = 1;
+          g_fbd.late_draws++;
+        }
         draw_overlays(p);
+        if (timing == 2) {
+          ksceDisplayWaitVblankStart();
+          draw_overlays(p);
+          g_fbd.refresh_draws++;
+        }
       }
     }
     __sync_fetch_and_sub(&g_overlay_users, 1);
   }
   prof_add(PROF_DISPLAY, t0);
 
+  if (handed)
+    return hret;
   return TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
 }
 
@@ -3491,6 +3551,14 @@ static void perf_report(void) {
              (unsigned)g_fbd.fl_ret0, (unsigned)g_fbd.fl_ret1,
              (unsigned)g_fbd.fl_other, (unsigned)g_fbd.fl_other_val);
     log_queue(line);
+    if (!g_plane_mode || g_fbd.late_draws) {
+      snprintf(line, sizeof(line), "    menu drawing time: %s (R in "
+               "Diagnostics); frames drawn after the hand-over %u, drawn "
+               "again at the screen refresh %u\r\n",
+               k_draw_timing[g_draw_timing], (unsigned)g_fbd.late_draws,
+               (unsigned)g_fbd.refresh_draws);
+      log_queue(line);
+    }
     memset(&g_fbd, 0, sizeof(g_fbd));
   }
 }
@@ -3799,6 +3867,15 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
         start_op(OP_TEST_DISPLAY, sel);
       } else if (pressed & SCE_CTRL_RIGHT) {
         start_op(OP_TEST_WRITE, sel);
+      } else if (pressed & SCE_CTRL_RTRIGGER) {
+        static char tm[96];
+        g_draw_timing = (g_draw_timing + 1) % 3;
+        snprintf(tm, sizeof(tm), "Menu drawn %s",
+                 k_draw_timing[g_draw_timing]);
+        set_message(MV_MESSAGE, tm, -1, 0);
+        snprintf(tm, sizeof(tm), "menu drawing time set to: %s\r\n",
+                 k_draw_timing[g_draw_timing]);
+        log_queue(tm);
       } else if (pressed & SCE_CTRL_LEFT) {
         SceUID game = g_l0_pid ? g_l0_pid : fg_reader();
         if (game)

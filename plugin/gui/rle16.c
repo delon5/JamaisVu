@@ -180,3 +180,70 @@ bad:
     dst[x] = 0;
   return -1;
 }
+
+int rle16_decode_row_rgba(const uint8_t *src, int srclen, uint32_t *dst,
+                          int w, const uint16_t *const *refs, int nrefs,
+                          uint32_t refpx, const uint32_t *r5,
+                          const uint32_t *g6, const uint32_t *b5) {
+#define RGBA(v) (r5[(v) >> 11] | g6[((v) >> 5) & 63] | b5[(v) & 31] | \
+                 0xff000000u)
+  int x = 0, i = 0;
+  while (x < w) {
+    if (i >= srclen)
+      goto bad;
+    uint8_t op = src[i++];
+    if (op < OP_REPEAT) {
+      int n = op + 1;
+      if (n > w - x || i + 2 * n > srclen)
+        goto bad;
+      for (int k = 0; k < n; k++, i += 2) {
+        uint16_t v = get16(src + i);
+        dst[x + k] = RGBA(v);
+      }
+      x += n;
+    } else if (op <= OP_REPEAT_LONG) {
+      int n;
+      uint16_t v;
+      if (op < OP_REPEAT_LONG) {
+        n = (op & 0x3F) + 2;
+        if (n > w - x || i + 2 > srclen)
+          goto bad;
+        v = get16(src + i);
+        i += 2;
+      } else {
+        if (i + 4 > srclen)
+          goto bad;
+        n = get16(src + i);
+        v = get16(src + i + 2);
+        i += 4;
+        if (n < 1 || n > w - x)
+          goto bad;
+      }
+      uint32_t c = RGBA(v);
+      for (int k = 0; k < n; k++)
+        dst[x + k] = c;
+      x += n;
+    } else if (op == OP_REF) {
+      if (i + 4 > srclen)
+        goto bad;
+      int idx = src[i], n = src[i + 3];
+      uint32_t off = get16(src + i + 1);
+      i += 4;
+      if (idx >= nrefs || !refs[idx] || n < 1 || n > w - x ||
+          off + (uint32_t)n > refpx)
+        goto bad;
+      const uint16_t *p = refs[idx] + off;
+      for (int k = 0; k < n; k++)
+        dst[x + k] = RGBA(p[k]);
+      x += n;
+    } else {
+      goto bad;
+    }
+  }
+  return 0;
+bad:
+  for (; x < w; x++)
+    dst[x] = RGBA(0); /* what the 16-bit path's zero becomes */
+  return -1;
+#undef RGBA
+}
