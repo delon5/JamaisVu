@@ -804,7 +804,7 @@ static int plane_alloc(void) {
       plane_clear(0, PLANE_H);
       snprintf(line, sizeof(line), "overlay plane: %u KB in %s (memory no "
                "game is using) - the menu is shown on the display's second "
-               "layer; given back once the system sets the plane again\r\n",
+               "layer; given back when the menu closes\r\n",
                (unsigned)(size >> 10), kname[k]);
       log_queue(line);
       return 0;
@@ -916,15 +916,16 @@ static void plane_show(void) {
   g_plane_shown = 1;
 }
 
-/* Hiding the plane with its own alpha has been seen to work on the
- * PCH-2000's LCD only (Diagnostics, DOWN, 9203ea6: the menu gone for the
- * 3 s, the game showing). If another display ignored that alpha, a buffer
- * given back early would show as whatever is written there next. So the
- * early release, and with it the plane's block from the common dialog
- * pool, is used on displays where the test has passed; elsewhere the
- * buffer stays until the system sets the plane, as before. */
+/* Hiding the plane with its own alpha: measured on the PCH-2000's LCD
+ * (Diagnostics, DOWN, 9203ea6: the menu gone for the 3 s, the game
+ * showing, both calls accepted), and the PCH-1000's OLED works the same
+ * by the user's own test. 9a36247 used it on the LCD only; the user had
+ * that restriction removed, so it is used on every display. Not seen on
+ * the PS TV (HDMI) yet: if a display ignored that alpha, a buffer given
+ * back early would show as whatever is written there next - Diagnostics,
+ * DOWN, tells on any console. */
 static int plane_alpha_verified(void) {
-  return g_set_merge && jv_disp_type() == JV_DISP_LCD;
+  return g_set_merge != NULL;
 }
 
 /* nothing of ours on the plane: the buffer transparent, the plane given
