@@ -360,6 +360,11 @@ static int g_plane_fail; /* no driver functions: compose for good */
 static volatile int g_plane_mode;   /* this overlay generation uses it */
 static volatile int g_plane_shown;  /* the plane is set up with the buffer */
 static volatile int g_plane_lost;   /* something else set the plane */
+/* the plane still reads our buffer: set when we put it there, cleared by
+ * the display hook when another picture has been put on the plane */
+static volatile int g_plane_ours;
+/* the plane's own alpha is at 0: whatever it reads, nothing of it shows */
+static volatile int g_plane_alpha0;
 static volatile int g_plane_yield;  /* the input thread closes the menu */
 /* what is on the display, kept by the display hook at all times: whose
  * frame went on layer 0 last and when, and when something other than
@@ -382,6 +387,7 @@ static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
 static volatile int g_plane_toast;  /* the message box is drawn in it */
 static volatile int g_render_active;
 static int (*g_set_merge)(int head, int control, uint32_t alpha);
+static int plane_alpha_verified(void); /* below, with plane_hide */
 static int (*g_set_owner)(int head, int index, SceUID pid);
 #define PLANE_W JV_SCREEN_W
 #define PLANE_H JV_SCREEN_H
@@ -772,16 +778,17 @@ static int plane_alloc(void) {
     return -1;
   }
   /* memory no game is using, before any pool a game uses: the system's
-   * spare memory (8 MB more must stay).
+   * spare memory (8 MB more must stay), then the common dialog pool.
    *
-   * Not the common dialog pool (k = 1, as a46e534 and ec8dc1b did): a
-   * save data dialog was measured to take 7.9 MB of it and a trophy
-   * dialog 6.9 MB (PCSG00488, ec8dc1b), and with the save dialog open
-   * its largest free block was 512 KB - a dialog needs nearly all of the
-   * pool. The plane's 2 MB stays after the menu closed, until something
-   * else is on the plane, and cannot step aside as the menu's pieces do:
-   * held there, it would leave the next dialog too little. */
-  for (int k = 0; k < 1; k++) {
+   * A dialog needs nearly all of that pool (a save data dialog 7.9 MB, a
+   * trophy dialog 6.9 MB, measured in PCSG00488), so nothing may stay in
+   * it. Two builds took the plane's 2 MB from it and left them there
+   * after the menu closed, until the system next set the plane; 3dae76a
+   * stopped taking them. Now the buffer goes back 0.1 s after the menu
+   * closed (plane_free_if_unused), and while the menu is open a request
+   * for dialog memory closes it and frees the buffer first
+   * (dialog_step_aside) - so it is taken from there again. */
+  for (int k = 0; k < (plane_alpha_verified() ? 2 : 1); k++) {
     static const char *last_why[2];
     static const char *const kname[2] = { "the system's spare memory",
                                           "the common dialog pool" };
@@ -902,41 +909,110 @@ static void plane_show(void) {
   fb.height = PLANE_H;
   g_set_merge(head, 0, 0x100);
   g_set_owner(head, 1, KERNEL_PID);
+  g_plane_alpha0 = 0;
   ksceDisplaySetFrameBufInternal(head, 1, &fb, 1);
+  g_plane_ours = 1;
   g_plane_lost = 0;
   g_plane_shown = 1;
 }
 
+/* Hiding the plane with its own alpha has been seen to work on the
+ * PCH-2000's LCD only (Diagnostics, DOWN, 9203ea6: the menu gone for the
+ * 3 s, the game showing). If another display ignored that alpha, a buffer
+ * given back early would show as whatever is written there next. So the
+ * early release, and with it the plane's block from the common dialog
+ * pool, is used on displays where the test has passed; elsewhere the
+ * buffer stays until the system sets the plane, as before. */
+static int plane_alpha_verified(void) {
+  return g_set_merge && jv_disp_type() == JV_DISP_LCD;
+}
+
 /* nothing of ours on the plane: the buffer transparent, the plane given
- * back to the shell's process (it sets its own picture when it needs it) */
+ * back to the shell's process (it sets its own picture when it needs it).
+ * While the plane still reads our buffer, its own alpha goes to 0 as
+ * well: then nothing of the plane shows whatever it reads, and the buffer
+ * can be given back (plane_free_if_unused). Not when the system has put
+ * its own picture there meanwhile - that one must stay visible. */
 static void plane_hide(void) {
   if (!g_plane_shown)
     return;
   plane_clear(0, PLANE_H);
   g_plane_panel = g_plane_toast = 0;
+  int head = ksceDisplayGetPrimaryHead();
+  if (g_plane_ours && plane_alpha_verified()) {
+    g_set_merge(head, 0, 0);
+    g_plane_alpha0 = 1;
+  }
   SceUID shell = ksceKernelSysrootGetShellPid();
   if (shell > 0)
-    g_set_owner(ksceDisplayGetPrimaryHead(), 1, shell);
+    g_set_owner(head, 1, shell);
   g_plane_shown = 0;
   g_plane_hide_us = now_us();
 }
 
-/* The plane keeps scanning the buffer after the menu is gone (a NULL or
- * transparent layer blacked the screen for good in the tests), so it is
- * given back only once something else has been put on the plane: the
- * system does that on its own overlays and at every app switch. Not held
- * across games: a game that uses all its video memory (Trails 3rd with
- * VitaGrafix crashed with 2 MB of it held from boot) gets it all. */
-static void plane_free_if_unused(void) {
-  if (!g_plane_px || g_plane_mode || g_plane_shown || g_plane_uid < 0 ||
-      g_l1_other_us <= g_plane_hide_us)
+/* Input thread, every pass. The plane's alpha is 0 only while the plane
+ * still reads our buffer (or the memory it was in). As soon as another
+ * picture is on the plane - the system's own overlays, the LiveArea at
+ * every app switch - the pixels' own alpha counts again, so that picture
+ * shows; at most one pass (16 ms) after it was set. And after a wake-up
+ * the alpha is set to 0 once more, in case the display's settings were
+ * put back while the console slept. */
+static void plane_alpha_keep(void) {
+  static int64_t seen_r0;
+  if (!g_set_merge)
     return;
+  if (g_plane_alpha0 && !g_plane_ours) {
+    g_set_merge(ksceDisplayGetPrimaryHead(), 0, 0x100);
+    g_plane_alpha0 = 0;
+  }
+  if (g_ev_r0 != seen_r0) {
+    seen_r0 = g_ev_r0;
+    if (g_plane_alpha0 && g_plane_ours && !g_plane_shown)
+      g_set_merge(ksceDisplayGetPrimaryHead(), 0, 0);
+  }
+}
+
+static void plane_buffer_free(const char *why) {
+  static char line[160];
   ksceKernelFreeMemBlock(g_plane_uid);
   g_plane_uid = -1;
   g_plane_px = NULL;
   g_plane_in_cd = 0;
-  log_queue("overlay plane: buffer given back (the system set the plane)"
-            "\r\n");
+  snprintf(line, sizeof(line), "overlay plane: buffer given back (%s)\r\n",
+           why);
+  log_queue(line);
+}
+
+/* The plane keeps reading the buffer after the menu is gone, and a NULL
+ * layer blacked the screen for good in the tests - so the buffer used to
+ * stay until something else was put on the plane, which in a game that
+ * never makes the system do so (Dead Nation) meant until the PS button.
+ * Measured since (Diagnostics, DOWN; PCH-2000, 9203ea6): with the plane's
+ * alpha at 0 the menu was gone and the game showed, both calls accepted.
+ * So once the plane is hidden with its alpha at 0, the buffer is given
+ * back right away: 0.1 s after the menu closed, the alpha set again and
+ * two screen refreshes waited for. Not while a save or load runs: the
+ * buffer stays, transparent, across the sleep as before.
+ * Never held across games: a game that uses all its video memory (Trails
+ * 3rd with VitaGrafix crashed with 2 MB of it held from boot) gets it
+ * all. now: without the 0.1 s (a dialog asks for the pool it is in). */
+static void plane_free_if_unused(int now) {
+  if (!g_plane_px || g_plane_mode || g_plane_shown || g_plane_uid < 0)
+    return;
+  if (!g_plane_ours) {
+    plane_buffer_free("the system set the plane");
+    return;
+  }
+  if (!g_plane_alpha0 || !g_set_merge || g_busy ||
+      (!now && now_us() - g_plane_hide_us < 100000))
+    return;
+  g_set_merge(ksceDisplayGetPrimaryHead(), 0, 0);
+  ksceDisplayWaitVblankStart();
+  ksceDisplayWaitVblankStart();
+  if (g_plane_mode || g_plane_shown) /* opened again meanwhile */
+    return;
+  plane_buffer_free("the menu closed; the plane shows nothing until a "
+                    "picture is put on it");
 }
 
 /* Display test: where the frame on screen is in physical memory. The
@@ -2616,9 +2692,15 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
   }
   prof_add(PROF_DISPLAY, t0);
 
-  if (handed)
-    return hret;
-  return TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
+  if (!handed)
+    hret = TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
+  /* another picture (or none) is on the plane now: it no longer reads
+   * our buffer (see plane_alpha_keep, plane_free_if_unused) */
+  if (index == 1 && hret >= 0 && g_plane_ours &&
+      (!p || p->base != (void *)g_plane_px) &&
+      head == ksceDisplayGetPrimaryHead())
+    g_plane_ours = 0;
+  return hret;
 }
 #pragma GCC push_options /* JV_COLD: for size, see the top of the file */
 #pragma GCC optimize("Os")
@@ -4439,9 +4521,8 @@ static void handle_buttons(uint32_t held, uint32_t pressed) {
  * the totals with the process's end, so a dialog that showed without a
  * line here took another way.
  *
- * The display plane's 2 MB is not given back here: it can only go once
- * something else is on the plane (see plane_free_if_unused). The line
- * says whether it was held. */
+ * The display plane's 2 MB, when they are in that pool, go back with the
+ * menu (plane_free_if_unused). The line says whether they were held. */
 static tai_hook_ref_t g_alloc_user_ref;
 static SceUID g_alloc_user_hook = -1;
 static volatile int g_dlg_wanted;   /* asked of the input thread */
@@ -4462,7 +4543,8 @@ static SceUID alloc_user_hook(const char *name, uint32_t type, uint32_t size,
   uint32_t held = g_cd_held_kb;
   int was_open = g_menu_open, plane = g_plane_px && g_plane_in_cd;
   int waited = -1, done = 0;
-  if (held && pid == g_l0_pid && pid != ksceKernelSysrootGetShellPid()) {
+  if ((held || plane) && pid == g_l0_pid &&
+      pid != ksceKernelSysrootGetShellPid()) {
     int64_t t0 = now_us();
     g_dlg_done = 0;
     g_dlg_wanted = 1;
@@ -4542,6 +4624,7 @@ static void dialog_step_aside(void) {
     close_menu();
     g_toast_until = 0;
     overlay_release();
+    plane_free_if_unused(1); /* its 2 MB too, when they are in that pool */
     g_dlg_stepped++;
     g_dlg_done = 1;
   }
@@ -4633,7 +4716,8 @@ static int input_thread(SceSize args, void *argp) {
 #ifndef JV_RELEASE
     proc_notes_log();
 #endif
-    plane_free_if_unused();
+    plane_alpha_keep();
+    plane_free_if_unused(0);
     /* on the plane the panel is drawn by the render thread; asked from
      * here too, not only from the display hook, which a screen that is
      * not being redrawn never calls (a static picture: nothing rendered) */
