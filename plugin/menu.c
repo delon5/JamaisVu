@@ -2621,14 +2621,88 @@ typedef struct {
   int (*sw)(int id, int type, void *a3, int a4);
 } JvProcEvents;
 
+/* Every other process too, by name, with what the kernel's pool had: on
+ * the PCH-1000 a save in FAHRENEIT came back to 4 processes instead of
+ * 3, 21 more modules and 316 KB less in the pool (428 -> 112 KB), and
+ * nothing said which process that was (ec8dc1b). A new process has no
+ * title yet when the kernel announces it, so its start is noted here and
+ * written by the input thread half a second later. */
+#define PROC_NOTES 8
+static struct {
+  volatile SceUID pid;
+  volatile int64_t t;
+  volatile uint32_t pool_kb; /* free just before it started */
+} g_proc_note[PROC_NOTES];
+static volatile uint32_t g_proc_note_n;
+
+static int proc_create_cb(SceUID pid, void *a2, int a3) {
+  (void)a2;
+  (void)a3;
+  uint32_t kfree = 0, ktotal = 0;
+  jv_kernel_pool(&kfree, &ktotal, NULL, 0);
+  uint32_t i = __sync_fetch_and_add(&g_proc_note_n, 1) % PROC_NOTES;
+  g_proc_note[i].pool_kb = kfree;
+  g_proc_note[i].t = now_us();
+  __sync_synchronize();
+  g_proc_note[i].pid = pid;
+  return 0;
+}
+
+/* input thread */
+static void proc_notes_log(void) {
+  static char line[200];
+  int64_t now = now_us();
+  for (int i = 0; i < PROC_NOTES; i++) {
+    SceUID pid = g_proc_note[i].pid;
+    if (!pid || now - g_proc_note[i].t < 500000)
+      continue;
+    g_proc_note[i].pid = 0;
+    char tid[16];
+    uint32_t kfree = 0, ktotal = 0;
+    memset(tid, 0, sizeof(tid));
+    if (ksceKernelGetProcessTitleId(pid, tid, sizeof(tid)) < 0 || !tid[0])
+      snprintf(tid, sizeof(tid), "?");
+    tid[sizeof(tid) - 1] = '\0';
+    jv_kernel_pool(&kfree, &ktotal, NULL, 0);
+    snprintf(line, sizeof(line), "process 0x%08X (%s) started %d ms ago; "
+             "kernel pool %u KB free before it, %u KB now\r\n",
+             (unsigned)pid, tid, (int)((now - g_proc_note[i].t) / 1000),
+             (unsigned)g_proc_note[i].pool_kb, (unsigned)kfree);
+    log_queue(line);
+  }
+}
+
+static void proc_other_ended(SceUID pid, const char *how) {
+  static char line[200];
+  static volatile int busy;
+  char tid[16];
+  if (__sync_lock_test_and_set(&busy, 1))
+    return;
+  uint32_t kfree = 0, ktotal = 0;
+  jv_kernel_pool(&kfree, &ktotal, NULL, 0);
+  memset(tid, 0, sizeof(tid));
+  if (ksceKernelGetProcessTitleId(pid, tid, sizeof(tid)) < 0 || !tid[0])
+    snprintf(tid, sizeof(tid), "?");
+  tid[sizeof(tid) - 1] = '\0';
+  snprintf(line, sizeof(line), "process 0x%08X (%s), not the one on the "
+           "screen, ended: %s; kernel pool %u KB free\r\n", (unsigned)pid,
+           tid, how, (unsigned)kfree);
+  log_queue(line);
+  __sync_lock_release(&busy);
+}
+
 static void proc_ended(SceUID pid, const char *how) {
   /* not on the stack (the thread that ends a process is not ours, its
    * kernel stack may be 4 KB): one buffer, one caller at a time */
   static char line[640];
   static volatile int busy;
   char tid[16];
-  if (!pid || (pid != g_l0_pid && pid != fg_reader()))
+  if (!pid)
     return;
+  if (pid != g_l0_pid && pid != fg_reader()) {
+    proc_other_ended(pid, how);
+    return;
+  }
   if (__sync_lock_test_and_set(&busy, 1))
     return;
   int64_t now = now_us();
@@ -2690,6 +2764,7 @@ static void proc_watch_install(void) {
                              (uintptr_t *)&reg) < 0 || !reg)
     return;
   ev.size = sizeof(ev);
+  ev.create = proc_create_cb;
   ev.exit = proc_exit_cb;
   ev.kill = proc_kill_cb;
   reg("JamaisVuProc", &ev, 0);
@@ -4521,6 +4596,9 @@ static int input_thread(SceSize args, void *argp) {
       }
     }
     dialog_step_aside();
+#ifndef JV_RELEASE
+    proc_notes_log();
+#endif
     plane_free_if_unused();
     /* on the plane the panel is drawn by the render thread; asked from
      * here too, not only from the display hook, which a screen that is
