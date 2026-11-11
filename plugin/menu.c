@@ -668,7 +668,8 @@ static void plane_clear(uint32_t y0, uint32_t rows) {
  * physical address - and checked page by page to be so; taken only while
  * the pool has 8 MB more to give. base, or NULL with *why set. */
 static int (*g_va2pa_hw)(const void *va, uintptr_t *pa); /* VAtoPA */
-static void *plane_spare_alloc(uint32_t size, SceUID *out, const char **why) {
+static void *plane_spare_alloc(uint32_t type, uint32_t margin, uint32_t size,
+                               SceUID *out, const char **why) {
   struct {
     uint32_t size, f4, attr, fC, paddr, alignment, rest[16];
   } opt;
@@ -677,7 +678,7 @@ static void *plane_spare_alloc(uint32_t size, SceUID *out, const char **why) {
   memset(&opt, 0, sizeof(opt));
   opt.size = sizeof(opt);
   opt.attr = 0x00200000; /* physically contiguous */
-  SceUID uid = ksceKernelAllocMemBlock("JamaisVuPlane", 0x1050D006, size,
+  SceUID uid = ksceKernelAllocMemBlock("JamaisVuPlane", type, size,
                                        (void *)&opt);
   if (uid < 0) {
     *why = "the pool gave no contiguous 2 MB";
@@ -688,11 +689,11 @@ static void *plane_spare_alloc(uint32_t size, SceUID *out, const char **why) {
     *why = "the block had no address";
     return NULL;
   }
-  SceUID more = ksceKernelAllocMemBlock("JamaisVuMargin", 0x1050D006,
-                                        0x800000, NULL);
+  SceUID more = ksceKernelAllocMemBlock("JamaisVuMargin", type, margin,
+                                        NULL);
   if (more < 0) {
     ksceKernelFreeMemBlock(uid);
-    *why = "the pool had no 8 MB more";
+    *why = "the pool had not enough more to give";
     return NULL;
   }
   ksceKernelFreeMemBlock(more);
@@ -747,28 +748,33 @@ static int plane_alloc(void) {
               "\r\n");
     return -1;
   }
-  {
-    /* the system's spare memory before any pool a game uses */
-    static const char *last_why;
+  /* memory no game is using, before any pool a game uses: the system's
+   * spare memory (8 MB more must stay), then the common dialog pool (4 MB
+   * more must stay) */
+  for (int k = 0; k < 2; k++) {
+    static const char *last_why[2];
+    static const char *const kname[2] = { "the system's spare memory",
+                                          "the common dialog pool" };
     const char *why = NULL;
     SceUID uid = -1;
-    void *base = plane_spare_alloc(size, &uid, &why);
+    void *base = plane_spare_alloc(k ? 0x10A0D006 : 0x1050D006,
+                                   k ? 0x400000 : 0x800000, size, &uid, &why);
     if (base) {
       g_plane_uid = uid;
       g_plane_px = base;
-      g_plane_pool = "the system's spare memory";
+      g_plane_pool = kname[k];
       plane_clear(0, PLANE_H);
-      snprintf(line, sizeof(line), "overlay plane: %u KB in the system's "
-               "spare memory (outside every game's budget) - the menu is "
-               "shown on the display's second layer; given back once the "
-               "system sets the plane again\r\n", (unsigned)(size >> 10));
+      snprintf(line, sizeof(line), "overlay plane: %u KB in %s (memory no "
+               "game is using) - the menu is shown on the display's second "
+               "layer; given back once the system sets the plane again\r\n",
+               (unsigned)(size >> 10), kname[k]);
       log_queue(line);
       return 0;
     }
-    if (why != last_why) { /* once per reason, not per opening */
-      last_why = why;
-      snprintf(line, sizeof(line), "overlay plane: not from the system's "
-               "spare memory - %s\r\n", why);
+    if (why != last_why[k]) { /* once per reason, not per opening */
+      last_why[k] = why;
+      snprintf(line, sizeof(line), "overlay plane: not from %s - %s\r\n",
+               kname[k], why);
       log_queue(line);
     }
   }
@@ -1299,7 +1305,16 @@ static int pool_has(int i, uint32_t size) {
  * from it). Suggested by the user; what it gives is logged once per app. */
 #define SPARE_POOL 5
 #define SPARE_MARGIN 0x800000
+/* Measured in Dead Nation (PCH-2000, 42032f9): that pool gave 2 MB and
+ * not 4 - too little to be left 8 MB - the tmp pool 1 MB, and the common
+ * dialog pool 8 MB and not 16. The common dialog pool is what the
+ * system's own dialogs in a game are given (keyboard, save data, message
+ * boxes): a game touches it only while such a dialog is open. It is asked
+ * second, while it has DIALOG_MARGIN more to give for such a dialog. */
+#define DIALOG_POOL 3
+#define DIALOG_MARGIN 0x400000
 static int g_spare_ok;       /* this opening: asked first */
+static int g_dialog_ok;      /* this opening: asked second */
 static SceUID g_spare_pid;   /* the app the log line below was written in */
 
 static void spare_log(SceUID pid) {
@@ -1336,17 +1351,20 @@ static void pool_rules_begin(void) {
   if (pid != g_spare_pid || !g_spare_pid)
     spare_log(pid);
   g_spare_ok = pool_has(SPARE_POOL, SPARE_MARGIN + 0x80000);
+  g_dialog_ok = pool_has(DIALOG_POOL, DIALOG_MARGIN + 0x80000);
 }
 
 static void *ovl_alloc(int k, uint32_t size) {
   size = (size + 0xfff) & ~0xfffu;
   const int *order = is_panel_piece(k) ? k_panel_order : k_ovl_order;
-  for (int o = -1; o < OVL_POOLS; o++) {
-    /* the system's spare memory first, while it has plenty (see above) */
-    int i = o < 0 ? SPARE_POOL : order[o];
-    if (o < 0 && !g_spare_ok)
+  for (int o = -2; o < OVL_POOLS; o++) {
+    /* memory no game is using first, while it has plenty (see above):
+     * the system's spare memory, then the common dialog pool */
+    int i = o == -2 ? SPARE_POOL : o == -1 ? DIALOG_POOL : order[o];
+    if ((o == -2 && !g_spare_ok) || (o == -1 && !g_dialog_ok))
       continue;
-    if (o >= 0 && i == SPARE_POOL && g_spare_ok)
+    if (o >= 0 && ((i == SPARE_POOL && g_spare_ok) ||
+                   (i == DIALOG_POOL && g_dialog_ok)))
       continue; /* asked already */
     if (pool_is_contiguous(i) && g_hole_pid) {
       if (g_pool_off[i]) {

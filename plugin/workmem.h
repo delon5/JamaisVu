@@ -33,7 +33,8 @@ static inline int jv_work_pool_has(SceKernelMemBlockType type,
 
 /* size bytes (rounded up to pages), from, in this order:
  *  - the system's spare memory, outside every game's budget, while it
- *    has 8 MB more to give;
+ *    has 8 MB more to give; the common dialog pool, while it has 4 MB
+ *    more (a game touches it only while a system dialog is open);
  *  - the kernel's own pool, while half a megabyte more stays free in it
  *    (plenty on a console with few plugins; on the PCH-1000 it rarely
  *    has that, and the next ones are used);
@@ -50,11 +51,13 @@ static inline void *jv_work_alloc(const char *name, uint32_t size,
   /* first of all the system's spare memory - outside every game's budget
    * (menu.c, SPARE_POOL) - while it has 8 MB more to give */
   size = (size + 0xfff) & ~0xfffu;
-  {
+  for (int k = 0; k < 2; k++) {
+    /* then the common dialog pool, while it has 4 MB more to give */
+    SceKernelMemBlockType t = k ? 0x10A0D006 : 0x1050D006;
     void *sb = NULL;
-    SceUID su = ksceKernelAllocMemBlock(name, 0x1050D006, size, NULL);
+    SceUID su = ksceKernelAllocMemBlock(name, t, size, NULL);
     if (su >= 0) {
-      if (jv_work_pool_has(0x1050D006, 0x800000) &&
+      if (jv_work_pool_has(t, k ? 0x400000 : 0x800000) &&
           ksceKernelGetMemBlockBase(su, &sb) >= 0 && sb) {
         *uid = su;
         return sb;
