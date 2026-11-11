@@ -378,17 +378,6 @@ static volatile int g_sys_susp_status = -1; /* what the system passed */
 static volatile int g_own_susp;         /* JamaisVu's own call in progress */
 static uint32_t g_pause_n, g_pause_fail, g_resume_n;
 static int g_pause_last_ret;
-/* The process manager has two pairs (Vita Development Wiki, SceProcessmgr,
- * 3.60): sceKernelSuspendProcess(pid, status, pTimeout) 0xCF83C23B with
- * sceKernelResumeProcess 0xE0A9C9C4 - the system's own - and
- * sceKernelProcessDebugSuspend(pid, status) 0x6AECE4CD with
- * sceKernelProcessDebugResume 0x080CDC59, the debugger's (what the SDK
- * calls ksceKernelSuspendProcess). All four are hooked and logged;
- * JamaisVu's pause uses the pair and the status the app manager used. */
-static volatile int g_sys_susp_kind;    /* 1 the system's pair, 2 debug */
-static int g_paused_kind;               /* the pair the game was paused by */
-static int (*g_sysp_suspend)(SceUID pid, int status, int *timeout);
-static int (*g_sysp_resume)(SceUID pid);
 static int (*g_proc_suspend)(SceUID pid, int status);
 static int (*g_proc_resume)(SceUID pid);
 static int (*g_proc_status)(SceUID pid, int *status);
@@ -2552,13 +2541,10 @@ static void proc_ended(SceUID pid, const char *how) {
 /* any thread: the game JamaisVu suspended runs again */
 static void game_resume(void) {
   SceUID pid = __sync_lock_test_and_set(&g_paused_pid, 0);
-  if (!pid)
-    return;
-  int (*fn)(SceUID) = g_paused_kind == 1 ? g_sysp_resume : g_proc_resume;
-  if (!fn)
+  if (!pid || !g_proc_resume)
     return;
   g_own_susp = 1;
-  int r = fn(pid);
+  int r = g_proc_resume(pid);
   g_own_susp = 0;
   g_resume_n++;
   if (r < 0) {
@@ -2577,11 +2563,8 @@ static void game_pause_tick(void) {
       game_resume();
     return;
   }
-  int kind = g_sys_susp_kind;
   if (!g_pause_mode || !g_menu_open || g_busy || g_capture_req ||
-      g_sys_susp_status < 0 ||
-      (kind == 1 ? !g_sysp_suspend || !g_sysp_resume
-                 : kind == 2 ? !g_proc_suspend || !g_proc_resume : 1))
+      g_sys_susp_status < 0 || !g_proc_suspend || !g_proc_resume)
     return;
   SceUID pid = g_l0_pid;
   if (!pid || pid != fg_reader())
@@ -2589,15 +2572,12 @@ static void game_pause_tick(void) {
   uint32_t seq = g_model_seq;
   if ((seq & 1) || g_shown_seq != seq || now_us() - g_shown_us < 50000)
     return; /* the menu as it is now is not on the screen yet */
-  int tmo = 0;
   g_own_susp = 1;
-  int r = kind == 1 ? g_sysp_suspend(pid, g_sys_susp_status, &tmo)
-                    : g_proc_suspend(pid, g_sys_susp_status);
+  int r = g_proc_suspend(pid, g_sys_susp_status);
   g_own_susp = 0;
   g_pause_last_ret = r;
   if (r >= 0) {
     g_paused_seq = seq;
-    g_paused_kind = kind;
     g_paused_pid = pid;
     g_pause_n++;
   } else if (g_pause_fail++ == 0) {
@@ -2612,7 +2592,7 @@ static void game_pause_tick(void) {
  * to a game (the PS button, the LiveArea) is logged - who called, with
  * which status, what the process's status was before and after - and the
  * status it passed for a game is the one JamaisVu's own pause uses. */
-static tai_hook_ref_t g_susp_ref, g_resm_ref, g_ssusp_ref, g_sresm_ref;
+static tai_hook_ref_t g_susp_ref, g_resm_ref;
 static uint32_t g_susp_logged;
 
 /* the module the call came from, and its code's start */
@@ -2627,8 +2607,8 @@ static void susp_caller(uintptr_t lr, char name[0x1C + 4],
   }
 }
 
-static void susp_log(int kind, int resume, SceUID pid, int status, int tmo,
-                     int ret, int before, int after, uintptr_t lr) {
+static void susp_log(int resume, SceUID pid, int status, int ret, int before,
+                     int after, uintptr_t lr) {
   static char line[320];
   static volatile int busy;
   char name[0x1C + 4], tid[16];
@@ -2641,63 +2621,15 @@ static void susp_log(int kind, int resume, SceUID pid, int status, int tmo,
   if (ksceKernelGetProcessTitleId(pid, tid, sizeof(tid)) < 0 || !tid[0])
     snprintf(tid, sizeof(tid), "?");
   tid[sizeof(tid) - 1] = '\0';
-  snprintf(line, sizeof(line), "process manager: %s%s of 0x%08X (%s)%s, "
-           "status argument 0x%X, timeout value 0x%X -> 0x%08X, called "
-           "from %s+0x%X; the process's status 0x%X before, 0x%X after\r\n",
-           kind == 2 ? "debug " : "", resume ? "resume" : "suspend",
-           (unsigned)pid, tid, g_own_susp ? " by JamaisVu" : "",
-           (unsigned)status, (unsigned)tmo, (unsigned)ret, name,
-           (unsigned)(lr - (uintptr_t)text), (unsigned)before,
+  snprintf(line, sizeof(line), "process manager: %s of 0x%08X (%s)%s, "
+           "status argument 0x%X -> 0x%08X, called from %s+0x%X; the "
+           "process's status 0x%X before, 0x%X after\r\n",
+           resume ? "resume" : "suspend", (unsigned)pid, tid,
+           g_own_susp ? " by JamaisVu" : "", (unsigned)status, (unsigned)ret,
+           name, (unsigned)(lr - (uintptr_t)text), (unsigned)before,
            (unsigned)after);
   log_queue(line);
   __sync_lock_release(&busy);
-}
-
-/* a suspend the system made itself: is it the app manager's, of the game
- * on the screen, outside a job? Then that is what a PS button press does */
-static void susp_learn(int kind, SceUID pid, int status, int ret,
-                       uintptr_t lr) {
-  if (g_own_susp || g_busy || ret < 0 || !pid ||
-      (pid != g_l0_pid && pid != fg_reader()))
-    return;
-  char name[0x1C + 4];
-  const void *text;
-  susp_caller(lr, name, &text);
-  if (strncmp(name, "SceAppMgr", 9) != 0)
-    return;
-  g_sys_susp_kind = kind;
-  g_sys_susp_status = status;
-}
-
-static void susp_resumed(SceUID pid) {
-  if (!g_own_susp && pid && pid == g_paused_pid)
-    g_paused_pid = 0; /* the system took it over */
-}
-
-static int sys_suspend_hook(SceUID pid, int status, int *timeout) {
-  uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-  int before = -1, after = -1;
-  if (g_proc_status)
-    g_proc_status(pid, &before);
-  int r = TAI_CONTINUE(int, g_ssusp_ref, pid, status, timeout);
-  if (g_proc_status)
-    g_proc_status(pid, &after);
-  susp_learn(1, pid, status, r, lr);
-  susp_log(1, 0, pid, status, timeout ? *timeout : -1, r, before, after, lr);
-  return r;
-}
-
-static int sys_resume_hook(SceUID pid) {
-  uintptr_t lr = (uintptr_t)__builtin_return_address(0);
-  int before = -1, after = -1;
-  if (g_proc_status)
-    g_proc_status(pid, &before);
-  int r = TAI_CONTINUE(int, g_sresm_ref, pid);
-  if (g_proc_status)
-    g_proc_status(pid, &after);
-  susp_resumed(pid);
-  susp_log(1, 1, pid, 0, 0, r, before, after, lr);
-  return r;
 }
 
 static int proc_suspend_hook(SceUID pid, int status) {
@@ -2708,8 +2640,17 @@ static int proc_suspend_hook(SceUID pid, int status) {
   int r = TAI_CONTINUE(int, g_susp_ref, pid, status);
   if (g_proc_status)
     g_proc_status(pid, &after);
-  susp_learn(2, pid, status, r, lr);
-  susp_log(2, 0, pid, status, 0, r, before, after, lr);
+  /* what the system does to a game when it leaves the screen: the app
+   * manager's call (not the power manager's at a sleep, not a job's) */
+  if (!g_own_susp && !g_busy && r >= 0 && pid &&
+      (pid == g_l0_pid || pid == fg_reader())) {
+    char name[0x1C + 4];
+    const void *text;
+    susp_caller(lr, name, &text);
+    if (strncmp(name, "SceAppMgr", 9) == 0)
+      g_sys_susp_status = status;
+  }
+  susp_log(0, pid, status, r, before, after, lr);
   return r;
 }
 
@@ -2721,8 +2662,9 @@ static int proc_resume_hook(SceUID pid) {
   int r = TAI_CONTINUE(int, g_resm_ref, pid);
   if (g_proc_status)
     g_proc_status(pid, &after);
-  susp_resumed(pid);
-  susp_log(2, 1, pid, 0, 0, r, before, after, lr);
+  if (!g_own_susp && pid && pid == g_paused_pid)
+    g_paused_pid = 0; /* the system took it over */
+  susp_log(1, pid, 0, r, before, after, lr);
   return r;
 }
 
@@ -2738,34 +2680,12 @@ static void pause_install(void) {
   if (module_get_export_func(KERNEL_PID, "SceProcessmgr", 0x746EC971,
                              0x65B120B8, (uintptr_t *)&g_proc_status) < 0)
     g_proc_status = NULL;
-  if (module_get_export_func(KERNEL_PID, "SceProcessmgr", 0x7A69DE86,
-                             0xCF83C23B, (uintptr_t *)&g_sysp_suspend) < 0)
-    g_sysp_suspend = NULL;
-  if (module_get_export_func(KERNEL_PID, "SceProcessmgr", 0x7A69DE86,
-                             0xE0A9C9C4, (uintptr_t *)&g_sysp_resume) < 0)
-    g_sysp_resume = NULL;
-  if (g_proc_suspend && g_proc_resume) {
-    taiHookFunctionExportForKernel(KERNEL_PID, &g_susp_ref, "SceProcessmgr",
-                                   0x7A69DE86, 0x6AECE4CD, proc_suspend_hook);
-    taiHookFunctionExportForKernel(KERNEL_PID, &g_resm_ref, "SceProcessmgr",
-                                   0x7A69DE86, 0x080CDC59, proc_resume_hook);
-  }
-  if (g_sysp_suspend && g_sysp_resume) {
-    taiHookFunctionExportForKernel(KERNEL_PID, &g_ssusp_ref, "SceProcessmgr",
-                                   0x7A69DE86, 0xCF83C23B, sys_suspend_hook);
-    taiHookFunctionExportForKernel(KERNEL_PID, &g_sresm_ref, "SceProcessmgr",
-                                   0x7A69DE86, 0xE0A9C9C4, sys_resume_hook);
-  }
-  {
-    static char line[200];
-    snprintf(line, sizeof(line), "process manager hooks: the system's "
-             "suspend %s, resume %s; the debugger's suspend %s, resume %s\r\n",
-             g_sysp_suspend ? "found" : "NOT FOUND",
-             g_sysp_resume ? "found" : "NOT FOUND",
-             g_proc_suspend ? "found" : "NOT FOUND",
-             g_proc_resume ? "found" : "NOT FOUND");
-    log_queue(line);
-  }
+  if (!g_proc_suspend || !g_proc_resume)
+    return;
+  taiHookFunctionExportForKernel(KERNEL_PID, &g_susp_ref, "SceProcessmgr",
+                                 0x7A69DE86, 0x6AECE4CD, proc_suspend_hook);
+  taiHookFunctionExportForKernel(KERNEL_PID, &g_resm_ref, "SceProcessmgr",
+                                 0x7A69DE86, 0x080CDC59, proc_resume_hook);
 }
 
 static int proc_exit_cb(SceUID pid, void *a2, int a3) {
@@ -4006,12 +3926,9 @@ static void perf_report(void) {
     if (g_pause_mode || g_pause_n || g_pause_fail) {
       snprintf(line, sizeof(line), "    pause under the menu: %s (L in "
                "Diagnostics); the game was suspended %u times and resumed "
-               "%u times so far with the %s pair and status 0x%X, %u "
-               "suspends failed (last result 0x%08X)\r\n",
-               g_pause_mode ? "on" : "off",
+               "%u times so far with status 0x%X, %u suspends failed (last "
+               "result 0x%08X)\r\n", g_pause_mode ? "on" : "off",
                (unsigned)g_pause_n, (unsigned)g_resume_n,
-               g_sys_susp_kind == 1 ? "system's" :
-               g_sys_susp_kind == 2 ? "debugger's" : "(none seen)",
                (unsigned)(g_sys_susp_status < 0 ? 0 : g_sys_susp_status),
                (unsigned)g_pause_fail, (unsigned)g_pause_last_ret);
       log_queue(line);
