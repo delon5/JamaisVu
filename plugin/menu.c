@@ -352,6 +352,9 @@ static const char *g_plane_why; /* why the plane was not used (log) */
 static volatile int64_t g_plane_hide_us; /* when the menu left the plane */
 static int64_t now_us(void); /* defined below, used by plane_hide */
 static void close_menu(void); /* defined below, used by render_panel */
+/* when the menu was last opened and closed (for the line about how a
+ * game ended, see proc_ended) */
+static volatile int64_t g_menu_opened_us, g_menu_closed_us;
 static volatile int g_plane_panel;  /* the panel is drawn in the buffer */
 static volatile int g_plane_toast;  /* the message box is drawn in it */
 static volatile int g_render_active;
@@ -2388,6 +2391,94 @@ static int display_hook(int head, int index, const SceDisplayFrameBuf *p,
   return TAI_CONTINUE(int, g_display_ref, head, index, p, sync);
 }
 
+#ifndef JV_RELEASE
+/* How a game ended, for log.txt. Dead Nation was reported crashed twice
+ * with no psp2core written - so it was not a fault the system dumps, and
+ * nothing said whether the game left by itself or was closed. The kernel
+ * tells its process event handlers (SceProcEventForDriver, by NID; own
+ * layout of the 0x1C-byte handler table): exit = the process ended
+ * itself, kill = another one ended it (the shell). Logged for the
+ * process whose frames were last on the screen, with what JamaisVu held
+ * of memory at that moment. */
+typedef struct {
+  uint32_t size;
+  int (*create)(SceUID pid, void *a2, int a3);
+  int (*exit)(SceUID pid, void *a2, int a3);
+  int (*kill)(SceUID pid, void *a2, int a3);
+  int (*stop)(SceUID pid, int type, void *a3, int a4);
+  int (*start)(SceUID pid, int type, void *a3, int a4);
+  int (*sw)(int id, int type, void *a3, int a4);
+} JvProcEvents;
+
+static void proc_ended(SceUID pid, const char *how) {
+  /* not on the stack (the thread that ends a process is not ours, its
+   * kernel stack may be 4 KB): one buffer, one caller at a time */
+  static char line[400];
+  static volatile int busy;
+  char tid[16];
+  if (!pid || (pid != g_l0_pid && pid != fg_reader()))
+    return;
+  if (__sync_lock_test_and_set(&busy, 1))
+    return;
+  int64_t now = now_us();
+  uint32_t kfree = 0, ktotal = 0;
+  int kp = jv_kernel_pool(&kfree, &ktotal, NULL, 0);
+  memset(tid, 0, sizeof(tid));
+  if (ksceKernelGetProcessTitleId(pid, tid, sizeof(tid)) < 0 || !tid[0])
+    snprintf(tid, sizeof(tid), "?");
+  tid[sizeof(tid) - 1] = '\0';
+  int n = snprintf(line, sizeof(line), "process 0x%08X (%s) ended: %s; "
+                   "its last frame %d ms before; menu %s",
+                   (unsigned)pid, tid, how,
+                   g_l0_us ? (int)((now - g_l0_us) / 1000) : -1,
+                   g_menu_open ? "open" : "closed");
+  if (g_menu_open && g_menu_opened_us)
+    n += snprintf(line + n, sizeof(line) - n, " (opened %d ms before, %s)",
+                  (int)((now - g_menu_opened_us) / 1000),
+                  g_plane_mode ? "on the display plane"
+                               : "drawn into the frames");
+  else if (g_menu_closed_us)
+    n += snprintf(line + n, sizeof(line) - n, " (closed %d ms before)",
+                  (int)((now - g_menu_closed_us) / 1000));
+  n += snprintf(line + n, sizeof(line) - n, "; JamaisVu held %u KB of menu "
+                "memory, plane buffer %s%s", (unsigned)g_held_kb,
+                g_plane_px ? "in " : "none",
+                g_plane_px && g_plane_pool ? g_plane_pool : "");
+  if (kp == 0)
+    n += snprintf(line + n, sizeof(line) - n, "; kernel pool %u KB free",
+                  (unsigned)kfree);
+  snprintf(line + n, sizeof(line) - n, "\r\n");
+  log_queue(line);
+  __sync_lock_release(&busy);
+}
+
+static int proc_exit_cb(SceUID pid, void *a2, int a3) {
+  (void)a2;
+  (void)a3;
+  proc_ended(pid, "it ended by itself");
+  return 0;
+}
+
+static int proc_kill_cb(SceUID pid, void *a2, int a3) {
+  (void)a2;
+  (void)a3;
+  proc_ended(pid, "it was ended from outside (the system or the user)");
+  return 0;
+}
+
+static void proc_watch_install(void) {
+  static JvProcEvents ev;
+  SceUID (*reg)(const char *name, const JvProcEvents *h, int a3) = NULL;
+  if (module_get_export_func(KERNEL_PID, "SceSysmem", 0x887F19D0, 0x2A43912D,
+                             (uintptr_t *)&reg) < 0 || !reg)
+    return;
+  ev.size = sizeof(ev);
+  ev.exit = proc_exit_cb;
+  ev.kill = proc_kill_cb;
+  reg("JamaisVuProc", &ev, 0);
+}
+#endif
+
 /* ------------------------------------------------------------------------ */
 /* Controller: hide input from games while the menu is open                 */
 /* ------------------------------------------------------------------------ */
@@ -3700,12 +3791,15 @@ static int open_menu(void) {
   g_model.progress = -1;
   model_end();
   g_menu_open = 1;
+  g_menu_opened_us = now_us();
   g_open_refresh = 1;
   start_op(OP_REFRESH, 0);
   return 0;
 }
 
 static void close_menu(void) {
+  if (g_menu_open)
+    g_menu_closed_us = now_us();
   if (g_menu_open)
     perf_report(); /* this menu session's numbers, frames included */
   g_menu_open = 0;
@@ -7023,6 +7117,10 @@ int menu_init(const char *status_text) {
   CTRL_HOOKS(INSTALL_CTRL_HOOK)
 
   /* app starts/resumes: is the PSP emulator in front? (as PSV-Shell-Plus) */
+
+#ifndef JV_RELEASE
+  proc_watch_install();
+#endif
 
   /* 16 KB stacks for every thread that calls into SceIofilemgr / exFAT /
    * SceSdstor: the heartbeat had 4 KB while writing trace.bin for a minute
