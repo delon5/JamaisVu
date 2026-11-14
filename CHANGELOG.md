@@ -1,5 +1,66 @@
 # Changelog
 
+## 2.0.0-rc4 - 2026-11-14
+
+States saved with earlier versions still load. A state holds the whole
+system as it was saved, JamaisVu included, so the fixes to what happens
+*after* a load only apply to states saved with this version: after
+updating, reboot and save new states.
+
+This version needs one more file on the Memory Card: copy
+`JamaisVu_payload_616cb989.bin` to `data/JamaisVu/` (on `ux0:` or
+`uma0:`), next to `jpfont.bin`, and do not rename it. Without it the
+menu opens, names the file to copy, and does not save or load.
+
+### Fixed
+
+- **Dead Nation could close a few seconds after the menu was opened.**
+  Between frames the game gives up about 2 MB of its contiguous memory
+  for a moment and takes it back. Whenever the menu had taken any of it,
+  the game ended two to three seconds later. JamaisVu now leaves such
+  memory alone. Confirmed on a PCH-2000.
+- **The menu flickered in Dead Nation.** The game draws into frames that
+  are already on the screen, so it drew over a menu placed in those
+  frames. The menu is now shown on the display's second layer there,
+  which the game cannot draw into. Confirmed on a PCH-2000.
+- **A console restart during a save in a game that leaves the kernel
+  almost no memory** (PCH-1000 with many plugins, Persona 4 Golden). The
+  kernel ran out of its own memory while going to sleep (read from the
+  console's own kernel crash dump). JamaisVu held about 850 KB of that
+  memory at all times; it now holds 364 KB, and in that game on that
+  console the kernel has about 700 KB free where it had 228 KB. The
+  restart has not been seen since.
+
+### Changed
+
+- **The program that runs during a save or load is a separate file**,
+  `JamaisVu_payload_616cb989.bin`. It used to be part of the plugin and
+  took 149 KB of kernel memory for as long as the console ran. JamaisVu
+  checks the file's length and checksum before every use and runs
+  nothing else. Keep the file when you update later: a state saved with
+  this version brings this version back when it is loaded, and it looks
+  for its own file. States from rc3 and earlier need no file.
+- **JamaisVu uses less than half the kernel memory it did**: 364 KB
+  instead of about 850 KB. Besides the separate file, the code that does
+  not draw is built smaller, several buffers are taken only while in
+  use, and the menu font is stored at half its size with no visible
+  change.
+- **The menu takes its memory from where no game is using it.** It asks
+  first for memory outside every game's allowance, then for the memory
+  reserved for system dialogs (keyboard, save window), and only then for
+  the pools a game lives in. In the games tested it takes no kernel
+  memory while open. If a game opens a system dialog while the menu is
+  open and using that memory, the menu closes and frees it first.
+- **The second layer's picture (2 MB) is given back when the menu
+  closes.** It used to stay until the PS button was next pressed.
+- **JamaisVu no longer takes kernel memory to find out how much is
+  free.** It still uses kernel memory for the menu when nothing else has
+  room, but only while a safety margin stays free; a last-resort path
+  that ignored that margin is gone.
+- **The menu is drawn faster where it has to go into the game's
+  frames**: 10.5 ms per frame instead of 17.5 ms (Dead Nation,
+  PCH-2000).
+
 ## 2.0.0-rc3 - 2026-11-10
 
 States saved with earlier versions still load. A state holds the whole
