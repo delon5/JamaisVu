@@ -1280,7 +1280,16 @@ int main(int argc, char **argv) {
             if (strstr(ln, "more clusters are allocated")) {
               leak = 1;
             } else if (strstr(ln, "unknown entry type 0xc0") ||
-                       strstr(ln, "unknown entry type 0xc1")) {
+                       strstr(ln, "unknown entry type 0xc1") ||
+                       /* the same leftover in the words of a later
+                        * fsck.exfat (the build machines' since their
+                        * image changed): "other entry(type: 0xC0)
+                        * follows unused entry at 0x..." - the second
+                        * half of an entry block whose first half, in
+                        * the sector before, is already marked unused */
+                       (strstr(ln, "follows unused entry") &&
+                        (strstr(ln, "type: 0xC0") ||
+                         strstr(ln, "type: 0xC1")))) {
               hid = 1;
             } else {
               dangerous++;
