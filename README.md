@@ -27,7 +27,7 @@ JamaisVu writes **only to the official Memory Card**: slot files, slot info, thu
    ux0:tai/JamaisVu.skprx
    ```
 
-3. Copy `JamaisVu_payload_xxxxxxxx.bin` (the name ends in eight digits that differ between versions) to `ux0:data/JamaisVu/` (or `uma0:data/JamaisVu/` if the card is uma0). It is the program that runs during a save or load; without it the menu opens and says so, and nothing is saved or loaded.
+3. Copy `JamaisVu_payload_xxxxxxxx.bin` (the name ends in eight digits that differ between versions) to `ux0:data/JamaisVu/` (or `uma0:data/JamaisVu/` if the card is uma0), or to `ur0:data/JamaisVu/` on the console's own storage. It is the program that runs during a save or load; without it the menu opens and says so, and nothing is saved or loaded. JamaisVu only reads it from `ur0:`; it still writes nothing but the Memory Card.
 4. Optional, for Japanese game names: copy `jpfont.bin` to the same folder.
 5. Reboot. `data/JamaisVu/status.txt` on the Memory Card says `status: armed` when the plugin is active, or why it is not.
 
