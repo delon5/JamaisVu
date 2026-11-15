@@ -4127,18 +4127,20 @@ static void fg_title(char *tid, int len) {
 }
 
 /* where the payload file may lie, in the order the places are tried:
- * data/JamaisVu on the Memory Card, then ur0:data/JamaisVu (see
- * payload_get) */
+ * ur0:data/JamaisVu, then data/JamaisVu on the Memory Card (see
+ * payload_get). ur0 first: it is the console's own storage and always
+ * mounted, where the card's drive can be away for a moment (uma0 has
+ * been logged as not mounted after a wake-up). */
 #define PAYLOAD_PLACES 2
 static void payload_path(int place, char *path, int len) {
   if (place == 0)
-    jv_file_path(path, len, JV_PAYLOAD_FILE);
-  else
     snprintf(path, len, "ur0:data/JamaisVu/%s", JV_PAYLOAD_FILE);
+  else
+    jv_file_path(path, len, JV_PAYLOAD_FILE);
 }
 
 /* the payload file is there with the right length (its contents are
- * checked when it is used, see payload_get): 1 on the card, 2 in ur0,
+ * checked when it is used, see payload_get): 1 in ur0, 2 on the card,
  * 0 in neither */
 static int payload_present(void) {
   static char path[160];
@@ -6341,9 +6343,9 @@ static void fs_notes_log(void) {
  * both can lie on the card side by side.
  *
  * The file may also lie in ur0:data/JamaisVu, on the console's own
- * storage - where plugins usually are, and there whichever card is in.
- * It is only read from there: JamaisVu writes nothing but the Memory
- * Card. The card's copy is tried first. */
+ * storage - where plugins usually are, always mounted, and there
+ * whichever card is in. It is only read from there: JamaisVu writes
+ * nothing but the Memory Card. ur0's copy is tried first. */
 static SceUID g_payload_uid = -1;
 
 /* NULL: in memory, checked and handed to jv_request. Otherwise what is
@@ -7253,10 +7255,10 @@ static int worker_thread(SceSize args, void *argp) {
     int where = payload_present();
     snprintf(pl, sizeof(pl), "payload file %s (%u bytes): %s\r\n",
              JV_PAYLOAD_FILE, (unsigned)JV_PAYLOAD_SIZE,
-             where == 1 ? "on the card"
-             : where == 2 ? "in ur0:data/JamaisVu"
-             : "NOT FOUND (data/JamaisVu on the Memory Card, or "
-               "ur0:data/JamaisVu) - no save or load until it is");
+             where == 1 ? "in ur0:data/JamaisVu"
+             : where == 2 ? "on the card"
+             : "NOT FOUND (ur0:data/JamaisVu, or data/JamaisVu on the "
+               "Memory Card) - no save or load until it is");
     log_append(pl);
   }
   /* a run that never got back to the system: its trace is in trace.bin */
