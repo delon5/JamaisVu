@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0-rc4 - 2026-11-14
+## 2.0.0-rc4 - 2026-11-15
 
 States saved with earlier versions still load. A state holds the whole
 system as it was saved, JamaisVu included, so the fixes to what happens

@@ -918,12 +918,11 @@ static void plane_show(void) {
 
 /* Hiding the plane with its own alpha: measured on the PCH-2000's LCD
  * (Diagnostics, DOWN, 9203ea6: the menu gone for the 3 s, the game
- * showing, both calls accepted), and the PCH-1000's OLED works the same
- * by the user's own test. 9a36247 used it on the LCD only; the user had
- * that restriction removed, so it is used on every display. Not seen on
- * the PS TV (HDMI) yet: if a display ignored that alpha, a buffer given
- * back early would show as whatever is written there next - Diagnostics,
- * DOWN, tells on any console. */
+ * showing, both calls accepted), and the same test passed on the
+ * PCH-1000's OLED. 9a36247 used it on the LCD only; it is used on every
+ * display since. Not seen on the PS TV (HDMI) yet: if a display ignored
+ * that alpha, a buffer given back early would show as whatever is
+ * written there next - Diagnostics, DOWN, tells on any console. */
 static int plane_alpha_verified(void) {
   return g_set_merge != NULL;
 }
@@ -1423,7 +1422,7 @@ static int pool_has(int i, uint32_t size) {
  * it. So that pool is asked first - for the menu's pieces and, as one
  * physically contiguous block, for the display plane - while it still
  * has SPARE_MARGIN to give afterwards (the system starts its own apps
- * from it). Suggested by the user; what it gives is logged once per app. */
+ * from it). What it gives is logged once per app. */
 #define SPARE_POOL 5
 #define SPARE_MARGIN 0x800000
 /* Measured in Dead Nation (PCH-2000, 42032f9): that pool gave 2 MB and
