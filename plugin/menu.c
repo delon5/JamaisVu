@@ -5068,8 +5068,13 @@ static const ExtGlyphs *resolve_names(MenuSlot *fresh) {
   /* the set shown already has every letter: keep it */
   ExtGlyphs *ext = (ExtGlyphs *)g_model.ext;
   if (!ext || !ext_has_all(ext, strs, n)) {
-    jv_file_path(path, sizeof(path), "jpfont.bin");
-    SceUID fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+    /* ur0:data/JamaisVu first, then the Memory Card - the same places and
+     * order as the payload file (payload_path); only read from ur0 */
+    SceUID fd = ksceIoOpen("ur0:data/JamaisVu/jpfont.bin", SCE_O_RDONLY, 0);
+    if (fd < 0) {
+      jv_file_path(path, sizeof(path), "jpfont.bin");
+      fd = ksceIoOpen(path, SCE_O_RDONLY, 0);
+    }
     uint32_t need = 0;
     int r = fd >= 0 ? jpfont_measure(jf_read, &fd, strs, n, &need) : -1;
     ExtGlyphs *fresh_set = NULL;
@@ -5099,8 +5104,9 @@ static const ExtGlyphs *resolve_names(MenuSlot *fresh) {
     if (r < 0) {
       if (!warned) {
         warned = 1;
-        log_queue("Japanese game names: data/JamaisVu/jpfont.bin missing or "
-                  "unreadable - names shown without those characters\r\n");
+        log_queue("Japanese game names: jpfont.bin missing or unreadable "
+                  "(ur0:data/JamaisVu, or data/JamaisVu on the Memory "
+                  "Card) - names shown without those characters\r\n");
       }
       return ext; /* keep what is shown */
     }

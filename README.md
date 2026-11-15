@@ -75,7 +75,7 @@ When the savedata is on another drive (an SD2Vita, PSVSD or USB stick as ux0, wi
 - **PSP and PS1 games** (LiveArea or Adrenaline) run in the Vita's PSP emulator; JamaisVu stays out of them. No menu opens and nothing is saved.
 - **With a USB drive as ux0** (usbmc), the game comes back a few seconds later after a load than after a save: JamaisVu waits for the drive to return from the wake-up before re-reading it.
 - **After a normal sleep** (power button), usbmc's Memory Card mount drops out. JamaisVu mounts the card again within about half a second of the wake-up.
-- **Japanese game names** (kana and kanji) need `jpfont.bin` on the Memory Card; without it such names show their Latin letters or the title ID.
+- **Japanese game names** (kana and kanji) need `jpfont.bin` in `data/JamaisVu` (on `ur0:` or the Memory Card); without it such names show their Latin letters or the title ID.
 - **Dead Nation** tears its own frames, which breaks up the menu's picture there. Saving and loading work normally.
 - **Slots from the original déjàvu** (`ux0:savestate/…`) cannot be loaded.
 - **Every run is recorded** in `data/JamaisVu/log.txt` on the Memory Card (`log.old.txt` keeps the previous 64 KB). If something goes wrong, that file says what happened; please include it in a report.
