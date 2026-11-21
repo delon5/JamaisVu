@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.0.0-rc5 - 2026-11-21
+
+States saved with earlier versions still load. A state holds the whole
+system as it was saved, JamaisVu included, so the fixes to what happens
+*after* a load only apply to states saved with this version: after
+updating, reboot and save new states.
+
+The file `JamaisVu_payload_616cb989.bin` is the same as in rc4: if it is
+already on the Memory Card, there is nothing new to copy.
+
+### Changed
+
+- **`JamaisVu_payload_616cb989.bin` and `jpfont.bin` can also be placed
+  in `ur0:data/JamaisVu/`**, on the console's own storage. JamaisVu
+  looks there first and then in `data/JamaisVu/` on the Memory Card.
+  `ur0:` is always mounted, whichever card is in the console. The files
+  are only read from there: JamaisVu still writes nothing but the Memory
+  Card. A state saved with rc4 brings rc4 back when it is loaded, and
+  rc4 only looks on the Memory Card: if you keep such states, leave a
+  copy of the file on the card as well.
+
 ## 2.0.0-rc4 - 2026-11-15
 
 States saved with earlier versions still load. A state holds the whole
